@@ -1,0 +1,47 @@
+# Test Configuration - 用于测试训练链路
+
+data:
+  train_json: "/data/xhj/location/data/test_samples.json"
+  val_json: "/data/xhj/location/data/test_samples.json"
+  data_root: "/data/GoogleEarth"
+  img_size: 518
+  crop_size: 518
+  num_workers: 0
+
+model:
+  embed_dim: 1024
+  vggt_depth: 24
+  num_heads: 16
+  num_decoder_layers: 6
+  enable_bbox: true
+  enable_seg: false
+  enable_camera: true
+  enable_position: true
+  vggt_weights: null
+  freeze_patch_embed: false
+  freeze_aggregator: false
+
+training:
+  batch_size: 2
+  num_epochs: 2
+  lr_backbone: 1.0e-5
+  lr_heads: 1.0e-4
+  weight_decay: 1.0e-4
+  weight_bbox: 5.0
+  weight_giou: 2.0
+  weight_yaw: 1.0
+  weight_position: 1.0
+  weight_mask: 1.0
+  warmup_epochs: 1
+  min_lr: 1.0e-6
+  grad_clip: 1.0
+  use_amp: false
+
+checkpoint:
+  output_dir: "./output/test"
+  save_freq: 1
+  resume: null
+
+logging:
+  use_wandb: false
+  val_freq: 1

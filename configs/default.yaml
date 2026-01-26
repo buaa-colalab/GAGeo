@@ -1,0 +1,77 @@
+# Cross-View Localization Configuration
+
+# Data
+data:
+  train_json: "/data/xhj/location/data/train.json"
+  val_json: "/data/xhj/location/data/val.json"
+  data_root: "/data/GoogleEarth"
+  img_size: 518
+  crop_size: 518
+  num_workers: 4
+
+# Model
+model:
+  embed_dim: 1024
+  vggt_depth: 24
+  num_heads: 16
+  num_decoder_layers: 6
+  
+  # 多任务开关
+  enable_bbox: true
+  enable_seg: false
+  enable_camera: true
+  enable_position: true
+  
+  # 预训练权重 (放在ckpt/目录下便于管理)
+  vggt_weights: null  # 例如: ckpt/vggt.pth
+  dinov2_weights: null  # 例如: ckpt/dinov2_vitl14_reg.pth
+  freeze_patch_embed: true
+  freeze_aggregator: false
+
+# Training
+training:
+  batch_size: 4
+  num_epochs: 100
+  
+  # 学习率
+  lr_backbone: 1.0e-5
+  lr_heads: 1.0e-4
+  weight_decay: 1.0e-4
+  
+  # Loss权重
+  weight_bbox: 5.0
+  weight_giou: 2.0
+  weight_yaw: 1.0
+  weight_position: 1.0
+  weight_mask: 1.0
+  
+  # Optimizer
+  optimizer: "adamw"
+  
+  # Scheduler
+  scheduler: "cosine"
+  warmup_epochs: 5
+  min_lr: 1.0e-6
+  
+  # 梯度裁剪
+  grad_clip: 1.0
+  
+  # 混合精度
+  use_amp: true
+
+# Checkpointing
+checkpoint:
+  output_dir: "./output"
+  save_freq: 5
+  resume: null
+
+# Logging
+logging:
+  use_wandb: false
+  wandb_project: "cross-view-localization"
+  log_freq: 50
+  val_freq: 1  # 每N个epoch验证一次
+
+# Inference
+inference:
+  score_threshold: 0.5
