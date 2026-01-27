@@ -36,7 +36,7 @@ training:
   min_lr: 1.0e-6
   grad_clip: 1.0
   use_amp: true  # 启用混合精度训练以节省显存
-  gpu: "7"  # GPU设备ID，可以是 "0", "1", "0,1,2,3" 等，null表示使用所有可用GPU
+  gpu: "5,6,7"  # GPU设备ID，可以是 "0", "1", "0,1,2,3" 等，null表示使用所有可用GPU
 
 checkpoint:
   output_dir: "./output/test"
@@ -45,4 +45,14 @@ checkpoint:
 
 logging:
   use_wandb: false
+  use_tensorboard: true
+  log_freq: 10
   val_freq: 1
+
+deepspeed:
+  enabled: false
+  zero_stage: 2
+  gradient_accumulation_steps: 1
+  offload_optimizer: false
+  offload_param: false
+  activation_checkpointing: false

@@ -34,7 +34,7 @@ from utils import MultiTaskLoss, load_vggt_weights, load_dinov2_weights, freeze_
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train Cross-View Localizer with DeepSpeed')
-    parser.add_argument('--config', type=str, default='configs/default.yaml',
+    parser.add_argument('--config', type=str, default='configs/test.yaml',
                         help='Path to config file')
     parser.add_argument('--resume', type=str, default=None,
                         help='Resume from checkpoint')

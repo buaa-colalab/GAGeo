@@ -69,10 +69,8 @@ def load_model(checkpoint_path: str, cfg: dict, device: torch.device):
 
 def denormalize_image(img_tensor):
     """Denormalize image tensor for visualization."""
-    mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
-    std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
-    img = img_tensor.cpu() * std + mean
-    img = img.clamp(0, 1)
+    # 图像已经在[0,1]范围内，直接转换即可
+    img = img_tensor.cpu().clamp(0, 1)
     img = img.permute(1, 2, 0).numpy()
     return img
 
@@ -138,6 +136,17 @@ def visualize_single_sample(
     """Visualize a single sample with predictions."""
     model.eval()
     
+    # Debug: 检查图像质量
+    if sample_idx == 0:
+        print(f"\nSample {sample_idx} info:")
+        print(f"  Front view shape: {sample['front_view'].shape}")
+        print(f"  Front view range: [{sample['front_view'].min():.3f}, {sample['front_view'].max():.3f}]")
+        print(f"  Satellite view shape: {sample['satellite_view'].shape}")
+        print(f"  Satellite view range: [{sample['satellite_view'].min():.3f}, {sample['satellite_view'].max():.3f}]")
+        print(f"  Mono point: {sample['mono_point']}")
+        print(f"  City: {sample.get('city', 'N/A')}")
+        print(f"  Mono filename: {sample.get('mono_filename', 'N/A')}")
+    
     with torch.no_grad():
         # Prepare input
         front_view = sample['front_view'].unsqueeze(0).to(device)
@@ -175,9 +184,19 @@ def visualize_single_sample(
     
     # Draw mono point
     mono_pt = sample['mono_point'].numpy()
-    ax1.scatter(mono_pt[0] * img_size, mono_pt[1] * img_size, 
-                c='lime', marker='x', s=200, linewidths=3, label='Mono Point')
-    ax1.set_title(f'Front View (Sample {sample_idx})', fontsize=14)
+    # mono_point在dataset中是像素坐标，需要检查是否在合理范围内
+    h, w = front_img.shape[:2]
+    if 0 <= mono_pt[0] < w and 0 <= mono_pt[1] < h:
+        ax1.scatter(mono_pt[0], mono_pt[1], 
+                    c='lime', marker='x', s=200, linewidths=3, label='Mono Point')
+    else:
+        # 如果mono_point是归一化坐标，需要转换
+        ax1.scatter(mono_pt[0] * w, mono_pt[1] * h, 
+                    c='lime', marker='x', s=200, linewidths=3, label='Mono Point (normalized)')
+        if sample_idx == 0:
+            print(f"  Warning: mono_point seems normalized, converting to pixels")
+    
+    ax1.set_title(f'Front View (Sample {sample_idx})\n{sample.get("mono_filename", "")}', fontsize=12)
     ax1.legend(loc='upper right')
     ax1.axis('off')
     

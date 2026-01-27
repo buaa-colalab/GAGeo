@@ -71,6 +71,16 @@ logging:
   wandb_project: "cross-view-localization"
   log_freq: 50
   val_freq: 1  # 每N个epoch验证一次
+  use_tensorboard: true
+
+# DeepSpeed配置
+deepspeed:
+  enabled: false  # 是否启用DeepSpeed
+  zero_stage: 2  # ZeRO优化阶段: 0, 1, 2, 3
+  gradient_accumulation_steps: 1
+  offload_optimizer: false  # 是否将optimizer offload到CPU
+  offload_param: false  # 是否将参数offload到CPU
+  activation_checkpointing: false  # 是否启用activation checkpointing
 
 # Inference
 inference:
