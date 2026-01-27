@@ -17,7 +17,9 @@ model:
   enable_seg: false
   enable_camera: true
   enable_position: true
+  #vggt_weights: /data/xhj/location/ckpt/vggt/model.pt
   vggt_weights: null
+  dinov2_weights: /data/xhj/location/ckpt/dino_v2_l/pytorch_model.bin  # 例如: ckpt/dinov2_vitl14_reg.pth
   freeze_patch_embed: true   # 冻结DINOv2 patch embedding (~300M参数)
   freeze_aggregator: false    # 冻结VGGT aggregator (~1.2B参数)
 

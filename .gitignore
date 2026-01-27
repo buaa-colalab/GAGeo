@@ -27,9 +27,9 @@ wheels/
 *.pth
 *.pt
 ckpt/
-
+output/
 # Outputs
-outputs/
-outputs_*/
+output/
+output_*/
 logs/
 
