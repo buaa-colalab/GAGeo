@@ -22,7 +22,7 @@ model:
   freeze_aggregator: false
 
 training:
-  batch_size: 2
+  batch_size: 1  # 减小batch size以降低显存占用
   num_epochs: 2
   lr_backbone: 1.0e-5
   lr_heads: 1.0e-4
@@ -35,7 +35,8 @@ training:
   warmup_epochs: 1
   min_lr: 1.0e-6
   grad_clip: 1.0
-  use_amp: false
+  use_amp: true  # 启用混合精度训练以节省显存
+  gpu: "7"  # GPU设备ID，可以是 "0", "1", "0,1,2,3" 等，null表示使用所有可用GPU
 
 checkpoint:
   output_dir: "./output/test"

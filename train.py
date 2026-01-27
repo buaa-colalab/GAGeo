@@ -5,10 +5,14 @@ Cross-View Localization Training Script
 import argparse
 import yaml
 from pathlib import Path
+import os
 
 import torch
 import torch.nn as nn
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from torch.cuda.amp import GradScaler, autocast
@@ -21,10 +25,17 @@ from utils import MultiTaskLoss, load_vggt_weights, load_dinov2_weights, freeze_
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train Cross-View Localizer')
-    parser.add_argument('--config', type=str, default='configs/default.yaml',
+    parser.add_argument('--config', type=str, default='configs/test.yaml',
                         help='Path to config file')
     parser.add_argument('--resume', type=str, default=None,
                         help='Resume from checkpoint')
+    parser.add_argument('--gpu', type=str, default=None,
+                        help='GPU device(s) to use (e.g., "0" or "0,1,2,3")')
+    # DDP相关参数
+    parser.add_argument('--distributed', action='store_true',
+                        help='Enable distributed training')
+    parser.add_argument('--local_rank', type=int, default=-1,
+                        help='Local rank for distributed training')
     # 允许命令行覆盖配置
     parser.add_argument('--batch_size', type=int, default=None)
     parser.add_argument('--lr', type=float, default=None)
@@ -177,8 +188,37 @@ def validate(
     return avg_losses
 
 
+def setup_distributed():
+    """Initialize distributed training."""
+    if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
+        rank = int(os.environ['RANK'])
+        world_size = int(os.environ['WORLD_SIZE'])
+        local_rank = int(os.environ['LOCAL_RANK'])
+    else:
+        rank = 0
+        world_size = 1
+        local_rank = 0
+    
+    if world_size > 1:
+        dist.init_process_group(backend='nccl')
+        torch.cuda.set_device(local_rank)
+    
+    return rank, world_size, local_rank
+
+
+def cleanup_distributed():
+    """Cleanup distributed training."""
+    if dist.is_initialized():
+        dist.destroy_process_group()
+
+
 def main():
     args = parse_args()
+    
+    # Setup distributed
+    rank, world_size, local_rank = setup_distributed()
+    is_distributed = world_size > 1
+    is_main_process = rank == 0
     
     # Load config
     cfg = load_config(args.config)
@@ -194,17 +234,35 @@ def main():
         cfg['checkpoint']['output_dir'] = args.output_dir
     if args.resume:
         cfg['checkpoint']['resume'] = args.resume
+    if args.gpu:
+        cfg['training']['gpu'] = args.gpu
     
-    # Setup
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f'Using device: {device}')
+    # Setup GPU
+    if is_distributed:
+        device = torch.device(f'cuda:{local_rank}')
+        if is_main_process:
+            print(f'Distributed training on {world_size} GPUs')
+            print(f'Main process using device: {device} (GPU: {torch.cuda.get_device_name(local_rank)})')
+    else:
+        gpu_ids = cfg['training'].get('gpu', None)
+        if gpu_ids is not None:
+            os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_ids)
+            if is_main_process:
+                print(f'Set CUDA_VISIBLE_DEVICES={gpu_ids}')
+        
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        if torch.cuda.is_available() and is_main_process:
+            print(f'Using device: {device} (GPU: {torch.cuda.get_device_name(0)})')
+            print(f'Available GPUs: {torch.cuda.device_count()}')
+        elif is_main_process:
+            print(f'Using device: {device}')
     
     output_dir = Path(cfg['checkpoint']['output_dir'])
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Save config
-    with open(output_dir / 'config.yaml', 'w') as f:
-        yaml.dump(cfg, f)
+    if is_main_process:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        # Save config
+        with open(output_dir / 'config.yaml', 'w') as f:
+            yaml.dump(cfg, f)
     
     # Create datasets
     train_dataset = CrossViewDataset(
@@ -221,10 +279,15 @@ def main():
         random_crop=False,
     )
     
+    # Create samplers for distributed training
+    train_sampler = DistributedSampler(train_dataset, shuffle=True) if is_distributed else None
+    val_sampler = DistributedSampler(val_dataset, shuffle=False) if is_distributed else None
+    
     train_loader = DataLoader(
         train_dataset,
         batch_size=cfg['training']['batch_size'],
-        shuffle=True,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
         num_workers=cfg['data']['num_workers'],
         collate_fn=collate_fn,
         pin_memory=True,
@@ -235,12 +298,14 @@ def main():
         val_dataset,
         batch_size=cfg['training']['batch_size'],
         shuffle=False,
+        sampler=val_sampler,
         num_workers=cfg['data']['num_workers'],
         collate_fn=collate_fn,
         pin_memory=True,
     )
     
-    print(f'Train: {len(train_dataset)} samples, Val: {len(val_dataset)} samples')
+    if is_main_process:
+        print(f'Train: {len(train_dataset)} samples, Val: {len(val_dataset)} samples')
     
     # Create model
     model = CrossViewLocalizer(
@@ -258,19 +323,27 @@ def main():
     # Load pretrained weights (优先VGGT，其次DINOv2)
     if cfg['model'].get('vggt_weights'):
         load_vggt_weights(model, cfg['model']['vggt_weights'], load_heads=False)
-        print(f'Loaded VGGT weights from {cfg["model"]["vggt_weights"]}')
+        if is_main_process:
+            print(f'Loaded VGGT weights from {cfg["model"]["vggt_weights"]}')
     elif cfg['model'].get('dinov2_weights'):
         load_dinov2_weights(model, dinov2_path=cfg['model']['dinov2_weights'])
-        print(f'Loaded DINOv2 weights from {cfg["model"]["dinov2_weights"]}')
+        if is_main_process:
+            print(f'Loaded DINOv2 weights from {cfg["model"]["dinov2_weights"]}')
     
     # Freeze backbone
     if cfg['model']['freeze_patch_embed']:
         freeze_backbone(model, freeze_patch_embed=True, freeze_aggregator=cfg['model']['freeze_aggregator'])
-        print('Froze backbone')
+        if is_main_process:
+            print('Froze backbone')
+    
+    # Wrap with DDP
+    if is_distributed:
+        model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
     
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total = sum(p.numel() for p in model.parameters())
-    print(f'Parameters: {total/1e6:.1f}M total, {trainable/1e6:.1f}M trainable')
+    if is_main_process:
+        print(f'Parameters: {total/1e6:.1f}M total, {trainable/1e6:.1f}M trainable')
     
     # Create loss
     criterion = MultiTaskLoss(
@@ -282,8 +355,9 @@ def main():
     )
     
     # Create optimizer with different LR for backbone and heads
+    model_without_ddp = model.module if is_distributed else model
     param_groups = get_param_groups(
-        model,
+        model_without_ddp,
         lr_backbone=cfg['training']['lr_backbone'],
         lr_heads=cfg['training']['lr_heads'],
         weight_decay=cfg['training']['weight_decay'],
@@ -306,53 +380,64 @@ def main():
     best_loss = float('inf')
     if cfg['checkpoint']['resume']:
         ckpt = torch.load(cfg['checkpoint']['resume'], map_location=device)
-        model.load_state_dict(ckpt['model'])
+        model_without_ddp.load_state_dict(ckpt['model'])
         optimizer.load_state_dict(ckpt['optimizer'])
         scheduler.load_state_dict(ckpt['scheduler'])
         start_epoch = ckpt['epoch'] + 1
         best_loss = ckpt.get('best_loss', float('inf'))
-        print(f'Resumed from epoch {start_epoch}')
+        if is_main_process:
+            print(f'Resumed from epoch {start_epoch}')
     
     # Training loop
     for epoch in range(start_epoch, num_epochs):
-        print(f'\n{"="*50}')
-        print(f'Epoch {epoch}/{num_epochs}, LR: {optimizer.param_groups[0]["lr"]:.2e}')
+        if is_main_process:
+            print(f'\n{"="*50}')
+            print(f'Epoch {epoch}/{num_epochs}, LR: {optimizer.param_groups[0]["lr"]:.2e}')
+        
+        # Set epoch for distributed sampler
+        if is_distributed:
+            train_sampler.set_epoch(epoch)
         
         # Train
         train_losses = train_one_epoch(
             model, train_loader, criterion, optimizer, scaler, device, epoch, cfg
         )
-        print(f'Train - ' + ', '.join([f'{k}: {v:.4f}' for k, v in train_losses.items()]))
+        if is_main_process:
+            print(f'Train - ' + ', '.join([f'{k}: {v:.4f}' for k, v in train_losses.items()]))
         
         # Validate
         if (epoch + 1) % cfg['logging']['val_freq'] == 0:
             val_losses = validate(model, val_loader, criterion, device, cfg)
-            print(f'Val   - ' + ', '.join([f'{k}: {v:.4f}' for k, v in val_losses.items()]))
-            
-            # Save best
-            if val_losses['loss'] < best_loss:
-                best_loss = val_losses['loss']
-                torch.save({
-                    'epoch': epoch,
-                    'model': model.state_dict(),
-                    'val_losses': val_losses,
-                    'best_loss': best_loss,
-                }, output_dir / 'best.pth')
-                print(f'Saved best model (loss: {best_loss:.4f})')
+            if is_main_process:
+                print(f'Val   - ' + ', '.join([f'{k}: {v:.4f}' for k, v in val_losses.items()]))
+                
+                # Save best
+                if val_losses['loss'] < best_loss:
+                    best_loss = val_losses['loss']
+                    torch.save({
+                        'epoch': epoch,
+                        'model': model_without_ddp.state_dict(),
+                        'val_losses': val_losses,
+                        'best_loss': best_loss,
+                    }, output_dir / 'best.pth')
+                    print(f'Saved best model (loss: {best_loss:.4f})')
         
         scheduler.step()
         
         # Save checkpoint
-        if (epoch + 1) % cfg['checkpoint']['save_freq'] == 0:
+        if is_main_process and (epoch + 1) % cfg['checkpoint']['save_freq'] == 0:
             torch.save({
                 'epoch': epoch,
-                'model': model.state_dict(),
+                'model': model_without_ddp.state_dict(),
                 'optimizer': optimizer.state_dict(),
                 'scheduler': scheduler.state_dict(),
                 'best_loss': best_loss,
             }, output_dir / f'epoch_{epoch}.pth')
     
-    print(f'\nTraining completed! Best loss: {best_loss:.4f}')
+    if is_main_process:
+        print(f'\nTraining completed! Best loss: {best_loss:.4f}')
+    
+    cleanup_distributed()
 
 
 if __name__ == '__main__':
