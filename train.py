@@ -6,7 +6,7 @@ import argparse
 import yaml
 from pathlib import Path
 import os
-
+# Limit OpenBLAS threads to avoid resource exhaustion
 import torch
 import torch.nn as nn
 import torch.distributed as dist
@@ -15,12 +15,13 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from tqdm import tqdm
 
 from models import CrossViewLocalizer
 from data.dataset import CrossViewDataset, collate_fn
-from utils import MultiTaskLoss, load_vggt_weights, load_dinov2_weights, freeze_backbone, get_param_groups
+from utils import (MultiTaskLoss, load_vggt_weights, load_dinov2_weights, 
+                   freeze_backbone, get_param_groups, TensorBoardLogger)
 
 
 def parse_args():
@@ -58,6 +59,7 @@ def train_one_epoch(
     device: torch.device,
     epoch: int,
     cfg: dict,
+    tb_logger: TensorBoardLogger = None,
 ):
     """Train for one epoch."""
     model.train()
@@ -86,7 +88,7 @@ def train_one_epoch(
         optimizer.zero_grad()
         
         # Forward with AMP
-        with autocast(enabled=cfg['training']['use_amp']):
+        with autocast('cuda', enabled=cfg['training']['use_amp']):
             outputs = model(
                 front_view=front_view,
                 satellite_view=sat_view,
@@ -113,6 +115,12 @@ def train_one_epoch(
     
     # Average losses
     avg_losses = {k: v / len(dataloader) for k, v in total_losses.items()}
+    
+    # Log to TensorBoard
+    if tb_logger:
+        tb_logger.log_dict("train", avg_losses, epoch)
+        tb_logger.log_scalar("train/lr", optimizer.param_groups[0]['lr'], epoch)
+    
     return avg_losses
 
 
@@ -123,6 +131,8 @@ def validate(
     criterion: nn.Module,
     device: torch.device,
     cfg: dict,
+    epoch: int = 0,
+    tb_logger: TensorBoardLogger = None,
 ):
     """Validate the model."""
     model.eval()
@@ -148,7 +158,7 @@ def validate(
         point_coords = mono_point.unsqueeze(1)
         point_labels = torch.ones(B, 1, device=device)
         
-        with autocast(enabled=cfg['training']['use_amp']):
+        with autocast('cuda', enabled=cfg['training']['use_amp']):
             outputs = model(
                 front_view=front_view,
                 satellite_view=sat_view,
@@ -184,6 +194,10 @@ def validate(
     avg_losses['bbox_mae'] = total_bbox_error / num_samples if num_samples > 0 else 0
     avg_losses['yaw_mae'] = total_yaw_error / num_samples if num_samples > 0 else 0
     avg_losses['pos_error'] = total_pos_error / num_samples if num_samples > 0 else 0
+    
+    # Log to TensorBoard
+    if tb_logger:
+        tb_logger.log_dict("val", avg_losses, epoch)
     
     return avg_losses
 
@@ -263,6 +277,14 @@ def main():
         # Save config
         with open(output_dir / 'config.yaml', 'w') as f:
             yaml.dump(cfg, f)
+    
+    # Initialize TensorBoard logger
+    log_dir = output_dir / 'logs'
+    tb_logger = TensorBoardLogger(
+        log_dir=str(log_dir),
+        enabled=cfg['logging'].get('use_tensorboard', True),
+        rank=rank,
+    )
     
     # Create datasets
     train_dataset = CrossViewDataset(
@@ -373,7 +395,7 @@ def main():
     scheduler = SequentialLR(optimizer, [warmup_scheduler, main_scheduler], milestones=[warmup_epochs])
     
     # AMP scaler
-    scaler = GradScaler(enabled=cfg['training']['use_amp'])
+    scaler = GradScaler('cuda', enabled=cfg['training']['use_amp'])
     
     # Resume
     start_epoch = 0
@@ -400,14 +422,14 @@ def main():
         
         # Train
         train_losses = train_one_epoch(
-            model, train_loader, criterion, optimizer, scaler, device, epoch, cfg
+            model, train_loader, criterion, optimizer, scaler, device, epoch, cfg, tb_logger
         )
         if is_main_process:
             print(f'Train - ' + ', '.join([f'{k}: {v:.4f}' for k, v in train_losses.items()]))
         
         # Validate
         if (epoch + 1) % cfg['logging']['val_freq'] == 0:
-            val_losses = validate(model, val_loader, criterion, device, cfg)
+            val_losses = validate(model, val_loader, criterion, device, cfg, epoch, tb_logger)
             if is_main_process:
                 print(f'Val   - ' + ', '.join([f'{k}: {v:.4f}' for k, v in val_losses.items()]))
                 
@@ -433,6 +455,9 @@ def main():
                 'scheduler': scheduler.state_dict(),
                 'best_loss': best_loss,
             }, output_dir / f'epoch_{epoch}.pth')
+    
+    # Close TensorBoard logger
+    tb_logger.close()
     
     if is_main_process:
         print(f'\nTraining completed! Best loss: {best_loss:.4f}')

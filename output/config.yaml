@@ -1,20 +1,31 @@
 checkpoint:
-  output_dir: ./output/test
+  output_dir: ./output
   resume: null
-  save_freq: 1
+  save_freq: 5
 data:
   crop_size: 518
   data_root: /data/GoogleEarth
   img_size: 518
   num_workers: 4
-  train_json: /data/xhj/location/data/test_samples.json
-  val_json: /data/xhj/location/data/test_samples.json
+  train_json: /data/xhj/location/data/train.json
+  val_json: /data/xhj/location/data/val.json
+deepspeed:
+  activation_checkpointing: false
+  enabled: false
+  gradient_accumulation_steps: 1
+  offload_optimizer: false
+  offload_param: false
+  zero_stage: 2
+inference:
+  score_threshold: 0.5
 logging:
-  log_freq: 10
+  log_freq: 50
   use_tensorboard: true
   use_wandb: false
   val_freq: 1
+  wandb_project: cross-view-localization
 model:
+  dinov2_weights: null
   embed_dim: 1024
   enable_bbox: true
   enable_camera: true
@@ -27,15 +38,16 @@ model:
   vggt_depth: 24
   vggt_weights: null
 training:
-  batch_size: 1
-  gpu: 5,6,7
+  batch_size: 4
   grad_clip: 1.0
   lr_backbone: 1.0e-05
   lr_heads: 0.0001
   min_lr: 1.0e-06
-  num_epochs: 2
+  num_epochs: 100
+  optimizer: adamw
+  scheduler: cosine
   use_amp: true
-  warmup_epochs: 1
+  warmup_epochs: 5
   weight_bbox: 5.0
   weight_decay: 0.0001
   weight_giou: 2.0

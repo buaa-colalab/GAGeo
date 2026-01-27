@@ -6,7 +6,7 @@ data:
   data_root: "/data/GoogleEarth"
   img_size: 518
   crop_size: 518
-  num_workers: 0
+  num_workers: 4  # 增加worker数量避免主进程阻塞
 
 model:
   embed_dim: 1024
@@ -18,8 +18,8 @@ model:
   enable_camera: true
   enable_position: true
   vggt_weights: null
-  freeze_patch_embed: false
-  freeze_aggregator: false
+  freeze_patch_embed: true   # 冻结DINOv2 patch embedding (~300M参数)
+  freeze_aggregator: false    # 冻结VGGT aggregator (~1.2B参数)
 
 training:
   batch_size: 1  # 减小batch size以降低显存占用
@@ -35,7 +35,7 @@ training:
   warmup_epochs: 1
   min_lr: 1.0e-6
   grad_clip: 1.0
-  use_amp: true  # 启用混合精度训练以节省显存
+  use_amp: true  # 禁用混合精度以避免FP16类型不匹配
   gpu: "5,6,7"  # GPU设备ID，可以是 "0", "1", "0,1,2,3" 等，null表示使用所有可用GPU
 
 checkpoint:
@@ -49,10 +49,3 @@ logging:
   log_freq: 10
   val_freq: 1
 
-deepspeed:
-  enabled: false
-  zero_stage: 2
-  gradient_accumulation_steps: 1
-  offload_optimizer: false
-  offload_param: false
-  activation_checkpointing: false

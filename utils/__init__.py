@@ -5,6 +5,7 @@ from .weight_loader import (
     load_dinov2_weights, load_vggt_weights, load_checkpoint,
     freeze_backbone, get_param_groups
 )
+from .tensorboard import TensorBoardLogger
 
 __all__ = [
     'MultiTaskLoss',
@@ -20,4 +21,5 @@ __all__ = [
     'load_checkpoint',
     'freeze_backbone',
     'get_param_groups',
+    'TensorBoardLogger',
 ]

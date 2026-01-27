@@ -59,17 +59,19 @@ JSON标注文件格式：
 }
 ```
 
-## 训练
+## 快速开始
+
+### 单卡训练
 
 ```bash
-# 基本训练
-python train.py --config configs/default.yaml
+# 使用脚本（推荐）
+bash scripts/train_single.sh configs/test.yaml 7
 
-# 指定GPU
-CUDA_VISIBLE_DEVICES=0 python train.py --config configs/default.yaml
+# 或直接运行
+CUDA_VISIBLE_DEVICES=7 python train.py --config configs/test.yaml
 
 # 覆盖配置
-python train.py --config configs/default.yaml --batch_size 8 --epochs 50
+python train.py --config configs/default.yaml --batch_size 2 --epochs 50
 
 # 恢复训练
 python train.py --config configs/default.yaml --resume output/epoch_10.pth
@@ -111,3 +113,65 @@ training:
 - batch_size=4: ~35GB (需要A100)
 
 建议：启用gradient checkpointing或使用混合精度训练。
+
+## 多卡训练 (DDP)
+
+使用 PyTorch DistributedDataParallel 进行多卡训练：
+
+```bash
+# 使用脚本（推荐）
+bash scripts/train_ddp.sh configs/default.yaml "5,6,7"
+
+# 或直接使用 torchrun
+CUDA_VISIBLE_DEVICES=5,6,7 torchrun \
+    --nproc_per_node=3 \
+    train.py --config configs/default.yaml
+```
+
+### TensorBoard 监控
+
+训练日志自动保存到 `output/<exp_name>/logs/` 目录：
+
+```bash
+tensorboard --logdir ./output/test/logs --port 6006
+# 浏览器访问: http://localhost:6006
+```
+
+### 常见问题
+
+**Q: 如何调整 batch size？**
+```yaml
+training:
+  batch_size: 2  # 每卡 batch size
+# 总 batch size = batch_size × num_gpus
+```
+
+**Q: 显存不足？**
+1. 降低 `batch_size`
+2. 启用混合精度: `use_amp: true`
+3. 冻结更多参数: `freeze_aggregator: true`
+
+## 可视化
+
+```bash
+# 使用脚本
+bash scripts/visualize.sh ./output/best.pth configs/default.yaml 20 7
+
+# 或直接运行
+python vis.py \
+    --checkpoint ./output/best.pth \
+    --config configs/default.yaml \
+    --num_samples 20 \
+    --gpu 7
+```
+
+输出：
+- `sample_XXXX.png` - 每个样本的可视化（前视图+卫星图+预测）
+- `summary.png` - 误差统计图表
+
+
+# 同时输出到终端和日志文件
+CUDA_VISIBLE_DEVICES=5,6,7 torchrun --nproc_per_node=3 train.py --config configs/test.yaml 2>&1 | tee output/test/train.log
+
+# 或者只保存到文件（不显示在终端）
+CUDA_VISIBLE_DEVICES=5,6,7 torchrun --nproc_per_node=3 train.py --config configs/test.yaml > output/test/train.log 2>&1
