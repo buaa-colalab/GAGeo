@@ -371,28 +371,31 @@ def main():
             val_losses = validate(model, val_loader, criterion, accelerator, cfg, epoch, tb_logger)
             accelerator.print(f'Val   - ' + ', '.join([f'{k}: {v:.4f}' for k, v in val_losses.items()]))
             
-            # Save best
-            if accelerator.is_main_process and val_losses['loss'] < best_loss:
+            # Save best (all ranks must participate in save_state for NCCL sync)
+            if val_losses['loss'] < best_loss:
                 best_loss = val_losses['loss']
                 accelerator.save_state(output_dir / 'best')
-                # Save additional training state
-                torch.save({
-                    'epoch': epoch,
-                    'best_loss': best_loss,
-                    'val_losses': val_losses,
-                }, output_dir / 'best' / 'training_state.pt')
-                accelerator.print(f'Saved best model (loss: {best_loss:.4f})')
+                # Save additional training state (only main process)
+                if accelerator.is_main_process:
+                    torch.save({
+                        'epoch': epoch,
+                        'best_loss': best_loss,
+                        'val_losses': val_losses,
+                    }, output_dir / 'best' / 'training_state.pt')
+                    accelerator.print(f'Saved best model (loss: {best_loss:.4f})')
         
         scheduler.step()
         
-        # Save checkpoint
-        if accelerator.is_main_process and (epoch + 1) % cfg['checkpoint']['save_freq'] == 0:
+        # Save checkpoint (all ranks must participate in save_state for NCCL sync)
+        if (epoch + 1) % cfg['checkpoint']['save_freq'] == 0:
             save_dir = output_dir / f'epoch_{epoch}'
             accelerator.save_state(save_dir)
-            torch.save({
-                'epoch': epoch,
-                'best_loss': best_loss,
-            }, save_dir / 'training_state.pt')
+            # Save additional training state (only main process)
+            if accelerator.is_main_process:
+                torch.save({
+                    'epoch': epoch,
+                    'best_loss': best_loss,
+                }, save_dir / 'training_state.pt')
     
     # Close TensorBoard logger
     if tb_logger:

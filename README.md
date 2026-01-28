@@ -38,18 +38,6 @@ location/
 └── test.py                 # 测试脚本
 ```
 
-## 预训练权重
-
-将预训练权重下载到 `ckpt/` 目录：
-
-```bash
-# VGGT权重
-wget -O ckpt/vggt.pth <vggt_url>
-
-# DINOv2权重 (可选，VGGT已包含)
-wget -O ckpt/dinov2_vitl14_reg.pth <dinov2_url>
-```
-
 ## 数据格式
 
 JSON标注文件格式：
@@ -96,14 +84,6 @@ training:
   mixed_precision: bf16      # RTX 4090推荐bf16
 ```
 
-### 过拟合测试（验证训练流程）
-
-在单样本上快速过拟合，验证模型和训练代码无误：
-
-```bash
-# 2卡过拟合测试
-bash scripts/train_accelerate.sh configs/test.yaml "0,1"
-
 # 预期：loss快速降到接近0
 ```
 
@@ -149,13 +129,6 @@ training:
 
 ### Batch Size 调优
 
-**显存利用率参考**（RTX 4090, DeepSpeed ZeRO-2, BF16）：
-
-| batch_size | 显存占用 | 利用率 | 推荐 |
-|-----------|---------|--------|------|
-| 4 | ~14GB | 58% | 保守 |
-| **6** | **~18GB** | **75%** | **推荐** |
-| 8 | ~22GB | 90% | 激进（可能OOM） |
 
 **有效batch size计算**：
 ```
@@ -224,19 +197,7 @@ tensorboard --logdir ./output/test/logs --port 6006
 # 浏览器访问: http://localhost:6006
 ```
 
-### 常见问题
 
-**Q: 如何调整 batch size？**
-```yaml
-training:
-  batch_size: 2  # 每卡 batch size
-# 总 batch size = batch_size × num_gpus
-```
-
-**Q: 显存不足？**
-1. 降低 `batch_size`
-2. 启用混合精度: `use_amp: true`
-3. 冻结更多参数: `freeze_aggregator: true`
 
 ## 可视化
 
@@ -262,3 +223,6 @@ CUDA_VISIBLE_DEVICES=5,6,7 torchrun --nproc_per_node=3 train.py --config configs
 
 # 或者只保存到文件（不显示在终端）
 CUDA_VISIBLE_DEVICES=5,6,7 torchrun --nproc_per_node=3 train.py --config configs/test.yaml > output/test/train.log 2>&1
+
+
+tmux capture-pane -t location -p -S - | tail -n 10000 > error_log.txt
