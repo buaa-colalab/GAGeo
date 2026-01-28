@@ -33,3 +33,6 @@ output/
 output_*/
 logs/
 
+data/train.json
+data/val.json
+data/test.json

@@ -131,6 +131,11 @@ class CameraHead(nn.Module):
         if sat_camera_token.dim() == 2:
             sat_camera_token = sat_camera_token.unsqueeze(1)  # [B, 1, C]
 
+        # Cast to model dtype for mixed precision compatibility
+        target_dtype = self.front_norm.weight.dtype
+        front_camera_token = front_camera_token.to(dtype=target_dtype)
+        sat_camera_token = sat_camera_token.to(dtype=target_dtype)
+
         # ============ Cross-view fusion ============
         # Front camera token attends to satellite camera token
         front_norm = self.front_norm(front_camera_token)

@@ -197,8 +197,12 @@ class Aggregator(nn.Module):
         if C_in != 3:
             raise ValueError(f"Expected 3 input channels, got {C_in}")
 
+        # Cast input to model dtype for mixed precision compatibility (DeepSpeed fp16)
+        target_dtype = self.camera_token.dtype
+        images = images.to(dtype=target_dtype)
+
         # Normalize images and reshape for patch embed
-        images = (images - self._resnet_mean) / self._resnet_std
+        images = (images - self._resnet_mean.to(dtype=target_dtype)) / self._resnet_std.to(dtype=target_dtype)
 
         # Reshape to [B*S, C, H, W] for patch embedding
         images = images.view(B * S, C_in, H, W)

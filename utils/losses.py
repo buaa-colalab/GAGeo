@@ -65,6 +65,18 @@ class MultiTaskLoss(nn.Module):
                 'masks': [B, 1, H, W],
             }
         """
+        # Cast targets to match output dtype for mixed precision compatibility
+        # Get dtype from any output tensor
+        target_dtype = None
+        for v in outputs.values():
+            if isinstance(v, torch.Tensor):
+                target_dtype = v.dtype
+                break
+        
+        if target_dtype is not None:
+            targets = {k: v.to(dtype=target_dtype) if isinstance(v, torch.Tensor) else v 
+                      for k, v in targets.items()}
+        
         losses = {}
         total = 0.0
         

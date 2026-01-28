@@ -69,6 +69,11 @@ class CrossAttentionLayer(nn.Module):
         Returns:
             [B, N_q, C]
         """
+        # Cast to model dtype for mixed precision compatibility
+        target_dtype = self.norm1.weight.dtype
+        query = query.to(dtype=target_dtype)
+        key_value = key_value.to(dtype=target_dtype)
+        
         attn_out, _ = self.cross_attn(
             query, key_value, key_value,
             key_padding_mask=key_padding_mask

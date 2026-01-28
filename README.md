@@ -24,11 +24,17 @@ location/
 │   ├── box_ops.py          # BBox操作
 │   └── weight_loader.py    # 权重加载 (VGGT/DINOv2)
 ├── configs/                # 配置文件
-│   ├── default.yaml        # 默认配置
-│   └── test.yaml           # 测试配置
+│   ├── default.yaml        # 默认配置（推荐用于DeepSpeed训练）
+│   ├── test.yaml           # 过拟合测试配置
+│   └── accelerate_deepspeed_zero2.yaml  # Accelerate配置
+├── scripts/                # 训练脚本
+│   ├── train_accelerate.sh # Accelerate + DeepSpeed训练（推荐）
+│   ├── train_ddp.sh        # DDP训练
+│   └── train_single.sh     # 单卡训练
 ├── ckpt/                   # 预训练权重 (手动下载)
 ├── output/                 # 训练输出
-├── train.py                # 训练脚本
+├── train_accelerate.py     # Accelerate训练脚本（推荐）
+├── train.py                # DDP训练脚本
 └── test.py                 # 测试脚本
 ```
 
@@ -61,20 +67,54 @@ JSON标注文件格式：
 
 ## 快速开始
 
-### 单卡训练
+### 推荐：Accelerate + DeepSpeed 训练
+
+**适用场景**：不冻结aggregator，需要显存优化
 
 ```bash
-# 使用脚本（推荐）
-bash scripts/train_single.sh configs/test.yaml 7
+# 安装依赖
+pip install accelerate deepspeed
 
-# 或直接运行
-CUDA_VISIBLE_DEVICES=7 python train.py --config configs/test.yaml
+# 6卡训练（推荐）
+bash scripts/train_accelerate.sh configs/default.yaml "0,1,2,3,4,5"
 
-# 覆盖配置
-python train.py --config configs/default.yaml --batch_size 2 --epochs 50
+# 4卡训练
+bash scripts/train_accelerate.sh configs/default.yaml "0,1,2,3"
 
 # 恢复训练
-python train.py --config configs/default.yaml --resume output/epoch_10.pth
+bash scripts/train_accelerate.sh configs/default.yaml "0,1,2,3,4,5" --resume output/checkpoint_epoch_10
+```
+
+**关键配置** (`configs/default.yaml`)：
+```yaml
+model:
+  freeze_aggregator: false  # 必须设为false才需要DeepSpeed
+
+training:
+  batch_size: 6              # 每卡batch size（根据显存调整）
+  gradient_accumulation_steps: 4
+  mixed_precision: bf16      # RTX 4090推荐bf16
+```
+
+### 过拟合测试（验证训练流程）
+
+在单样本上快速过拟合，验证模型和训练代码无误：
+
+```bash
+# 2卡过拟合测试
+bash scripts/train_accelerate.sh configs/test.yaml "0,1"
+
+# 预期：loss快速降到接近0
+```
+
+### 单卡训练（仅用于调试）
+
+```bash
+# 使用脚本
+bash scripts/train_single.sh configs/default.yaml 7
+
+# 或直接运行
+CUDA_VISIBLE_DEVICES=7 python train.py --config configs/default.yaml
 ```
 
 ## 多任务Loss
@@ -105,21 +145,68 @@ training:
   weight_yaw: 1.0               # yaw loss权重
 ```
 
-## 显存需求
+## 训练配置详解
 
-模型约1.5B参数，训练时显存需求：
-- batch_size=1: ~15GB
-- batch_size=2: ~22GB
-- batch_size=4: ~35GB (需要A100)
+### Batch Size 调优
 
-建议：启用gradient checkpointing或使用混合精度训练。
+**显存利用率参考**（RTX 4090, DeepSpeed ZeRO-2, BF16）：
+
+| batch_size | 显存占用 | 利用率 | 推荐 |
+|-----------|---------|--------|------|
+| 4 | ~14GB | 58% | 保守 |
+| **6** | **~18GB** | **75%** | **推荐** |
+| 8 | ~22GB | 90% | 激进（可能OOM） |
+
+**有效batch size计算**：
+```
+有效batch = batch_size × num_gpus × gradient_accumulation_steps
+示例: 6 × 6 × 4 = 144
+```
+
+**调优原则**：
+- ✅ 目标显存利用率：80-85%（留15-20%缓冲）
+- ✅ 有效batch size：64-256（视觉任务推荐范围）
+- ❌ 不是越大越好：过大batch会降低泛化能力
+
+### 混合精度训练
+
+**推荐使用 BF16**（适用于 RTX 3090/4090, A100, H100）：
+
+| 精度类型 | 优势 | 劣势 | 推荐场景 |
+|---------|------|------|---------|
+| **BF16** | ✅ 数值稳定，无需loss scaling<br>✅ 动态范围大，不易溢出<br>✅ 代码简洁 | ❌ 需要Ampere+架构 | **RTX 4090 (推荐)** |
+| FP16 | ✅ 所有GPU支持 | ❌ 需要loss scaling<br>❌ 易溢出，需要更多dtype转换 | 旧GPU (V100等) |
+
+配置方式（`configs/default.yaml`）：
+```yaml
+training:
+  use_amp: true
+  mixed_precision: bf16  # 或 "fp16"
+```
+
+### DeepSpeed ZeRO-2 显存优化
+
+- **优化内容**: 优化器状态分片（每个GPU只存储部分优化器状态）
+- **适用场景**: 不冻结aggregator，多卡 RTX 4090
+- **显存节省**: 相比DDP节省约40%显存
+
+**关键参数**（在训练配置文件中设置）：
+```yaml
+model:
+  freeze_aggregator: false  # DeepSpeed主要用于此场景
+
+training:
+  batch_size: 6                      # 每卡batch size
+  gradient_accumulation_steps: 4     # 梯度累积步数
+  mixed_precision: bf16              # 混合精度类型
+```
 
 ## 多卡训练 (DDP)
 
-使用 PyTorch DistributedDataParallel 进行多卡训练：
+**适用场景**：冻结aggregator时的轻量训练
 
 ```bash
-# 使用脚本（推荐）
+# 使用脚本
 bash scripts/train_ddp.sh configs/default.yaml "5,6,7"
 
 # 或直接使用 torchrun

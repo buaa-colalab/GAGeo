@@ -89,6 +89,7 @@ def train_one_epoch(
         
         # Forward with AMP
         with autocast('cuda', enabled=cfg['training']['use_amp']):
+            #print('use amp')
             outputs = model(
                 front_view=front_view,
                 satellite_view=sat_view,

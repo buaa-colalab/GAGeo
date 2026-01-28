@@ -127,6 +127,11 @@ class PositionHead(nn.Module):
         """
         B = front_features.shape[0]
 
+        # Cast to model dtype for mixed precision compatibility
+        target_dtype = self.front_norm.weight.dtype
+        front_features = front_features.to(dtype=target_dtype)
+        sat_features = sat_features.to(dtype=target_dtype)
+
         # Normalize features
         front_feat = self.front_norm(front_features)  # [B, P, C]
         sat_feat = self.sat_norm(sat_features)        # [B, P, C]
@@ -286,6 +291,11 @@ class PositionHeadWithCameraToken(nn.Module):
             front_camera_token = front_camera_token.unsqueeze(1)
         if sat_camera_token.dim() == 2:
             sat_camera_token = sat_camera_token.unsqueeze(1)
+
+        # Cast to model dtype for mixed precision compatibility
+        target_dtype = self.front_norm.weight.dtype
+        front_camera_token = front_camera_token.to(dtype=target_dtype)
+        sat_camera_token = sat_camera_token.to(dtype=target_dtype)
 
         # Cross-view fusion
         front_norm = self.front_norm(front_camera_token)

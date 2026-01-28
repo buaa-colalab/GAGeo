@@ -1,12 +1,12 @@
-# Test Configuration - 用于测试训练链路
+# Overfit Test Configuration - 在单样本上过拟合测试模型
 
 data:
-  train_json: "/data/xhj/location/data/test_samples.json"
-  val_json: "/data/xhj/location/data/test_samples.json"
+  train_json: "/data/xhj/location/data/single.json"
+  val_json: "/data/xhj/location/data/single.json"
   data_root: "/data/GoogleEarth"
   img_size: 518
   crop_size: 518
-  num_workers: 4  # 增加worker数量避免主进程阻塞
+  num_workers: 2
 
 model:
   embed_dim: 1024
@@ -17,37 +17,44 @@ model:
   enable_seg: false
   enable_camera: true
   enable_position: true
-  #vggt_weights: /data/xhj/location/ckpt/vggt/model.pt
-  vggt_weights: null
-  dinov2_weights: /data/xhj/location/ckpt/dino_v2_l/pytorch_model.bin  # 例如: ckpt/dinov2_vitl14_reg.pth
-  freeze_patch_embed: true   # 冻结DINOv2 patch embedding (~300M参数)
-  freeze_aggregator: false    # 冻结VGGT aggregator (~1.2B参数)
+  vggt_weights: /data/xhj/location/ckpt/vggt/model.pt
+  dinov2_weights: null
+  freeze_patch_embed: true
+  freeze_aggregator: true
 
 training:
-  batch_size: 1  # 减小batch size以降低显存占用
-  num_epochs: 2
-  lr_backbone: 1.0e-5
-  lr_heads: 1.0e-4
-  weight_decay: 1.0e-4
+  batch_size: 1
+  gradient_accumulation_steps: 1
+  num_epochs: 200
+  
+  # 过拟合测试：使用较大学习率快速收敛
+  lr_backbone: 1.0e-4
+  lr_heads: 1.0e-3
+  weight_decay: 0.0
+  
   weight_bbox: 5.0
   weight_giou: 2.0
   weight_yaw: 1.0
   weight_position: 1.0
   weight_mask: 1.0
-  warmup_epochs: 1
+  
+  optimizer: "adamw"
+  scheduler: "cosine"
+  warmup_epochs: 0
   min_lr: 1.0e-6
   grad_clip: 1.0
-  use_amp: true  # 禁用混合精度以避免FP16类型不匹配
-  gpu: "5,6,7"  # GPU设备ID，可以是 "0", "1", "0,1,2,3" 等，null表示使用所有可用GPU
+  
+  use_amp: true
+  mixed_precision: bf16
+
+  gpu: "5,6"
 
 checkpoint:
-  output_dir: "./output/test"
-  save_freq: 1
+  output_dir: "./output/overfit_test"
+  save_freq: 20
   resume: null
 
 logging:
-  use_wandb: false
-  use_tensorboard: true
-  log_freq: 10
   val_freq: 1
+  use_tensorboard: true
 

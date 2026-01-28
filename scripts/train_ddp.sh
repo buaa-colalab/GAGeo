@@ -23,6 +23,10 @@ export OPENBLAS_NUM_THREADS=4
 export MKL_NUM_THREADS=4
 export OMP_NUM_THREADS=4
 
-torchrun --nproc_per_node=$NUM_GPUS train.py --config $CONFIG
+# Use random port to avoid conflicts with other running processes
+MASTER_PORT=$((29500 + RANDOM % 1000))
+echo "Using master port: $MASTER_PORT"
+
+torchrun --nproc_per_node=$NUM_GPUS --master_port=$MASTER_PORT train.py --config $CONFIG
 
 echo "Training completed!"
