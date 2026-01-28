@@ -3,9 +3,9 @@
 # Usage: bash scripts/train_accelerate.sh [TRAINING_CONFIG] [GPU_IDS]
 
 set -e
-export OPENBLAS_NUM_THREADS=4
-export MKL_NUM_THREADS=4
-export OMP_NUM_THREADS=4
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OMP_NUM_THREADS=1
 
 # ============================================
 # Training Parameters (from config file)

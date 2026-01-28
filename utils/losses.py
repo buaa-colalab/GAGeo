@@ -111,8 +111,17 @@ class MultiTaskLoss(nn.Module):
             pred = pred[:, 0, :]  # [B, N, 4] -> [B, 4]
         
         l1 = F.l1_loss(pred, target)
-        giou = generalized_box_iou(box_cxcywh_to_xyxy(pred), box_cxcywh_to_xyxy(target))
+        
+        # Clamp box coordinates to valid range [0, 1] for numerical stability
+        pred_clamped = torch.clamp(pred, 0.0, 1.0)
+        target_clamped = torch.clamp(target, 0.0, 1.0)
+        
+        giou = generalized_box_iou(box_cxcywh_to_xyxy(pred_clamped), box_cxcywh_to_xyxy(target_clamped))
         l_giou = (1 - torch.diag(giou)).mean()
+        
+        # Clamp GIoU loss to prevent extreme values (GIoU is in [-1, 1], so loss is in [0, 2])
+        l_giou = torch.clamp(l_giou, 0.0, 2.0)
+        
         return l1, l_giou
     
     def _mask_loss(self, pred: torch.Tensor, target: torch.Tensor):
@@ -128,5 +137,11 @@ class MultiTaskLoss(nn.Module):
     
     def _yaw_loss(self, pred: torch.Tensor, target: torch.Tensor):
         """周期性角度loss，处理[-pi, pi]边界"""
+        # atan2(sin, cos) is numerically stable for any input, no need to clamp
         diff = torch.atan2(torch.sin(pred - target), torch.cos(pred - target))
-        return (diff ** 2).mean()
+        loss = (diff ** 2).mean()
+        
+        # Clamp loss to reasonable range (max angular error is pi, so max loss is pi^2 ≈ 9.87)
+        loss = torch.clamp(loss, 0.0, 10.0)
+        
+        return loss

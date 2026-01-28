@@ -7,7 +7,7 @@ data:
   data_root: "/data/GoogleEarth"
   img_size: 518
   crop_size: 518
-  num_workers: 4
+  num_workers: 2  # Reduced from 4 to prevent thread exhaustion with 6 GPUs
 
 # Model
 model:

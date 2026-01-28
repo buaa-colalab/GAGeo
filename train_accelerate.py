@@ -4,6 +4,7 @@ Supports DeepSpeed ZeRO for memory-efficient training of large models.
 """
 
 import argparse
+import math
 import yaml
 from pathlib import Path
 import os
@@ -41,6 +42,7 @@ def train_one_epoch(
     dataloader: DataLoader,
     criterion: nn.Module,
     optimizer: torch.optim.Optimizer,
+    scheduler,
     accelerator: Accelerator,
     epoch: int,
     cfg: dict,
@@ -80,13 +82,29 @@ def train_one_epoch(
             losses = criterion(outputs, targets)
             loss = losses['loss']
         
+        # Check for NaN/Inf in loss before backward
+        if not torch.isfinite(loss):
+            accelerator.print(f"WARNING: Non-finite loss detected at batch {batch_idx}: {loss.item()}")
+            accelerator.print(f"Losses: {', '.join([f'{k}={v.item():.4f}' for k, v in losses.items()])}")
+            optimizer.zero_grad()
+            continue
+        
         # Backward with gradient accumulation handled by Accelerate
         accelerator.backward(loss)
         
         if accelerator.sync_gradients:
-            accelerator.clip_grad_norm_(model.parameters(), cfg['training']['grad_clip'])
+            # Clip gradients and check for anomalies
+            total_norm = accelerator.clip_grad_norm_(model.parameters(), cfg['training']['grad_clip'])
+            
+            # Check gradient norm (handles both Tensor and float return types)
+            norm_value = total_norm.item() if isinstance(total_norm, torch.Tensor) else total_norm
+            if not math.isfinite(norm_value):
+                accelerator.print(f"WARNING: Non-finite gradient norm at batch {batch_idx}, skipping update")
+                optimizer.zero_grad()
+                continue
         
         optimizer.step()
+        scheduler.step()  # Per-step LR update for smooth warmup
         optimizer.zero_grad()
         
         # Accumulate losses (gather across processes)
@@ -327,18 +345,31 @@ def main():
     )
     optimizer = AdamW(param_groups)
     
-    # Create scheduler with warmup
+    # Note: Scheduler will be created after prepare() to get correct number of steps per epoch
     num_epochs = cfg['training']['num_epochs']
     warmup_epochs = cfg['training']['warmup_epochs']
     
-    warmup_scheduler = LinearLR(optimizer, start_factor=0.1, total_iters=warmup_epochs)
-    main_scheduler = CosineAnnealingLR(optimizer, T_max=num_epochs - warmup_epochs, eta_min=cfg['training']['min_lr'])
-    scheduler = SequentialLR(optimizer, [warmup_scheduler, main_scheduler], milestones=[warmup_epochs])
-    
     # Prepare with Accelerator (handles DDP/DeepSpeed wrapping)
-    model, optimizer, train_loader, val_loader, scheduler = accelerator.prepare(
-        model, optimizer, train_loader, val_loader, scheduler
+    model, optimizer, train_loader, val_loader = accelerator.prepare(
+        model, optimizer, train_loader, val_loader
     )
+    
+    # Create scheduler with per-step warmup (after prepare to get correct steps per epoch)
+    num_training_steps = len(train_loader) * num_epochs
+    num_warmup_steps = len(train_loader) * warmup_epochs
+    
+    from torch.optim.lr_scheduler import LambdaLR
+    
+    def lr_lambda(current_step: int):
+        if current_step < num_warmup_steps:
+            # Linear warmup from 0 to 1
+            return float(current_step) / float(max(1, num_warmup_steps))
+        # Cosine decay after warmup
+        progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
+        return max(0.0, 0.5 * (1.0 + torch.cos(torch.pi * progress)))
+    
+    scheduler = LambdaLR(optimizer, lr_lambda)
+    scheduler = accelerator.prepare(scheduler)
     
     # Resume
     start_epoch = 0
@@ -362,9 +393,10 @@ def main():
         # Train
         with accelerator.accumulate(model):
             train_losses = train_one_epoch(
-                model, train_loader, criterion, optimizer, accelerator, epoch, cfg, tb_logger
+                model, train_loader, criterion, optimizer, scheduler, accelerator, epoch, cfg, tb_logger
             )
         accelerator.print(f'Train - ' + ', '.join([f'{k}: {v:.4f}' for k, v in train_losses.items()]))
+        accelerator.print(f'LR - backbone: {optimizer.param_groups[0]["lr"]:.2e}, heads: {optimizer.param_groups[1]["lr"]:.2e}')
         
         # Validate
         if (epoch + 1) % cfg['logging']['val_freq'] == 0:
@@ -383,8 +415,6 @@ def main():
                         'val_losses': val_losses,
                     }, output_dir / 'best' / 'training_state.pt')
                     accelerator.print(f'Saved best model (loss: {best_loss:.4f})')
-        
-        scheduler.step()
         
         # Save checkpoint (all ranks must participate in save_state for NCCL sync)
         if (epoch + 1) % cfg['checkpoint']['save_freq'] == 0:

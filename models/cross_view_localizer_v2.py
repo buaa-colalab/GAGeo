@@ -196,7 +196,9 @@ class CrossViewLocalizer(nn.Module):
         B = front_view.shape[0]
 
         # ============ Step 1: Stack views ============
-        images = torch.stack([front_view, satellite_view], dim=1)  # [B, 2, 3, H, W]
+        # Note: satellite_view first as reference frame, front_view second
+        # This matches VGGT convention where first image is reference for camera pose
+        images = torch.stack([satellite_view, front_view], dim=1)  # [B, 2, 3, H, W]
 
         # ============ Step 2: VGGT Alternating Attention ============
         vggt_outputs, patch_start_idx = self.vggt(images)
@@ -206,17 +208,17 @@ class CrossViewLocalizer(nn.Module):
         # Get last layer features
         features = vggt_outputs[-1]  # [B, 2, P_total, 2*C]
 
-        # Split front and satellite features
-        front_features = features[:, 0]  # [B, P_total, 2*C]
-        sat_features = features[:, 1]    # [B, P_total, 2*C]
+        # Split satellite and front features (satellite is index 0, front is index 1)
+        sat_features = features[:, 0]    # [B, P_total, 2*C] - reference frame
+        front_features = features[:, 1]  # [B, P_total, 2*C]
 
         # Extract only patch tokens (remove camera and register tokens)
         front_patch_features = front_features[:, patch_start_idx:]  # [B, P, 2*C]
         sat_patch_features = sat_features[:, patch_start_idx:]      # [B, P, 2*C]
 
         # Extract camera tokens (index 0) for CameraHead
+        sat_camera_token = sat_features[:, 0]      # [B, 2*C] - reference frame
         front_camera_token = front_features[:, 0]  # [B, 2*C]
-        sat_camera_token = sat_features[:, 0]      # [B, 2*C]
 
         # ============ Step 3: Encode Geometry Prompts ============
         sparse_embeddings, dense_embeddings = self.prompt_encoder(
