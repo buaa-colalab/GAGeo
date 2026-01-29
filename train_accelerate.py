@@ -16,6 +16,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from tqdm import tqdm
 from accelerate import Accelerator
 from accelerate.utils import set_seed
+from transformers import get_scheduler
 
 from models import CrossViewLocalizer
 from data.dataset import CrossViewDataset, collate_fn
@@ -46,7 +47,6 @@ def train_one_epoch(
     accelerator: Accelerator,
     epoch: int,
     cfg: dict,
-    tb_logger: TensorBoardLogger = None,
 ):
     """Train for one epoch with Accelerate."""
     model.train()
@@ -55,77 +55,84 @@ def train_one_epoch(
     pbar = tqdm(dataloader, desc=f'Epoch {epoch}', disable=not accelerator.is_main_process)
     
     for batch_idx, batch in enumerate(pbar):
-        # Data is already on device via Accelerate
-        front_view = batch['front_view']
-        sat_view = batch['satellite_view']
-        mono_point = batch['mono_point']
-        
-        # 准备targets
-        targets = {
-            'sat_bbox': batch['sat_bbox'],
-            'yaw_radians': batch['yaw_radians'],
-            'camera_position': batch['camera_position'],
-        }
-        
-        # 准备point prompt
-        B = front_view.shape[0]
-        point_coords = mono_point.unsqueeze(1)  # [B, 1, 2]
-        point_labels = torch.ones(B, 1, device=front_view.device)  # 正点
-        
-        # Forward with automatic mixed precision via Accelerate
-        with accelerator.autocast():
-            outputs = model(
-                front_view=front_view,
-                satellite_view=sat_view,
-                points=(point_coords, point_labels),
-            )
-            losses = criterion(outputs, targets)
-            loss = losses['loss']
-        
-        # Check for NaN/Inf in loss before backward
-        if not torch.isfinite(loss):
-            accelerator.print(f"WARNING: Non-finite loss detected at batch {batch_idx}: {loss.item()}")
-            accelerator.print(f"Losses: {', '.join([f'{k}={v.item():.4f}' for k, v in losses.items()])}")
-            optimizer.zero_grad()
-            continue
-        
-        # Backward with gradient accumulation handled by Accelerate
-        accelerator.backward(loss)
-        
-        if accelerator.sync_gradients:
-            # Clip gradients and check for anomalies
-            total_norm = accelerator.clip_grad_norm_(model.parameters(), cfg['training']['grad_clip'])
+        with accelerator.accumulate(model):
+            # Data is already on device via Accelerate
+            front_view = batch['front_view']
+            sat_view = batch['satellite_view']
+            mono_point = batch['mono_point']
             
-            # Check gradient norm (handles both Tensor and float return types)
-            norm_value = total_norm.item() if isinstance(total_norm, torch.Tensor) else total_norm
-            if not math.isfinite(norm_value):
-                accelerator.print(f"WARNING: Non-finite gradient norm at batch {batch_idx}, skipping update")
-                optimizer.zero_grad()
-                continue
+            # 准备targets
+            targets = {
+                'sat_bbox': batch['sat_bbox'],
+                'yaw_radians': batch['yaw_radians'],
+                'camera_position': batch['camera_position'],
+            }
+            
+            # 准备point prompt
+            B = front_view.shape[0]
+            point_coords = mono_point.unsqueeze(1)  # [B, 1, 2]
+            point_labels = torch.ones(B, 1, device=front_view.device)  # 正点
+            
+            # Forward with automatic mixed precision via Accelerate
+            with accelerator.autocast():
+                outputs = model(
+                    front_view=front_view,
+                    satellite_view=sat_view,
+                    points=(point_coords, point_labels),
+                )
+                losses = criterion(outputs, targets)
+                loss = losses['loss']
+            
+            # Backward with gradient accumulation handled by Accelerate
+            accelerator.backward(loss)
+            
+            # Only clip and check gradients when accumulation is complete
+            # if accelerator.sync_gradients:
+            #     total_norm = accelerator.clip_grad_norm_(model.parameters(), cfg['training']['grad_clip'])
+                
+            #     # Check gradient norm for anomalies (silently skip bad updates)
+            #     norm_value = total_norm.item() if isinstance(total_norm, torch.Tensor) else total_norm
+            #     if not math.isfinite(norm_value):
+            #         optimizer.zero_grad()
+            #         continue
+            
+            optimizer.step()
+            scheduler.step()
+            optimizer.zero_grad()
         
-        optimizer.step()
-        scheduler.step()  # Per-step LR update for smooth warmup
-        optimizer.zero_grad()
-        
-        # Accumulate losses (gather across processes)
+        # Accumulate losses locally (no communication overhead)
         for k, v in losses.items():
             if k not in total_losses:
                 total_losses[k] = 0.0
-            # Use accelerator.gather for proper averaging across GPUs
-            gathered_v = accelerator.gather(v.detach()).mean()
-            total_losses[k] += gathered_v.item()
+            total_losses[k] += v.item()
+        
+        # Log per-batch metrics for detailed training curves
+        if accelerator.sync_gradients:
+            global_step = epoch * len(dataloader) + batch_idx
+            accelerator.log({
+                "train_batch/loss": loss.item(),
+                "train_batch/lr": scheduler.get_last_lr()[0],
+            }, step=global_step)
         
         # Update progress bar
         if accelerator.is_main_process:
             pbar.set_postfix({k: f'{v.item():.4f}' for k, v in losses.items()})
     
-    # Average losses
-    avg_losses = {k: v / len(dataloader) for k, v in total_losses.items()}
+    # Synchronize losses across processes at epoch end
+    avg_losses = {}
+    for k, v in total_losses.items():
+        avg_loss = torch.tensor(v / len(dataloader), device=accelerator.device)
+        avg_loss = accelerator.reduce(avg_loss, reduction="mean")
+        avg_losses[k] = avg_loss.item()
     
-    # Log to TensorBoard
-    if tb_logger and accelerator.is_main_process:
-        tb_logger.log_dict("train", avg_losses, epoch)
-        tb_logger.log_scalar("train/lr", optimizer.param_groups[0]['lr'], epoch)
+    # Log to Accelerate's built-in tracker
+    accelerator.log({
+        f"train/{k}": v for k, v in avg_losses.items()
+    }, step=epoch)
+    accelerator.log({
+        "train/lr_backbone": optimizer.param_groups[0]['lr'],
+        "train/lr_heads": optimizer.param_groups[1]['lr'],
+    }, step=epoch)
     
     return avg_losses
 
@@ -138,16 +145,14 @@ def validate(
     accelerator: Accelerator,
     cfg: dict,
     epoch: int = 0,
-    tb_logger: TensorBoardLogger = None,
 ):
     """Validate the model."""
     model.eval()
     
     total_losses = {}
-    total_bbox_error = 0.0
-    total_yaw_error = 0.0
-    total_pos_error = 0.0
-    num_samples = 0
+    all_bbox_errors = []
+    all_yaw_errors = []
+    all_pos_errors = []
     
     for batch in tqdm(dataloader, desc='Validation', disable=not accelerator.is_main_process):
         front_view = batch['front_view']
@@ -163,7 +168,6 @@ def validate(
         B = front_view.shape[0]
         point_coords = mono_point.unsqueeze(1)
         point_labels = torch.ones(B, 1, device=front_view.device)
-        
         with accelerator.autocast():
             outputs = model(
                 front_view=front_view,
@@ -172,39 +176,52 @@ def validate(
             )
             losses = criterion(outputs, targets)
         
-        # Accumulate losses
+        # Accumulate losses locally
         for k, v in losses.items():
             if k not in total_losses:
                 total_losses[k] = 0.0
-            gathered_v = accelerator.gather(v.detach()).mean()
-            total_losses[k] += gathered_v.item()
+            total_losses[k] += v.item()
         
-        # Compute metrics
+        # Compute metrics per sample
         if 'pred_boxes' in outputs:
             pred_boxes = outputs['pred_boxes'][:, 0, :] if outputs['pred_boxes'].dim() == 3 else outputs['pred_boxes']
-            bbox_error = (pred_boxes - targets['sat_bbox']).abs().mean()
-            total_bbox_error += accelerator.gather(bbox_error).mean().item() * B
+            bbox_error = (pred_boxes - targets['sat_bbox']).abs().mean(dim=1)
+            all_bbox_errors.append(bbox_error)
         
         if 'yaw_radians' in outputs:
             yaw_diff = outputs['yaw_radians'] - targets['yaw_radians']
             yaw_diff = torch.atan2(torch.sin(yaw_diff), torch.cos(yaw_diff))
-            yaw_error = yaw_diff.abs().mean()
-            total_yaw_error += accelerator.gather(yaw_error).mean().item() * B
+            yaw_error = yaw_diff.abs()
+            all_yaw_errors.append(yaw_error)
         
         if 'position' in outputs:
-            pos_error = (outputs['position'] - targets['camera_position']).norm(dim=-1).mean()
-            total_pos_error += accelerator.gather(pos_error).mean().item() * B
-        
-        num_samples += B * accelerator.num_processes
+            pos_error = (outputs['position'] - targets['camera_position']).norm(dim=-1)
+            all_pos_errors.append(pos_error)
     
-    avg_losses = {k: v / len(dataloader) for k, v in total_losses.items()}
-    avg_losses['bbox_mae'] = total_bbox_error / num_samples if num_samples > 0 else 0
-    avg_losses['yaw_mae'] = total_yaw_error / num_samples if num_samples > 0 else 0
-    avg_losses['pos_error'] = total_pos_error / num_samples if num_samples > 0 else 0
+    # Synchronize losses across processes
+    avg_losses = {}
+    for k, v in total_losses.items():
+        avg_loss = torch.tensor(v / len(dataloader), device=accelerator.device)
+        avg_loss = accelerator.reduce(avg_loss, reduction="mean")
+        avg_losses[k] = avg_loss.item()
     
-    # Log to TensorBoard
-    if tb_logger and accelerator.is_main_process:
-        tb_logger.log_dict("val", avg_losses, epoch)
+    # Gather all metrics across processes for proper averaging
+    if all_bbox_errors:
+        all_bbox_errors = accelerator.gather_for_metrics(torch.cat(all_bbox_errors))
+        avg_losses['bbox_mae'] = all_bbox_errors.mean().item()
+    
+    if all_yaw_errors:
+        all_yaw_errors = accelerator.gather_for_metrics(torch.cat(all_yaw_errors))
+        avg_losses['yaw_mae'] = all_yaw_errors.mean().item()
+    
+    if all_pos_errors:
+        all_pos_errors = accelerator.gather_for_metrics(torch.cat(all_pos_errors))
+        avg_losses['pos_error'] = all_pos_errors.mean().item()
+    
+    # Log to Accelerate's built-in tracker
+    accelerator.log({
+        f"val/{k}": v for k, v in avg_losses.items()
+    }, step=epoch)
     
     return avg_losses
 
@@ -251,12 +268,26 @@ def main():
             yaml.dump(cfg, f)
         accelerator.print(f"Output directory: {output_dir}")
     
-    # Initialize TensorBoard logger (only on main process)
-    tb_logger = TensorBoardLogger(
-        log_dir=str(log_dir),
-        enabled=cfg['logging'].get('use_tensorboard', True),
-        rank=0 if accelerator.is_main_process else 1,  # Only main process logs
-    )
+    # Initialize Accelerate's tracker (replaces manual TensorBoard logger)
+    if accelerator.is_main_process and cfg['logging'].get('use_tensorboard', True):
+        # Flatten config for TensorBoard (only keep serializable values)
+        flat_config = {
+            "batch_size": cfg['training']['batch_size'],
+            "gradient_accumulation_steps": cfg['training']['gradient_accumulation_steps'],
+            "num_epochs": cfg['training']['num_epochs'],
+            "lr_backbone": cfg['training']['lr_backbone'],
+            "lr_heads": cfg['training']['lr_heads'],
+            "weight_decay": cfg['training']['weight_decay'],
+            "grad_clip": cfg['training']['grad_clip'],
+            "warmup_epochs": cfg['training']['warmup_epochs'],
+            "embed_dim": cfg['model']['embed_dim'],
+            "vggt_depth": cfg['model']['vggt_depth'],
+            "num_heads": cfg['model']['num_heads'],
+        }
+        accelerator.init_trackers(
+            project_name="cross_view_localization",
+            config=flat_config,
+        )
     
     # Create datasets
     train_dataset = CrossViewDataset(
@@ -358,17 +389,12 @@ def main():
     num_training_steps = len(train_loader) * num_epochs
     num_warmup_steps = len(train_loader) * warmup_epochs
     
-    from torch.optim.lr_scheduler import LambdaLR
-    
-    def lr_lambda(current_step: int):
-        if current_step < num_warmup_steps:
-            # Linear warmup from 0 to 1
-            return float(current_step) / float(max(1, num_warmup_steps))
-        # Cosine decay after warmup
-        progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
-        return max(0.0, 0.5 * (1.0 + torch.cos(torch.pi * progress)))
-    
-    scheduler = LambdaLR(optimizer, lr_lambda)
+    scheduler = get_scheduler(
+        name="cosine",
+        optimizer=optimizer,
+        num_warmup_steps=num_warmup_steps,
+        num_training_steps=num_training_steps,
+    )
     scheduler = accelerator.prepare(scheduler)
     
     # Resume
@@ -391,16 +417,15 @@ def main():
         accelerator.print(f'Epoch {epoch}/{num_epochs}, LR: {optimizer.param_groups[0]["lr"]:.2e}')
         
         # Train
-        with accelerator.accumulate(model):
-            train_losses = train_one_epoch(
-                model, train_loader, criterion, optimizer, scheduler, accelerator, epoch, cfg, tb_logger
-            )
+        train_losses = train_one_epoch(
+            model, train_loader, criterion, optimizer, scheduler, accelerator, epoch, cfg
+        )
         accelerator.print(f'Train - ' + ', '.join([f'{k}: {v:.4f}' for k, v in train_losses.items()]))
         accelerator.print(f'LR - backbone: {optimizer.param_groups[0]["lr"]:.2e}, heads: {optimizer.param_groups[1]["lr"]:.2e}')
         
         # Validate
         if (epoch + 1) % cfg['logging']['val_freq'] == 0:
-            val_losses = validate(model, val_loader, criterion, accelerator, cfg, epoch, tb_logger)
+            val_losses = validate(model, val_loader, criterion, accelerator, cfg, epoch)
             accelerator.print(f'Val   - ' + ', '.join([f'{k}: {v:.4f}' for k, v in val_losses.items()]))
             
             # Save best (all ranks must participate in save_state for NCCL sync)
@@ -427,9 +452,8 @@ def main():
                     'best_loss': best_loss,
                 }, save_dir / 'training_state.pt')
     
-    # Close TensorBoard logger
-    if tb_logger:
-        tb_logger.close()
+    # End tracking
+    accelerator.end_training()
     
     accelerator.print(f'\nTraining completed! Best loss: {best_loss:.4f}')
 
