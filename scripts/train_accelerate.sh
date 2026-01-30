@@ -15,7 +15,7 @@ TRAINING_CONFIG=${1:-"configs/default.yaml"}
 # ============================================
 # Accelerate Parameters (hardware setup)
 # ============================================
-GPUS=${2:-"0,1,2,3,4,5,6,7"}
+GPUS=${2:-"0,1,2,3"}
 NUM_GPUS=$(echo $GPUS | tr ',' '\n' | wc -l)
 
 # Accelerate config file
