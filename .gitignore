@@ -36,4 +36,5 @@ logs/
 data/train.json
 data/val.json
 data/test.json
+data/cesium_drone_dataset.json
 visualizations/

@@ -15,13 +15,21 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
-from torch.amp import GradScaler, autocast
+from torch.cuda.amp import autocast, GradScaler
+import torch.optim as optim
 from tqdm import tqdm
 
+from data import CrossViewDataset, collate_fn
 from models import CrossViewLocalizer
-from data.dataset import CrossViewDataset, collate_fn
-from utils import (MultiTaskLoss, load_vggt_weights, load_dinov2_weights, 
-                   freeze_backbone, get_param_groups, TensorBoardLogger)
+from utils import (
+    MultiTaskLoss, 
+    load_vggt_weights, 
+    load_dinov2_weights, 
+    freeze_backbone, 
+    get_param_groups, 
+    TensorBoardLogger
+)
+from utils.prompt_utils import prepare_random_prompt
 
 
 def parse_args():
@@ -71,7 +79,6 @@ def train_one_epoch(
         # Move to device
         front_view = batch['front_view'].to(device)
         sat_view = batch['satellite_view'].to(device)
-        mono_point = batch['mono_point'].to(device)
         
         # 准备targets
         targets = {
@@ -80,10 +87,8 @@ def train_one_epoch(
             'camera_position': batch['camera_position'].to(device),
         }
         
-        # 准备point prompt
-        B = front_view.shape[0]
-        point_coords = mono_point.unsqueeze(1)  # [B, 1, 2]
-        point_labels = torch.ones(B, 1, device=device)  # 正点
+        # 随机选择一种prompt输入（模拟真实场景：point/bbox/mask三选一）
+        points, boxes, masks = prepare_random_prompt(batch, device)
         
         optimizer.zero_grad()
         
@@ -93,7 +98,9 @@ def train_one_epoch(
             outputs = model(
                 front_view=front_view,
                 satellite_view=sat_view,
-                points=(point_coords, point_labels),
+                points=points,
+                boxes=boxes,
+                masks=masks,
             )
             losses = criterion(outputs, targets)
             loss = losses['loss']
@@ -144,10 +151,9 @@ def validate(
     total_pos_error = 0.0
     num_samples = 0
     
-    for batch in tqdm(dataloader, desc='Validation'):
+    for batch_idx, batch in enumerate(tqdm(dataloader, desc='Validation')):
         front_view = batch['front_view'].to(device)
         sat_view = batch['satellite_view'].to(device)
-        mono_point = batch['mono_point'].to(device)
         
         targets = {
             'sat_bbox': batch['sat_bbox'].to(device),
@@ -155,15 +161,32 @@ def validate(
             'camera_position': batch['camera_position'].to(device),
         }
         
-        B = front_view.shape[0]
-        point_coords = mono_point.unsqueeze(1)
-        point_labels = torch.ones(B, 1, device=device)
+        # 验证时测试所有三种prompt类型（轮流使用）
+        prompt_type = batch_idx % 3  # 0: point, 1: bbox, 2: mask
+        
+        if prompt_type == 0:
+            # Point prompt
+            B = front_view.shape[0]
+            mono_point = batch['mono_point'].to(device)
+            point_coords = mono_point.unsqueeze(1)
+            point_labels = torch.ones(B, 1, device=device)
+            points, boxes, masks = (point_coords, point_labels), None, None
+        elif prompt_type == 1:
+            # Bbox prompt
+            from utils.prompt_utils import prepare_random_prompt
+            points, boxes, masks = prepare_random_prompt(batch, device, prompt_types=['bbox'])
+        else:
+            # Mask prompt
+            from utils.prompt_utils import prepare_random_prompt
+            points, boxes, masks = prepare_random_prompt(batch, device, prompt_types=['mask'])
         
         with autocast('cuda', enabled=cfg['training']['use_amp']):
             outputs = model(
                 front_view=front_view,
                 satellite_view=sat_view,
-                points=(point_coords, point_labels),
+                points=points,
+                boxes=boxes,
+                masks=masks,
             )
             losses = criterion(outputs, targets)
         

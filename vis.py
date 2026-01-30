@@ -76,11 +76,17 @@ def visualize_sample(model, sample, device, img_size, output_path, show):
         front_view = sample['front_view'].unsqueeze(0).to(device)
         sat_view = sample['satellite_view'].unsqueeze(0).to(device)
         mono_point = sample['mono_point'].unsqueeze(0).to(device)
+        mono_mask = sample['mono_mask'].unsqueeze(0).to(device) if 'mono_mask' in sample else None
         
         point_coords = mono_point.unsqueeze(1)
         point_labels = torch.ones(1, 1, device=device)
         
-        outputs = model(front_view=front_view, satellite_view=sat_view, points=(point_coords, point_labels))
+        outputs = model(
+            front_view=front_view, 
+            satellite_view=sat_view, 
+            points=(point_coords, point_labels),
+            masks=mono_mask
+        )
     
     pred_bbox = outputs['pred_boxes'][0, 0].cpu().numpy() if 'pred_boxes' in outputs else None
     pred_yaw = outputs['yaw_radians'][0].cpu().item() if 'yaw_radians' in outputs else None

@@ -64,6 +64,7 @@ def evaluate(model, dataloader, criterion, device):
         front_view = batch['front_view'].to(device)
         sat_view = batch['satellite_view'].to(device)
         mono_point = batch['mono_point'].to(device)
+        mono_mask = batch['mono_mask'].to(device) if 'mono_mask' in batch else None
         
         B = front_view.shape[0]
         point_coords = mono_point.unsqueeze(1)
@@ -73,7 +74,8 @@ def evaluate(model, dataloader, criterion, device):
         outputs = model(
             front_view=front_view,
             satellite_view=sat_view,
-            points=(point_coords, point_labels)
+            points=(point_coords, point_labels),
+            masks=mono_mask
         )
         
         # Prepare targets

@@ -22,7 +22,13 @@
 set -e
 
 # Load your conda environment
-source ~/run/miniconda3/envs/filtre
+source ~/run/miniconda3/bin/activate
+
+# Activate your environment
+conda activate filtre
+
+# Load CUDA module (required for DeepSpeed)
+module load cuda
 
 # Configuration
 TRAINING_CONFIG=${1:-"configs/default.yaml"}

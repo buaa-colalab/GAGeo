@@ -9,6 +9,7 @@ import random
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
+import cv2
 import numpy as np
 import torch
 from PIL import Image
@@ -87,12 +88,20 @@ class CrossViewDataset(Dataset):
         mono_bbox = np.array(item['mono_bbox'], dtype=np.float32)  # [x, y, w, h]
         sat_bbox = np.array(item['sate_bbox'], dtype=np.float32)
         
+        # 解码segmentation为mask
+        mono_mask = self._decode_segmentation(item['mono_segmentation'])
+        
         # 相机位置和yaw
         camera_position = np.array(item.get('camera_position', [self.sat_size/2, self.sat_size/2]), dtype=np.float32)
         yaw_degrees = float(item['rotation'])
         yaw_radians = np.deg2rad(yaw_degrees)
         
-        # Crop卫星图
+        # Resize mono图像和mask到目标尺寸
+        mono_img, mono_point, mono_bbox, mono_mask = self._resize_mono(
+            mono_img, mono_point, mono_bbox, mono_mask
+        )
+        
+        # Crop卫星图（不再处理sat_mask）
         if self.crop_sat:
             sat_img, sat_bbox, camera_position, crop_offset = self._crop_satellite(
                 sat_img, sat_bbox, camera_position
@@ -111,11 +120,15 @@ class CrossViewDataset(Dataset):
         # 归一化camera position到[0, 1]
         camera_position_norm = camera_position / np.array([sat_tensor.shape[2], sat_tensor.shape[1]], dtype=np.float32)
         
+        # 转换mono_mask为tensor
+        mono_mask_tensor = torch.from_numpy(mono_mask).unsqueeze(0).float()  # [1, H, W]
+        
         return {
             'front_view': mono_tensor,
             'satellite_view': sat_tensor,
             'mono_point': torch.from_numpy(mono_point),
             'mono_bbox': torch.from_numpy(mono_bbox_norm),
+            'mono_mask': mono_mask_tensor,
             'sat_bbox': torch.from_numpy(sat_bbox_norm),
             'camera_position': torch.from_numpy(camera_position_norm),
             'yaw_radians': torch.tensor(yaw_radians, dtype=torch.float32),
@@ -130,6 +143,82 @@ class CrossViewDataset(Dataset):
         """加载图像"""
         img_path = self.data_root / city / view_type / filename
         return Image.open(img_path).convert('RGB')
+    
+    def _decode_segmentation(self, segmentation) -> np.ndarray:
+        """解码segmentation为mask"""
+        if segmentation is None:
+            # 如果没有segmentation，返回全零mask
+            return np.zeros((self.mono_size, self.mono_size), dtype=np.uint8)
+        
+        if isinstance(segmentation, dict) and 'counts' in segmentation:
+            # RLE格式
+            mask = mask_utils.decode(segmentation)
+            return mask.astype(np.uint8)
+        elif isinstance(segmentation, list) and len(segmentation) > 0:
+            # Polygon格式，转换为mask
+            # 获取图像尺寸
+            if 'size' in segmentation:
+                h, w = segmentation['size']
+            else:
+                # 从polygon坐标推断尺寸
+                polygon = segmentation[0] if isinstance(segmentation[0], list) else segmentation
+                coords = np.array(polygon).reshape(-1, 2)
+                h = int(coords[:, 1].max()) + 1
+                w = int(coords[:, 0].max()) + 1
+            
+            # 创建空mask
+            mask = np.zeros((h, w), dtype=np.uint8)
+            
+            # 绘制polygon
+            for poly in (segmentation if isinstance(segmentation[0], list) else [segmentation]):
+                pts = np.array(poly).reshape(-1, 2).astype(np.int32)
+                cv2.fillPoly(mask, [pts], 1)
+            
+            return mask
+        else:
+            # 未知格式，返回全零mask
+            return np.zeros((self.mono_size, self.mono_size), dtype=np.uint8)
+    
+    def _resize_mono(
+        self,
+        mono_img: Image.Image,
+        mono_point: np.ndarray,
+        mono_bbox: np.ndarray,
+        mono_mask: np.ndarray,
+    ) -> Tuple[Image.Image, np.ndarray, np.ndarray, np.ndarray]:
+        """Resize mono图像和mask到目标尺寸，调整坐标"""
+        W, H = mono_img.size
+        
+        # 如果已经是目标尺寸，直接返回
+        if W == self.mono_size and H == self.mono_size:
+            return mono_img, mono_point, mono_bbox, mono_mask
+        
+        # Resize图像
+        resized = mono_img.resize((self.mono_size, self.mono_size), Image.BILINEAR)
+        
+        # Resize mask (使用最近邻插值保持二值性)
+        resized_mask = cv2.resize(
+            mono_mask, 
+            (self.mono_size, self.mono_size), 
+            interpolation=cv2.INTER_NEAREST
+        )
+        
+        # 计算缩放比例
+        scale_x = self.mono_size / W
+        scale_y = self.mono_size / H
+        
+        # 调整坐标
+        adj_point = mono_point.copy()
+        adj_point[0] = mono_point[0] * scale_x
+        adj_point[1] = mono_point[1] * scale_y
+        
+        adj_bbox = mono_bbox.copy()
+        adj_bbox[0] = mono_bbox[0] * scale_x  # x
+        adj_bbox[1] = mono_bbox[1] * scale_y  # y
+        adj_bbox[2] = mono_bbox[2] * scale_x  # width
+        adj_bbox[3] = mono_bbox[3] * scale_y  # height
+        
+        return resized, adj_point, adj_bbox, resized_mask
     
     def _crop_satellite(
         self,
@@ -157,10 +246,12 @@ class CrossViewDataset(Dataset):
             left = np.clip(cx - cs // 2, 0, W - cs)
             top = np.clip(cy - cs // 2, 0, H - cs)
         
-        # Crop并resize
+        # Crop图像
         cropped = sat_img.crop((left, top, left + cs, top + cs))
+        
         scale = 1.0
         if cs != self.crop_size:
+            # Resize图像
             cropped = cropped.resize((self.crop_size, self.crop_size), Image.BILINEAR)
             scale = self.crop_size / cs
         
@@ -205,6 +296,7 @@ def collate_fn(batch: List[Dict]) -> Dict:
     satellite_views = torch.stack([item['satellite_view'] for item in batch])
     mono_points = torch.stack([item['mono_point'] for item in batch])
     mono_bboxes = torch.stack([item['mono_bbox'] for item in batch])
+    mono_masks = torch.stack([item['mono_mask'] for item in batch])
     sat_bboxes = torch.stack([item['sat_bbox'] for item in batch])
     camera_positions = torch.stack([item['camera_position'] for item in batch])
     yaw_radians = torch.stack([item['yaw_radians'] for item in batch])
@@ -216,6 +308,7 @@ def collate_fn(batch: List[Dict]) -> Dict:
         'satellite_view': satellite_views,
         'mono_point': mono_points,
         'mono_bbox': mono_bboxes,
+        'mono_mask': mono_masks,
         'sat_bbox': sat_bboxes,
         'camera_position': camera_positions,
         'yaw_radians': yaw_radians,

@@ -1,10 +1,11 @@
-# Cross-View Localization Configuration
+# Cross-View Localization Configuration - Mixed Dataset (GoogleEarth + Cesium)
 
 # Data
 data:
-  train_json: "/data/xhj/location/data/train.json"
-  val_json: "/data/xhj/location/data/val.json"
-  data_root: "/data/GoogleEarth"
+  # 混合数据集 - 需要先用脚本合并两个数据集
+  train_json: "/data/xhj/location/data/mixed_train_dataset.json"
+  val_json: "/data/xhj/location/data/mixed_val_dataset.json"
+  data_root: "/data"  # 根目录，包含GoogleEarth/和cesium/output/
   img_size: 518
   crop_size: 518
   num_workers: 1  # Reduced from 4 to prevent thread exhaustion with 8 GPUs
@@ -64,7 +65,7 @@ training:
 
 # Checkpointing
 checkpoint:
-  output_dir: "./output"
+  output_dir: "./output_mixed"
   save_freq: 5
   resume: null
 

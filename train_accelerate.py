@@ -19,9 +19,17 @@ from accelerate.utils import set_seed
 from transformers import get_scheduler
 
 from models import CrossViewLocalizer
-from data.dataset import CrossViewDataset, collate_fn
-from utils import (MultiTaskLoss, load_vggt_weights, load_dinov2_weights, 
-                   freeze_backbone, get_param_groups, TensorBoardLogger)
+from data import CrossViewDataset, collate_fn
+from utils import (
+    MultiTaskLoss,
+    load_vggt_weights,
+    load_dinov2_weights,
+    freeze_backbone,
+    get_param_groups,
+    TensorBoardLogger,
+)
+from utils.prompt_utils import prepare_random_prompt
+from utils.visualize import visualize_validation_samples
 
 
 def parse_args():
@@ -59,26 +67,25 @@ def train_one_epoch(
             # Data is already on device via Accelerate
             front_view = batch['front_view']
             sat_view = batch['satellite_view']
-            mono_point = batch['mono_point']
             
-            # 准备targets
+            # 准备targets (不包含mask，因为目前数据不准确)
             targets = {
                 'sat_bbox': batch['sat_bbox'],
                 'yaw_radians': batch['yaw_radians'],
                 'camera_position': batch['camera_position'],
             }
             
-            # 准备point prompt
-            B = front_view.shape[0]
-            point_coords = mono_point.unsqueeze(1)  # [B, 1, 2]
-            point_labels = torch.ones(B, 1, device=front_view.device)  # 正点
+            # 随机选择一种prompt输入（模拟真实场景：point/bbox/mask三选一）
+            points, boxes, masks = prepare_random_prompt(batch, accelerator.device)
             
             # Forward with automatic mixed precision via Accelerate
             with accelerator.autocast():
                 outputs = model(
                     front_view=front_view,
                     satellite_view=sat_view,
-                    points=(point_coords, point_labels),
+                    points=points,
+                    boxes=boxes,
+                    masks=masks,
                 )
                 losses = criterion(outputs, targets)
                 loss = losses['loss']
@@ -157,7 +164,6 @@ def validate(
     for batch in tqdm(dataloader, desc='Validation', disable=not accelerator.is_main_process):
         front_view = batch['front_view']
         sat_view = batch['satellite_view']
-        mono_point = batch['mono_point']
         
         targets = {
             'sat_bbox': batch['sat_bbox'],
@@ -165,7 +171,9 @@ def validate(
             'camera_position': batch['camera_position'],
         }
         
+        # 验证时使用point prompt（最常见的输入）
         B = front_view.shape[0]
+        mono_point = batch['mono_point']
         point_coords = mono_point.unsqueeze(1)
         point_labels = torch.ones(B, 1, device=front_view.device)
         with accelerator.autocast():
@@ -173,6 +181,8 @@ def validate(
                 front_view=front_view,
                 satellite_view=sat_view,
                 points=(point_coords, point_labels),
+                boxes=None,
+                masks=None,
             )
             losses = criterion(outputs, targets)
         
@@ -222,6 +232,12 @@ def validate(
     accelerator.log({
         f"val/{k}": v for k, v in avg_losses.items()
     }, step=epoch)
+    
+    # Visualize samples (only on main process, configurable frequency)
+    vis_freq = cfg['logging'].get('vis_freq', 5)
+    num_vis_samples = cfg['logging'].get('num_vis_samples', 10)
+    if epoch % vis_freq == 0:
+        visualize_validation_samples(model, dataloader, accelerator, cfg, epoch, num_vis_samples)
     
     return avg_losses
 
