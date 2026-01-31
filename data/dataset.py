@@ -47,6 +47,7 @@ class CrossViewDataset(Dataset):
         crop_size: int = 518,
         random_crop: bool = True,
         transform: Optional[callable] = None,
+        test_mode: bool = False,  # 测试模式：图像已经是crop好的518x518
     ):
         """
         Args:
@@ -58,6 +59,7 @@ class CrossViewDataset(Dataset):
             crop_size: crop后的尺寸
             random_crop: 训练时随机crop，测试时中心crop
             transform: 额外的数据增强
+            test_mode: 测试模式，图像已经是crop好的518x518，跳过crop逻辑
         """
         self.data_root = Path(data_root)
         self.mono_size = mono_size
@@ -66,6 +68,7 @@ class CrossViewDataset(Dataset):
         self.crop_size = crop_size
         self.random_crop = random_crop
         self.transform = transform
+        self.test_mode = test_mode
         
         # 加载数据
         with open(json_path, 'r') as f:
@@ -101,8 +104,11 @@ class CrossViewDataset(Dataset):
             mono_img, mono_point, mono_bbox, mono_mask
         )
         
-        # Crop卫星图（不再处理sat_mask）
-        if self.crop_sat:
+        # Crop卫星图（测试模式下跳过crop）
+        if self.test_mode:
+            # 测试模式：图像已经是crop好的，直接使用
+            crop_offset = np.array([0, 0], dtype=np.float32)
+        elif self.crop_sat:
             sat_img, sat_bbox, camera_position, crop_offset = self._crop_satellite(
                 sat_img, sat_bbox, camera_position
             )
@@ -145,39 +151,13 @@ class CrossViewDataset(Dataset):
         return Image.open(img_path).convert('RGB')
     
     def _decode_segmentation(self, segmentation) -> np.ndarray:
-        """解码segmentation为mask"""
+        """解码RLE格式的segmentation为mask"""
         if segmentation is None:
-            # 如果没有segmentation，返回全零mask
             return np.zeros((self.mono_size, self.mono_size), dtype=np.uint8)
         
-        if isinstance(segmentation, dict) and 'counts' in segmentation:
-            # RLE格式
-            mask = mask_utils.decode(segmentation)
-            return mask.astype(np.uint8)
-        elif isinstance(segmentation, list) and len(segmentation) > 0:
-            # Polygon格式，转换为mask
-            # 获取图像尺寸
-            if 'size' in segmentation:
-                h, w = segmentation['size']
-            else:
-                # 从polygon坐标推断尺寸
-                polygon = segmentation[0] if isinstance(segmentation[0], list) else segmentation
-                coords = np.array(polygon).reshape(-1, 2)
-                h = int(coords[:, 1].max()) + 1
-                w = int(coords[:, 0].max()) + 1
-            
-            # 创建空mask
-            mask = np.zeros((h, w), dtype=np.uint8)
-            
-            # 绘制polygon
-            for poly in (segmentation if isinstance(segmentation[0], list) else [segmentation]):
-                pts = np.array(poly).reshape(-1, 2).astype(np.int32)
-                cv2.fillPoly(mask, [pts], 1)
-            
-            return mask
-        else:
-            # 未知格式，返回全零mask
-            return np.zeros((self.mono_size, self.mono_size), dtype=np.uint8)
+        # 只处理RLE格式
+        mask = mask_utils.decode(segmentation)
+        return mask.astype(np.uint8)
     
     def _resize_mono(
         self,
@@ -203,20 +183,10 @@ class CrossViewDataset(Dataset):
             interpolation=cv2.INTER_NEAREST
         )
         
-        # 计算缩放比例
-        scale_x = self.mono_size / W
-        scale_y = self.mono_size / H
-        
-        # 调整坐标
-        adj_point = mono_point.copy()
-        adj_point[0] = mono_point[0] * scale_x
-        adj_point[1] = mono_point[1] * scale_y
-        
-        adj_bbox = mono_bbox.copy()
-        adj_bbox[0] = mono_bbox[0] * scale_x  # x
-        adj_bbox[1] = mono_bbox[1] * scale_y  # y
-        adj_bbox[2] = mono_bbox[2] * scale_x  # width
-        adj_bbox[3] = mono_bbox[3] * scale_y  # height
+        # 计算缩放比例并向量化缩放坐标
+        scale = np.array([self.mono_size / W, self.mono_size / H])
+        adj_point = mono_point * scale
+        adj_bbox = mono_bbox * np.tile(scale, 2)  # [sx, sy, sx, sy]
         
         return resized, adj_point, adj_bbox, resized_mask
     
@@ -226,40 +196,69 @@ class CrossViewDataset(Dataset):
         sat_bbox: np.ndarray,
         camera_position: np.ndarray,
     ) -> Tuple[Image.Image, np.ndarray, np.ndarray, np.ndarray]:
-        """Crop卫星图，调整bbox和camera position"""
+        """Crop卫星图，确保bbox和camera_position都在裁剪区域内"""
         W, H = sat_img.size
-        cs = min(self.crop_size, W, H)  # actual crop size
-        cx, cy = int(camera_position[0]), int(camera_position[1])
+        cs = min(self.crop_size, W, H)
+        
+        # 计算bbox的边界 [x, y, w, h] -> [x1, y1, x2, y2]
+        bx, by, bw, bh = sat_bbox
+        bbox_x1, bbox_y1 = bx, by
+        bbox_x2, bbox_y2 = bx + bw, by + bh
+        cx, cy = camera_position[0], camera_position[1]
         
         if self.random_crop:
-            # 随机crop，确保相机在crop区域内
-            left = random.randint(
-                max(0, cx - cs + 1),
-                min(W - cs, cx)
-            ) if cx < W - 1 else max(0, W - cs)
-            top = random.randint(
-                max(0, cy - cs + 1),
-                min(H - cs, cy)
-            ) if cy < H - 1 else max(0, H - cs)
+            # 随机crop，确保bbox和camera都在crop区域内
+            # 计算有效的crop范围：必须包含bbox和camera
+            min_x = min(bbox_x1, cx)
+            max_x = max(bbox_x2, cx)
+            min_y = min(bbox_y1, cy)
+            max_y = max(bbox_y2, cy)
+            
+            # left范围：[max(0, max_x - cs), min(W - cs, min_x)]
+            left_min = max(0, int(np.ceil(max_x)) - cs)
+            left_max = min(W - cs, int(np.floor(min_x)))
+            # top范围：[max(0, max_y - cs), min(H - cs, min_y)]
+            top_min = max(0, int(np.ceil(max_y)) - cs)
+            top_max = min(H - cs, int(np.floor(min_y)))
+            
+            # 如果范围有效则随机选择，否则以中心为准
+            if left_min <= left_max:
+                left = random.randint(left_min, left_max)
+            else:
+                left = max(0, min(W - cs, int((min_x + max_x) / 2 - cs / 2)))
+            
+            if top_min <= top_max:
+                top = random.randint(top_min, top_max)
+            else:
+                top = max(0, min(H - cs, int((min_y + max_y) / 2 - cs / 2)))
         else:
-            # 以相机位置为中心crop
-            left = np.clip(cx - cs // 2, 0, W - cs)
-            top = np.clip(cy - cs // 2, 0, H - cs)
+            # 中心crop：以camera为中心，但确保bbox也在内
+            left = int(cx - cs / 2)
+            top = int(cy - cs / 2)
+            
+            # 调整确保bbox不被裁剪
+            if bbox_x1 < left:
+                left = max(0, int(bbox_x1))
+            if bbox_x2 > left + cs:
+                left = min(W - cs, int(bbox_x2 - cs))
+            if bbox_y1 < top:
+                top = max(0, int(bbox_y1))
+            if bbox_y2 > top + cs:
+                top = min(H - cs, int(bbox_y2 - cs))
+            
+            # 最终clip到有效范围
+            left = np.clip(left, 0, W - cs)
+            top = np.clip(top, 0, H - cs)
         
-        # Crop图像
+        # Crop并resize
         cropped = sat_img.crop((left, top, left + cs, top + cs))
-        
-        scale = 1.0
-        if cs != self.crop_size:
-            # Resize图像
+        scale = self.crop_size / cs if cs != self.crop_size else 1.0
+        if scale != 1.0:
             cropped = cropped.resize((self.crop_size, self.crop_size), Image.BILINEAR)
-            scale = self.crop_size / cs
         
-        # 调整坐标
+        # 调整坐标（向量化）
         offset = np.array([left, top], dtype=np.float32)
-        adj_bbox = sat_bbox.copy()
-        adj_bbox[:2] = (adj_bbox[:2] - offset) * scale
-        adj_bbox[2:] = adj_bbox[2:] * scale
+        adj_bbox = (sat_bbox - np.concatenate([offset, [0, 0]])) * scale
         adj_pos = (camera_position - offset) * scale
         
         return cropped, adj_bbox, adj_pos, offset

@@ -93,28 +93,3 @@ def prepare_all_prompts(
     masks = batch['mono_mask'].to(device)
     
     return points, boxes, masks
-
-
-def prepare_point_prompt(
-    batch: Dict,
-    device: torch.device,
-) -> Tuple[Optional[Tuple], Optional[torch.Tensor], Optional[torch.Tensor]]:
-    """
-    只准备point prompt（向后兼容）
-    
-    Args:
-        batch: 数据batch
-        device: 设备
-    
-    Returns:
-        points: (coords, labels)
-        boxes: None
-        masks: None
-    """
-    B = batch['front_view'].shape[0]
-    mono_point = batch['mono_point'].to(device)
-    point_coords = mono_point.unsqueeze(1)  # [B, 1, 2]
-    point_labels = torch.ones(B, 1, device=device)
-    points = (point_coords, point_labels)
-    
-    return points, None, None

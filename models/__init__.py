@@ -1,17 +1,22 @@
-from .cross_view_localizer_v2 import CrossViewLocalizer, build_cross_view_localizer
-from .prompt_encoder import GeometryPromptEncoder
+from .cross_view_localizer_detr import CrossViewLocalizerDETR, build_cross_view_localizer_detr
 from .vggt_aggregator import Aggregator
-from .heads import BBoxHead, MultiQueryBBoxHead, MaskHead, CameraHead, PositionHead, MultiTaskHead
+from .prompt_encoder import GeometryPromptEncoder
+from .prompt_fusion import TwoWayTransformer
+from .heads import CameraHead
+from .matcher import HungarianMatcher, SimpleMatcher, build_matcher
+from .criterion import SetCriterion, SimpleCriterion, build_criterion
 
 __all__ = [
-    'CrossViewLocalizer',
-    'build_cross_view_localizer',
+    'CrossViewLocalizerDETR',
+    'build_cross_view_localizer_detr',
     'Aggregator',
     'GeometryPromptEncoder',
-    'BBoxHead',
-    'MultiQueryBBoxHead',
-    'MaskHead',
+    'TwoWayTransformer',
     'CameraHead',
-    'PositionHead',
-    'MultiTaskHead',
+    'HungarianMatcher',
+    'SimpleMatcher',
+    'build_matcher',
+    'SetCriterion',
+    'SimpleCriterion',
+    'build_criterion',
 ]

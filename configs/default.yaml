@@ -64,7 +64,7 @@ training:
 
 # Checkpointing
 checkpoint:
-  output_dir: "./output"
+  output_dir: "/data/run01/scxi704/xhj/location/output"  # 绝对路径，避免写到有配额限制的home目录
   save_freq: 5
   resume: null
 

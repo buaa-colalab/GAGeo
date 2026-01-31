@@ -27,9 +27,10 @@ from utils import (
     load_dinov2_weights, 
     freeze_backbone, 
     get_param_groups, 
-    TensorBoardLogger
+    TensorBoardLogger,
+    prepare_random_prompt,
+    visualize_validation_samples,
 )
-from utils.prompt_utils import prepare_random_prompt
 
 
 def parse_args():
@@ -172,12 +173,8 @@ def validate(
             point_labels = torch.ones(B, 1, device=device)
             points, boxes, masks = (point_coords, point_labels), None, None
         elif prompt_type == 1:
-            # Bbox prompt
-            from utils.prompt_utils import prepare_random_prompt
             points, boxes, masks = prepare_random_prompt(batch, device, prompt_types=['bbox'])
         else:
-            # Mask prompt
-            from utils.prompt_utils import prepare_random_prompt
             points, boxes, masks = prepare_random_prompt(batch, device, prompt_types=['mask'])
         
         with autocast('cuda', enabled=cfg['training']['use_amp']):

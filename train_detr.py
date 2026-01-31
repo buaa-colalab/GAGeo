@@ -1,6 +1,6 @@
 """
-Cross-View Localization Training Script with Hugging Face Accelerate
-Supports DeepSpeed ZeRO for memory-efficient training of large models.
+Cross-View Localization Training Script for DETR-style Model
+Supports the unified decoder architecture with object queries and location queries.
 """
 
 import argparse
@@ -10,30 +10,32 @@ from pathlib import Path
 import os
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+from torch.cuda.amp import autocast, GradScaler
 from tqdm import tqdm
 from accelerate import Accelerator
 from accelerate.utils import set_seed
 from transformers import get_scheduler
 
-from models import CrossViewLocalizer
+from models import CrossViewLocalizerDETR, build_cross_view_localizer_detr, SimpleMatcher
 from data import CrossViewDataset, collate_fn
 from utils import (
-    MultiTaskLoss,
     load_vggt_weights,
-    load_dinov2_weights,
     freeze_backbone,
     get_param_groups,
-    TensorBoardLogger,
+    prepare_random_prompt,
     visualize_validation_samples,
-    prepare_random_prompt
+    box_cxcywh_to_xyxy, 
+    generalized_box_iou,
+    DETRCriterion,
 )
 
 
+
 def parse_args():
-    parser = argparse.ArgumentParser(description='Train Cross-View Localizer with Accelerate + DeepSpeed')
+    parser = argparse.ArgumentParser(description='Train Cross-View Localizer DETR')
     parser.add_argument('--config', type=str, required=True,
                         help='Path to training config file (YAML)')
     parser.add_argument('--resume', type=str, default=None,
@@ -56,7 +58,7 @@ def train_one_epoch(
     epoch: int,
     cfg: dict,
 ):
-    """Train for one epoch with Accelerate."""
+    """Train for one epoch."""
     model.train()
     
     total_losses = {}
@@ -64,21 +66,20 @@ def train_one_epoch(
     
     for batch_idx, batch in enumerate(pbar):
         with accelerator.accumulate(model):
-            # Data is already on device via Accelerate
             front_view = batch['front_view']
             sat_view = batch['satellite_view']
             
-            # 准备targets (不包含mask，因为目前数据不准确)
+            # Prepare targets
             targets = {
                 'sat_bbox': batch['sat_bbox'],
                 'yaw_radians': batch['yaw_radians'],
                 'camera_position': batch['camera_position'],
             }
             
-            # 随机选择一种prompt输入（模拟真实场景：point/bbox/mask三选一）
+            # Random prompt selection
             points, boxes, masks = prepare_random_prompt(batch, accelerator.device)
             
-            # Forward with automatic mixed precision via Accelerate
+            # Forward
             with accelerator.autocast():
                 outputs = model(
                     front_view=front_view,
@@ -90,56 +91,34 @@ def train_one_epoch(
                 losses = criterion(outputs, targets)
                 loss = losses['loss']
             
-            # Backward with gradient accumulation handled by Accelerate
+            # Backward
             accelerator.backward(loss)
             
-            # Only clip and check gradients when accumulation is complete
-            # if accelerator.sync_gradients:
-            #     total_norm = accelerator.clip_grad_norm_(model.parameters(), cfg['training']['grad_clip'])
-                
-            #     # Check gradient norm for anomalies (silently skip bad updates)
-            #     norm_value = total_norm.item() if isinstance(total_norm, torch.Tensor) else total_norm
-            #     if not math.isfinite(norm_value):
-            #         optimizer.zero_grad()
-            #         continue
+            if accelerator.sync_gradients:
+                accelerator.clip_grad_norm_(model.parameters(), cfg['training']['grad_clip'])
             
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad()
         
-        # Accumulate losses locally (no communication overhead)
+        # Accumulate losses
         for k, v in losses.items():
             if k not in total_losses:
                 total_losses[k] = 0.0
-            total_losses[k] += v.item()
-        
-        # Log per-batch metrics for detailed training curves
-        if accelerator.sync_gradients:
-            global_step = epoch * len(dataloader) + batch_idx
-            accelerator.log({
-                "train_batch/loss": loss.item(),
-                "train_batch/lr": scheduler.get_last_lr()[0],
-            }, step=global_step)
+            total_losses[k] += v.item() if isinstance(v, torch.Tensor) else v
         
         # Update progress bar
         if accelerator.is_main_process:
-            pbar.set_postfix({k: f'{v.item():.4f}' for k, v in losses.items()})
+            pbar.set_postfix({
+                'loss': f'{losses["loss"].item():.4f}',
+                'bbox': f'{losses.get("loss_bbox", 0):.4f}' if isinstance(losses.get("loss_bbox", 0), float) else f'{losses.get("loss_bbox", torch.tensor(0)).item():.4f}',
+            })
     
-    # Synchronize losses across processes at epoch end
-    avg_losses = {}
-    for k, v in total_losses.items():
-        avg_loss = torch.tensor(v / len(dataloader), device=accelerator.device)
-        avg_loss = accelerator.reduce(avg_loss, reduction="mean")
-        avg_losses[k] = avg_loss.item()
+    # Average losses
+    avg_losses = {k: v / len(dataloader) for k, v in total_losses.items()}
     
-    # Log to Accelerate's built-in tracker
-    accelerator.log({
-        f"train/{k}": v for k, v in avg_losses.items()
-    }, step=epoch)
-    accelerator.log({
-        "train/lr_backbone": optimizer.param_groups[0]['lr'],
-        "train/lr_heads": optimizer.param_groups[1]['lr'],
-    }, step=epoch)
+    # Log
+    accelerator.log({f"train/{k}": v for k, v in avg_losses.items()}, step=epoch)
     
     return avg_losses
 
@@ -157,9 +136,8 @@ def validate(
     model.eval()
     
     total_losses = {}
-    all_bbox_errors = []
-    all_yaw_errors = []
     all_pos_errors = []
+    all_yaw_errors = []
     
     for batch in tqdm(dataloader, desc='Validation', disable=not accelerator.is_main_process):
         front_view = batch['front_view']
@@ -171,11 +149,12 @@ def validate(
             'camera_position': batch['camera_position'],
         }
         
-        # 验证时使用point prompt（最常见的输入）
+        # Use point prompt for validation
         B = front_view.shape[0]
         mono_point = batch['mono_point']
         point_coords = mono_point.unsqueeze(1)
         point_labels = torch.ones(B, 1, device=front_view.device)
+        
         with accelerator.autocast():
             outputs = model(
                 front_view=front_view,
@@ -186,123 +165,81 @@ def validate(
             )
             losses = criterion(outputs, targets)
         
-        # Accumulate losses locally
+        # Accumulate losses
         for k, v in losses.items():
             if k not in total_losses:
                 total_losses[k] = 0.0
-            total_losses[k] += v.item()
+            total_losses[k] += v.item() if isinstance(v, torch.Tensor) else v
         
-        # Compute metrics per sample
-        if 'pred_boxes' in outputs:
-            pred_boxes = outputs['pred_boxes'][:, 0, :] if outputs['pred_boxes'].dim() == 3 else outputs['pred_boxes']
-            bbox_error = (pred_boxes - targets['sat_bbox']).abs().mean(dim=1)
-            all_bbox_errors.append(bbox_error)
+        # Compute metrics
+        if 'position' in outputs:
+            pos_error = (outputs['position'] - targets['camera_position']).norm(dim=-1)
+            all_pos_errors.append(pos_error)
         
         if 'yaw_radians' in outputs:
             yaw_diff = outputs['yaw_radians'] - targets['yaw_radians']
             yaw_diff = torch.atan2(torch.sin(yaw_diff), torch.cos(yaw_diff))
-            yaw_error = yaw_diff.abs()
-            all_yaw_errors.append(yaw_error)
-        
-        if 'position' in outputs:
-            pos_error = (outputs['position'] - targets['camera_position']).norm(dim=-1)
-            all_pos_errors.append(pos_error)
+            all_yaw_errors.append(yaw_diff.abs())
     
-    # Synchronize losses across processes
-    avg_losses = {}
-    for k, v in total_losses.items():
-        avg_loss = torch.tensor(v / len(dataloader), device=accelerator.device)
-        avg_loss = accelerator.reduce(avg_loss, reduction="mean")
-        avg_losses[k] = avg_loss.item()
+    # Average losses
+    avg_losses = {k: v / len(dataloader) for k, v in total_losses.items()}
     
-    # Gather all metrics across processes for proper averaging
-    if all_bbox_errors:
-        all_bbox_errors = accelerator.gather_for_metrics(torch.cat(all_bbox_errors))
-        avg_losses['bbox_mae'] = all_bbox_errors.mean().item()
+    # Gather metrics
+    if all_pos_errors:
+        all_pos_errors = accelerator.gather_for_metrics(torch.cat(all_pos_errors))
+        avg_losses['pos_mae'] = all_pos_errors.mean().item()
+        avg_losses['pos_mae_pixels'] = avg_losses['pos_mae'] * cfg['data']['img_size']
     
     if all_yaw_errors:
         all_yaw_errors = accelerator.gather_for_metrics(torch.cat(all_yaw_errors))
         avg_losses['yaw_mae'] = all_yaw_errors.mean().item()
+        avg_losses['yaw_mae_deg'] = math.degrees(avg_losses['yaw_mae'])
     
-    if all_pos_errors:
-        all_pos_errors = accelerator.gather_for_metrics(torch.cat(all_pos_errors))
-        avg_losses['pos_error'] = all_pos_errors.mean().item()
-    
-    # Log to Accelerate's built-in tracker
-    accelerator.log({
-        f"val/{k}": v for k, v in avg_losses.items()
-    }, step=epoch)
-    
-    # Visualize samples (only on main process, configurable frequency)
-    vis_freq = cfg['logging'].get('vis_freq', 5)
-    num_vis_samples = cfg['logging'].get('num_vis_samples', 10)
-    if epoch % vis_freq == 0:
-        visualize_validation_samples(model, dataloader, accelerator, cfg, epoch, num_vis_samples)
+    # Log
+    accelerator.log({f"val/{k}": v for k, v in avg_losses.items()}, step=epoch)
     
     return avg_losses
 
 
 def main():
     args = parse_args()
-    
-    # Load config
     cfg = load_config(args.config)
     
-    # Override resume path if provided via command line
     if args.resume:
         cfg['checkpoint']['resume'] = args.resume
     
-    # Get gradient accumulation steps from config
-    gradient_accumulation_steps = cfg['training'].get('gradient_accumulation_steps', 1)
-    
     # Initialize Accelerator
-    # mixed_precision: "no", "fp16", "bf16"
-    # bf16 is recommended for Ampere+ GPUs (RTX 3090/4090, A100, H100)
-    if cfg['training'].get('use_amp', False):
-        mixed_precision = cfg['training'].get('mixed_precision', 'bf16')
-    else:
-        mixed_precision = "no"
+    gradient_accumulation_steps = cfg['training'].get('gradient_accumulation_steps', 1)
+    mixed_precision = cfg['training'].get('mixed_precision', 'bf16') if cfg['training'].get('use_amp', True) else "no"
     
-    # Setup output directory first for logging
     output_dir = Path(cfg['checkpoint']['output_dir'])
     output_dir.mkdir(parents=True, exist_ok=True)
-    log_dir = output_dir / 'logs'
     
     accelerator = Accelerator(
         gradient_accumulation_steps=gradient_accumulation_steps,
         mixed_precision=mixed_precision,
         log_with="tensorboard" if cfg['logging'].get('use_tensorboard', True) else None,
-        project_dir=str(output_dir),  # Required for tensorboard logging
+        project_dir=str(output_dir),
     )
     
-    # Set seed for reproducibility
     set_seed(42)
     
-    # Save config (output_dir already created above)
+    # Save config
     if accelerator.is_main_process:
         with open(output_dir / 'config.yaml', 'w') as f:
             yaml.dump(cfg, f)
         accelerator.print(f"Output directory: {output_dir}")
     
-    # Initialize Accelerate's tracker (replaces manual TensorBoard logger)
+    # Initialize tracker
     if accelerator.is_main_process and cfg['logging'].get('use_tensorboard', True):
-        # Flatten config for TensorBoard (only keep serializable values)
-        flat_config = {
-            "batch_size": cfg['training']['batch_size'],
-            "gradient_accumulation_steps": cfg['training']['gradient_accumulation_steps'],
-            "num_epochs": cfg['training']['num_epochs'],
-            "lr_backbone": cfg['training']['lr_backbone'],
-            "lr_heads": cfg['training']['lr_heads'],
-            "weight_decay": cfg['training']['weight_decay'],
-            "grad_clip": cfg['training']['grad_clip'],
-            "warmup_epochs": cfg['training']['warmup_epochs'],
-            "embed_dim": cfg['model']['embed_dim'],
-            "vggt_depth": cfg['model']['vggt_depth'],
-            "num_heads": cfg['model']['num_heads'],
-        }
         accelerator.init_trackers(
-            project_name="cross_view_localization",
-            config=flat_config,
+            project_name="cross_view_detr",
+            config={
+                "batch_size": cfg['training']['batch_size'],
+                "num_epochs": cfg['training']['num_epochs'],
+                "lr_backbone": cfg['training']['lr_backbone'],
+                "lr_heads": cfg['training']['lr_heads'],
+            },
         )
     
     # Create datasets
@@ -342,48 +279,42 @@ def main():
     accelerator.print(f'Train: {len(train_dataset)} samples, Val: {len(val_dataset)} samples')
     
     # Create model
-    model = CrossViewLocalizer(
+    model = CrossViewLocalizerDETR(
         img_size=cfg['data']['img_size'],
         embed_dim=cfg['model']['embed_dim'],
         vggt_depth=cfg['model']['vggt_depth'],
         num_heads=cfg['model']['num_heads'],
-        num_decoder_layers=cfg['model']['num_decoder_layers'],
-        enable_bbox=cfg['model']['enable_bbox'],
-        enable_seg=cfg['model']['enable_seg'],
-        enable_camera=cfg['model']['enable_camera'],
-        enable_position=cfg['model']['enable_position'],
+        num_decoder_layers=cfg['model'].get('num_decoder_layers', 6),
+        num_object_queries=cfg['model'].get('num_object_queries', 100),
+        location_grid_size=cfg['model'].get('location_grid_size', 32),
+        freeze_vggt=False,
+        use_prompt_fusion=cfg['model'].get('use_prompt_fusion', True),
     )
     
-    # Load pretrained weights (before wrapping with Accelerate)
+    # Load pretrained weights
     if cfg['model'].get('vggt_weights'):
         load_vggt_weights(model, cfg['model']['vggt_weights'], load_heads=False)
         accelerator.print(f'Loaded VGGT weights from {cfg["model"]["vggt_weights"]}')
-    elif cfg['model'].get('dinov2_weights'):
-        load_dinov2_weights(model, dinov2_path=cfg['model']['dinov2_weights'])
-        accelerator.print(f'Loaded DINOv2 weights from {cfg["model"]["dinov2_weights"]}')
     
-    # Freeze backbone (patch_embed only, NOT aggregator for better training)
-    freeze_patch_embed = cfg['model'].get('freeze_patch_embed', True)
-    freeze_aggregator = cfg['model'].get('freeze_aggregator', False)
-    
-    if freeze_patch_embed:
-        freeze_backbone(model, freeze_patch_embed=True, freeze_aggregator=freeze_aggregator)
-        accelerator.print(f'Froze backbone (patch_embed={freeze_patch_embed}, aggregator={freeze_aggregator})')
+    # Freeze backbone
+    if cfg['model'].get('freeze_patch_embed', True):
+        freeze_backbone(model, freeze_patch_embed=True, freeze_aggregator=cfg['model'].get('freeze_aggregator', False))
+        accelerator.print('Froze backbone')
     
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total = sum(p.numel() for p in model.parameters())
     accelerator.print(f'Parameters: {total/1e6:.1f}M total, {trainable/1e6:.1f}M trainable')
     
-    # Create loss
-    criterion = MultiTaskLoss(
-        weight_bbox=cfg['training']['weight_bbox'],
-        weight_giou=cfg['training']['weight_giou'],
-        weight_yaw=cfg['training']['weight_yaw'],
-        weight_position=cfg['training']['weight_position'],
-        weight_mask=cfg['training']['weight_mask'],
+    # Create criterion
+    criterion = DETRCriterion(
+        weight_bbox=cfg['training'].get('weight_bbox', 5.0),
+        weight_giou=cfg['training'].get('weight_giou', 2.0),
+        weight_heatmap=cfg['training'].get('weight_heatmap', 1.0),
+        weight_yaw=cfg['training'].get('weight_yaw', 1.0),
+        img_size=cfg['data']['img_size'],
     )
     
-    # Create optimizer with different LR for backbone and heads
+    # Create optimizer
     param_groups = get_param_groups(
         model,
         lr_backbone=cfg['training']['lr_backbone'],
@@ -392,16 +323,14 @@ def main():
     )
     optimizer = AdamW(param_groups)
     
-    # Note: Scheduler will be created after prepare() to get correct number of steps per epoch
-    num_epochs = cfg['training']['num_epochs']
-    warmup_epochs = cfg['training']['warmup_epochs']
-    
-    # Prepare with Accelerator (handles DDP/DeepSpeed wrapping)
+    # Prepare with Accelerator
     model, optimizer, train_loader, val_loader = accelerator.prepare(
         model, optimizer, train_loader, val_loader
     )
     
-    # Create scheduler with per-step warmup (after prepare to get correct steps per epoch)
+    # Create scheduler
+    num_epochs = cfg['training']['num_epochs']
+    warmup_epochs = cfg['training']['warmup_epochs']
     num_training_steps = len(train_loader) * num_epochs
     num_warmup_steps = len(train_loader) * warmup_epochs
     
@@ -419,7 +348,6 @@ def main():
     if cfg['checkpoint'].get('resume'):
         accelerator.print(f'Resuming from {cfg["checkpoint"]["resume"]}')
         accelerator.load_state(cfg['checkpoint']['resume'])
-        # Try to load epoch info
         ckpt_path = Path(cfg['checkpoint']['resume'])
         if (ckpt_path / 'training_state.pt').exists():
             training_state = torch.load(ckpt_path / 'training_state.pt', map_location='cpu')
@@ -437,18 +365,16 @@ def main():
             model, train_loader, criterion, optimizer, scheduler, accelerator, epoch, cfg
         )
         accelerator.print(f'Train - ' + ', '.join([f'{k}: {v:.4f}' for k, v in train_losses.items()]))
-        accelerator.print(f'LR - backbone: {optimizer.param_groups[0]["lr"]:.2e}, heads: {optimizer.param_groups[1]["lr"]:.2e}')
         
         # Validate
         if (epoch + 1) % cfg['logging']['val_freq'] == 0:
             val_losses = validate(model, val_loader, criterion, accelerator, cfg, epoch)
             accelerator.print(f'Val   - ' + ', '.join([f'{k}: {v:.4f}' for k, v in val_losses.items()]))
             
-            # Save best (all ranks must participate in save_state for NCCL sync)
+            # Save best
             if val_losses['loss'] < best_loss:
                 best_loss = val_losses['loss']
                 accelerator.save_state(output_dir / 'best')
-                # Save additional training state (only main process)
                 if accelerator.is_main_process:
                     torch.save({
                         'epoch': epoch,
@@ -457,20 +383,17 @@ def main():
                     }, output_dir / 'best' / 'training_state.pt')
                     accelerator.print(f'Saved best model (loss: {best_loss:.4f})')
         
-        # Save checkpoint (all ranks must participate in save_state for NCCL sync)
+        # Save checkpoint
         if (epoch + 1) % cfg['checkpoint']['save_freq'] == 0:
             save_dir = output_dir / f'epoch_{epoch}'
             accelerator.save_state(save_dir)
-            # Save additional training state (only main process)
             if accelerator.is_main_process:
                 torch.save({
                     'epoch': epoch,
                     'best_loss': best_loss,
                 }, save_dir / 'training_state.pt')
     
-    # End tracking
     accelerator.end_training()
-    
     accelerator.print(f'\nTraining completed! Best loss: {best_loss:.4f}')
 
 

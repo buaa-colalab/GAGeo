@@ -1,147 +1,173 @@
-"""
-Cross-View Localization Loss Functions
+"""Cross-View Localization Loss Utilities
 
-支持四种监督信号：
-- bbox: L1 + GIoU loss
-- mask: BCE + Dice loss  
-- yaw: 周期性角度loss
-- camera_position: MSE loss
+Heatmap generation utilities for camera position supervision.
 """
 
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from typing import Dict
+from typing import Tuple
 
-from .box_ops import box_cxcywh_to_xyxy, generalized_box_iou
-
-
-class MultiTaskLoss(nn.Module):
+class DETRCriterion(nn.Module):
     """
-    多任务Loss，支持开关控制
+    Loss function for DETR-style cross-view localization.
     
-    Args:
-        weight_bbox: BBox loss权重 (L1)
-        weight_giou: GIoU loss权重
-        weight_mask: Mask loss权重 (BCE + Dice)
-        weight_yaw: Yaw角度loss权重
-        weight_position: 位置loss权重
+    Losses:
+    1. BBox: L1 + GIoU loss for matched predictions
+    2. Heatmap: Cross-entropy loss for camera position
+    3. Yaw: Angular loss for camera orientation
     """
     
     def __init__(
         self,
         weight_bbox: float = 5.0,
         weight_giou: float = 2.0,
-        weight_mask: float = 1.0,
+        weight_heatmap: float = 1.0,
         weight_yaw: float = 1.0,
-        weight_position: float = 1.0,
+        img_size: int = 518,
     ):
         super().__init__()
-        self.w = {
-            'bbox': weight_bbox,
-            'giou': weight_giou,
-            'mask': weight_mask,
-            'yaw': weight_yaw,
-            'position': weight_position,
-        }
+        self.weight_bbox = weight_bbox
+        self.weight_giou = weight_giou
+        self.weight_heatmap = weight_heatmap
+        self.weight_yaw = weight_yaw
+        self.img_size = img_size
     
-    def forward(
-        self,
-        outputs: Dict[str, torch.Tensor],
-        targets: Dict[str, torch.Tensor],
-    ) -> Dict[str, torch.Tensor]:
+    def forward(self, outputs, targets):
         """
+        Compute all losses.
+        
         Args:
-            outputs: {
-                'pred_boxes': [B, 4] or [B, N, 4],
-                'yaw_radians': [B],
-                'position': [B, 2],
-                'masks': [B, 1, H, W],
-            }
-            targets: {
-                'sat_bbox': [B, 4],
-                'yaw_radians': [B],
-                'camera_position': [B, 2],
-                'masks': [B, 1, H, W],
-            }
+            outputs: Model outputs dict
+            targets: Target dict with 'sat_bbox', 'camera_position', 'yaw_radians'
         """
-        # Cast targets to match output dtype for mixed precision compatibility
-        # Get dtype from any output tensor
-        target_dtype = None
-        for v in outputs.values():
-            if isinstance(v, torch.Tensor):
-                target_dtype = v.dtype
-                break
-        
-        if target_dtype is not None:
-            targets = {k: v.to(dtype=target_dtype) if isinstance(v, torch.Tensor) else v 
-                      for k, v in targets.items()}
-        
         losses = {}
-        total = 0.0
         
-        # BBox Loss
+        # ============ BBox Loss ============
         if 'pred_boxes' in outputs and 'sat_bbox' in targets:
-            l_bbox, l_giou = self._bbox_loss(outputs['pred_boxes'], targets['sat_bbox'])
-            losses['loss_bbox'] = l_bbox
-            losses['loss_giou'] = l_giou
-            total += self.w['bbox'] * l_bbox + self.w['giou'] * l_giou
+            pred_boxes = outputs['pred_boxes']  # [B, N, 4]
+            target_boxes = targets['sat_bbox']  # [B, 4]
+            bbox_scores = outputs['bbox_scores']  # [B, N]
+            
+            B = pred_boxes.shape[0]
+            loss_bbox = 0.0
+            loss_giou = 0.0
+            
+            for b in range(B):
+                # Find best prediction by score
+                best_idx = bbox_scores[b].argmax()
+                pred_box = pred_boxes[b, best_idx]  # [4]
+                target_box = target_boxes[b]  # [4]
+                
+                # L1 loss
+                loss_bbox = loss_bbox + F.l1_loss(pred_box, target_box)
+                
+                # GIoU loss
+                pred_xyxy = box_cxcywh_to_xyxy(pred_box.unsqueeze(0))
+                tgt_xyxy = box_cxcywh_to_xyxy(target_box.unsqueeze(0))
+                giou = generalized_box_iou(pred_xyxy, tgt_xyxy)
+                loss_giou = loss_giou + (1 - giou[0, 0])
+            
+            losses['loss_bbox'] = loss_bbox / B
+            losses['loss_giou'] = loss_giou / B
         
-        # Mask Loss
-        if 'masks' in outputs and 'masks' in targets:
-            losses['loss_mask'] = self._mask_loss(outputs['masks'], targets['masks'])
-            total += self.w['mask'] * losses['loss_mask']
+        # ============ Heatmap Loss ============
+        if 'heatmap' in outputs and 'camera_position' in targets:
+            heatmap = outputs['heatmap']  # [B, H, W] probability
+            target_pos = targets['camera_position']  # [B, 2] normalized [0, 1]
+            
+            B, H, W = heatmap.shape
+            
+            # Create target heatmap (Gaussian around target position)
+            y_coords = torch.linspace(0, 1, H, device=heatmap.device)
+            x_coords = torch.linspace(0, 1, W, device=heatmap.device)
+            yy, xx = torch.meshgrid(y_coords, x_coords, indexing='ij')
+            
+            sigma = 0.02  # Gaussian sigma
+            target_heatmaps = []
+            for b in range(B):
+                tx, ty = target_pos[b, 0], target_pos[b, 1]
+                dist_sq = (xx - tx) ** 2 + (yy - ty) ** 2
+                target_hm = torch.exp(-dist_sq / (2 * sigma ** 2))
+                target_hm = target_hm / (target_hm.sum() + 1e-8)  # Normalize
+                target_heatmaps.append(target_hm)
+            
+            target_heatmap = torch.stack(target_heatmaps, dim=0)  # [B, H, W]
+            
+            # KL divergence loss
+            heatmap_log = torch.log(heatmap + 1e-8)
+            loss_heatmap = F.kl_div(heatmap_log, target_heatmap, reduction='batchmean')
+            losses['loss_heatmap'] = loss_heatmap
+            
+            # Position error (for logging)
+            pred_pos = outputs['position']  # [B, 2]
+            pos_error = (pred_pos - target_pos).norm(dim=-1).mean()
+            losses['pos_error'] = pos_error
         
-        # Yaw Loss
+        # ============ Yaw Loss ============
         if 'yaw_radians' in outputs and 'yaw_radians' in targets:
-            losses['loss_yaw'] = self._yaw_loss(outputs['yaw_radians'], targets['yaw_radians'])
-            total += self.w['yaw'] * losses['loss_yaw']
+            pred_yaw = outputs['yaw_radians']  # [B]
+            target_yaw = targets['yaw_radians']  # [B]
+            
+            # Angular difference (handle wraparound)
+            yaw_diff = pred_yaw - target_yaw
+            yaw_diff = torch.atan2(torch.sin(yaw_diff), torch.cos(yaw_diff))
+            loss_yaw = yaw_diff.abs().mean()
+            losses['loss_yaw'] = loss_yaw
         
-        # Position Loss
-        if 'position' in outputs and 'camera_position' in targets:
-            losses['loss_position'] = F.mse_loss(outputs['position'], targets['camera_position'])
-            total += self.w['position'] * losses['loss_position']
+        # ============ Total Loss ============
+        total_loss = 0.0
+        if 'loss_bbox' in losses:
+            total_loss = total_loss + self.weight_bbox * losses['loss_bbox']
+        if 'loss_giou' in losses:
+            total_loss = total_loss + self.weight_giou * losses['loss_giou']
+        if 'loss_heatmap' in losses:
+            total_loss = total_loss + self.weight_heatmap * losses['loss_heatmap']
+        if 'loss_yaw' in losses:
+            total_loss = total_loss + self.weight_yaw * losses['loss_yaw']
         
-        losses['loss'] = total
+        losses['loss'] = total_loss
+        
         return losses
+
+def generate_gaussian_heatmap(
+    center: torch.Tensor,
+    size: Tuple[int, int],
+    device: torch.device,
+    sigma: float = 2.0,
+) -> torch.Tensor:
+    """
+    Generate a 2D Gaussian heatmap centered at the given position.
     
-    def _bbox_loss(self, pred: torch.Tensor, target: torch.Tensor):
-        """BBox L1 + GIoU loss"""
-        if pred.dim() == 3:
-            pred = pred[:, 0, :]  # [B, N, 4] -> [B, 4]
-        
-        l1 = F.l1_loss(pred, target)
-        
-        # Clamp box coordinates to valid range [0, 1] for numerical stability
-        pred_clamped = torch.clamp(pred, 0.0, 1.0)
-        target_clamped = torch.clamp(target, 0.0, 1.0)
-        
-        giou = generalized_box_iou(box_cxcywh_to_xyxy(pred_clamped), box_cxcywh_to_xyxy(target_clamped))
-        l_giou = (1 - torch.diag(giou)).mean()
-        
-        # Clamp GIoU loss to prevent extreme values (GIoU is in [-1, 1], so loss is in [0, 2])
-        l_giou = torch.clamp(l_giou, 0.0, 2.0)
-        
-        return l1, l_giou
+    Args:
+        center: [B, 2] Normalized (x, y) coordinates in [0, 1]
+        size: (H, W) Heatmap size
+        device: Device to create tensor on
+        sigma: Gaussian standard deviation in pixels
     
-    def _mask_loss(self, pred: torch.Tensor, target: torch.Tensor):
-        """Mask BCE + Dice loss"""
-        bce = F.binary_cross_entropy_with_logits(pred, target)
-        
-        p = torch.sigmoid(pred)
-        inter = (p * target).sum(dim=(2, 3))
-        union = p.sum(dim=(2, 3)) + target.sum(dim=(2, 3))
-        dice = 1 - (2 * inter + 1) / (union + 1)
-        
-        return bce + dice.mean()
+    Returns:
+        heatmap: [B, H, W] Gaussian heatmap with peak at center
+    """
+    B = center.shape[0]
+    H, W = size
     
-    def _yaw_loss(self, pred: torch.Tensor, target: torch.Tensor):
-        """周期性角度loss，处理[-pi, pi]边界"""
-        # atan2(sin, cos) is numerically stable for any input, no need to clamp
-        diff = torch.atan2(torch.sin(pred - target), torch.cos(pred - target))
-        loss = (diff ** 2).mean()
-        
-        # Clamp loss to reasonable range (max angular error is pi, so max loss is pi^2 ≈ 9.87)
-        loss = torch.clamp(loss, 0.0, 10.0)
-        
-        return loss
+    # Convert normalized coordinates to pixel coordinates
+    center_x = center[:, 0] * (W - 1)  # [B]
+    center_y = center[:, 1] * (H - 1)  # [B]
+    
+    # Create coordinate grids
+    y_coords = torch.arange(H, device=device, dtype=torch.float32)
+    x_coords = torch.arange(W, device=device, dtype=torch.float32)
+    y_grid, x_grid = torch.meshgrid(y_coords, x_coords, indexing='ij')
+    
+    # Expand for batch
+    y_grid = y_grid.unsqueeze(0).expand(B, -1, -1)  # [B, H, W]
+    x_grid = x_grid.unsqueeze(0).expand(B, -1, -1)  # [B, H, W]
+    
+    # Compute Gaussian
+    center_x = center_x.view(B, 1, 1)
+    center_y = center_y.view(B, 1, 1)
+    
+    gaussian = torch.exp(
+        -((x_grid - center_x) ** 2 + (y_grid - center_y) ** 2) / (2 * sigma ** 2)
+    )
+    
+    return gaussian

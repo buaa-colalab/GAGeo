@@ -30,6 +30,12 @@ conda activate filtre
 # Load CUDA module (required for DeepSpeed)
 module load cuda
 
+# 设置缓存目录到大硬盘，避免写满 /data/home/scxi704
+export HF_HOME="/data/run01/scxi704/xhj/.cache/huggingface"
+export TORCH_HOME="/data/run01/scxi704/xhj/.cache/torch"
+export TMPDIR="/data/run01/scxi704/xhj/.cache/tmp"
+mkdir -p $HF_HOME $TORCH_HOME $TMPDIR
+
 # Configuration
 TRAINING_CONFIG=${1:-"configs/default.yaml"}
 ACCELERATE_CONFIG="configs/accelerate_deepspeed_zero2.yaml"

@@ -146,7 +146,6 @@ def convert_sample(sample: Dict, city: str) -> Dict:
         "mono_segmentation": sample['mono_segmentation'],  # 保持RLE格式
         "sat_filename": sample['sate_filename'],
         "sate_bbox": sate_bbox,
-        "sate_segmentation": sate_segmentation,
         "rotation": sample['rotation'],
         "camera_position": [640.0, 640.0]  # 默认值，假设卫星图是1280x1280，相机在中心
     }
@@ -218,7 +217,7 @@ def merge_datasets(output_dir: Path, output_file: Path):
 def main():
     # 设置路径
     output_dir = Path("/data/cesium/output")
-    output_file = Path("/data/xhj/location/data/cesium_drone_dataset.json")
+    output_file = Path("/data/xhj/location/data/cesium_drone_dataset2.json")
     
     # 确保输出目录存在
     output_file.parent.mkdir(parents=True, exist_ok=True)

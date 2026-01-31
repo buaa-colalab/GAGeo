@@ -7,63 +7,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
-class PositionEmbeddingRandom(nn.Module):
-    """Positional encoding using random spatial frequencies."""
-
-    def __init__(self, num_pos_feats: int = 64, scale: Optional[float] = None) -> None:
-        super().__init__()
-        if scale is None or scale <= 0.0:
-            scale = 1.0
-        self.register_buffer(
-            "positional_encoding_gaussian_matrix",
-            scale * torch.randn((2, num_pos_feats)),
-        )
-
-    def _pe_encoding(self, coords: torch.Tensor) -> torch.Tensor:
-        """Positionally encode points that are normalized to [0,1]."""
-        coords = 2 * coords - 1
-        coords = coords @ self.positional_encoding_gaussian_matrix
-        coords = 2 * torch.pi * coords
-        return torch.cat([torch.sin(coords), torch.cos(coords)], dim=-1)
-
-    def forward(self, size: Tuple[int, int]) -> torch.Tensor:
-        """Generate positional encoding for a grid of the specified size."""
-        h, w = size
-        device = self.positional_encoding_gaussian_matrix.device
-        dtype = self.positional_encoding_gaussian_matrix.dtype
-        grid = torch.ones((h, w), device=device, dtype=dtype)
-        y_embed = grid.cumsum(dim=0) - 0.5
-        x_embed = grid.cumsum(dim=1) - 0.5
-        y_embed = y_embed / h
-        x_embed = x_embed / w
-
-        pe = self._pe_encoding(torch.stack([x_embed, y_embed], dim=-1))
-        return pe.permute(2, 0, 1)  # C x H x W
-
-    def forward_with_coords(
-        self, coords_input: torch.Tensor, image_size: Tuple[int, int]
-    ) -> torch.Tensor:
-        """Positionally encode points that are not normalized to [0,1]."""
-        coords = coords_input.clone()
-        coords[:, :, 0] = coords[:, :, 0] / image_size[1]
-        coords[:, :, 1] = coords[:, :, 1] / image_size[0]
-        return self._pe_encoding(coords.to(self.positional_encoding_gaussian_matrix.dtype))
-
-
-class LayerNorm2d(nn.Module):
-    def __init__(self, num_channels: int, eps: float = 1e-6) -> None:
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(num_channels))
-        self.bias = nn.Parameter(torch.zeros(num_channels))
-        self.eps = eps
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        u = x.mean(1, keepdim=True)
-        s = (x - u).pow(2).mean(1, keepdim=True)
-        x = (x - u) / torch.sqrt(s + self.eps)
-        x = self.weight[:, None, None] * x + self.bias[:, None, None]
-        return x
+from .pe import PositionEmbeddingRandom
+from .layer_norm import LayerNorm2d
 
 
 class GeometryPromptEncoder(nn.Module):
@@ -166,28 +111,53 @@ class GeometryPromptEncoder(nn.Module):
         Embeds box prompts.
         
         Args:
-            boxes: [B, N, 4] boxes in (x1, y1, x2, y2) format
+            boxes: [B, N, 4] boxes in (x, y, w, h) or (x1, y1, x2, y2) format
+                   We assume (x, y, w, h) format from the data
         
         Returns:
             [B, N*2, C] corner embeddings
         """
-        boxes = boxes + 0.5  # Shift to center of pixel
-        coords = boxes.reshape(-1, 2, 2)  # [B*N, 2, 2]
-        corner_embedding = self.pe_layer.forward_with_coords(coords, self.input_image_size)
-        corner_embedding[:, 0, :] += self.point_embeddings[2].weight
-        corner_embedding[:, 1, :] += self.point_embeddings[3].weight
-        return corner_embedding
+        B, N = boxes.shape[:2]
+        
+        # Convert (x, y, w, h) to corner coordinates
+        # boxes[:, :, 0:2] is top-left (x, y)
+        # boxes[:, :, 2:4] is (w, h)
+        x1 = boxes[:, :, 0]
+        y1 = boxes[:, :, 1]
+        w = boxes[:, :, 2]
+        h = boxes[:, :, 3]
+        x2 = x1 + w
+        y2 = y1 + h
+        
+        # Stack corners: [B, N, 2, 2] -> top-left and bottom-right
+        corners = torch.stack([
+            torch.stack([x1, y1], dim=-1),  # top-left
+            torch.stack([x2, y2], dim=-1),  # bottom-right
+        ], dim=2)  # [B, N, 2, 2]
+        
+        corners = corners + 0.5  # Shift to center of pixel
+        corners = corners.view(B * N, 2, 2)  # [B*N, 2, 2]
+        
+        corner_embedding = self.pe_layer.forward_with_coords(corners, self.input_image_size)
+        corner_embedding[:, 0, :] += self.point_embeddings[2].weight  # top-left corner
+        corner_embedding[:, 1, :] += self.point_embeddings[3].weight  # bottom-right corner
+        
+        return corner_embedding.view(B, N * 2, -1)  # [B, N*2, C]
 
     def _embed_masks(self, masks: torch.Tensor) -> torch.Tensor:
         """
         Embeds mask inputs.
         
         Args:
-            masks: [B, 1, H, W] binary masks
+            masks: [B, 1, H, W] binary masks (any size)
         
         Returns:
-            [B, C, H', W'] mask embeddings
+            [B, C, 37, 37] mask embeddings (matches image_embedding_size)
         """
+        # Resize to mask_input_size (148x148) if needed
+        if masks.shape[2:] != self.mask_input_size:
+            masks = F.interpolate(masks, size=self.mask_input_size, mode='bilinear', align_corners=False)
+        # Downscale: 148 -> 74 -> 37
         return self.mask_downscaling(masks)
 
     def forward(
@@ -227,9 +197,7 @@ class GeometryPromptEncoder(nn.Module):
             sparse_embeddings = torch.cat([sparse_embeddings, point_embeddings], dim=1)
 
         if boxes is not None:
-            B, N_boxes = boxes.shape[:2]
-            box_embeddings = self._embed_boxes(boxes)
-            box_embeddings = box_embeddings.view(B, N_boxes * 2, -1)
+            box_embeddings = self._embed_boxes(boxes)  # Already [B, N*2, C]
             sparse_embeddings = torch.cat([sparse_embeddings, box_embeddings], dim=1)
 
         if masks is not None:
