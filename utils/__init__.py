@@ -1,4 +1,4 @@
-from .losses import generate_gaussian_heatmap, DETRCriterion
+from .losses import DETRCriterion
 from .metrics import compute_iou, compute_ap, compute_localization_accuracy, compute_distance_error
 from .box_ops import box_cxcywh_to_xyxy, box_xyxy_to_cxcywh, generalized_box_iou
 from .weight_loader import (
@@ -9,7 +9,7 @@ from .tensorboard import TensorBoardLogger
 from .prompt_utils import prepare_random_prompt
 from .visualize import visualize_validation_samples
 __all__ = [
-    'generate_gaussian_heatmap',
+    'DETRCriterion',
     'compute_iou',
     'compute_ap',
     'compute_localization_accuracy',

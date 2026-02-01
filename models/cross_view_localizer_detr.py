@@ -18,7 +18,7 @@ from typing import Dict, Optional, Tuple, List
 import math
 
 from .vggt_aggregator import Aggregator
-from .encoder import GeometryPromptEncoder
+from .encoder import GeometryPromptEncoder, PositionEmbeddingSine
 from .prompt_fusion import PromptFusionWithDense
 from .decoder import TransformerDecoder, MLP
 from .heads.yaw_head import CameraHead
@@ -62,8 +62,9 @@ class CrossViewLocalizerDETR(nn.Module):
         vggt_depth: int = 24,
         num_heads: int = 16,
         num_decoder_layers: int = 6,
-        num_object_queries: int = 100,
-        location_grid_size: int = 32,
+        num_object_queries: int = 10,
+        num_location_queries: int = 16,
+        heatmap_size: int = 32,
         freeze_vggt: bool = False,
         patch_embed: str = "dinov2_vitl14_reg",
         use_prompt_fusion: bool = True,
@@ -127,18 +128,21 @@ class CrossViewLocalizerDETR(nn.Module):
         # ============ 4. Unified DETR Decoder ============
         # Two types of queries processed by the SAME decoder
         self.num_object_queries = num_object_queries
-        self.location_grid_size = location_grid_size
-        self.num_location_queries = location_grid_size * location_grid_size
+        self.num_location_queries = num_location_queries
+        self.heatmap_size = heatmap_size
         
         # Object queries: learnable embeddings for bbox detection
         self.object_queries = nn.Embedding(num_object_queries, self.output_dim)
+        self.object_query_pos = nn.Embedding(num_object_queries, self.output_dim)
         
-        # Location queries: learnable embeddings for heatmap (G x G grid)
-        self.location_queries = nn.Embedding(self.num_location_queries, self.output_dim)
+        # Location queries: learnable embeddings (DETR-style)
+        self.location_queries = nn.Embedding(num_location_queries, self.output_dim)
+        self.location_query_pos = nn.Embedding(num_location_queries, self.output_dim)
         
-        # Positional encoding for location queries (2D grid structure)
-        self.location_query_pos = nn.Parameter(
-            self._create_2d_pos_encoding(location_grid_size, self.output_dim)
+        # Memory (satellite features) positional encoding - use sinusoidal (DETR-style)
+        self.memory_pos_embed = PositionEmbeddingSine(
+            num_pos_feats=self.output_dim // 2,
+            normalize=True,
         )
         
         # Single unified decoder for both query types
@@ -157,8 +161,24 @@ class CrossViewLocalizerDETR(nn.Module):
         self.bbox_head = MLP(self.output_dim, self.output_dim, 4, 3)
         self.bbox_score_head = nn.Linear(self.output_dim, 1)
         
-        # Heatmap prediction head: location query -> scalar score
-        self.heatmap_proj = nn.Linear(self.output_dim, 1)
+        # Heatmap prediction head using Mask2Former-style Dynamic Conv (dot product)
+        # Each location query generates a C-dim vector for 1x1 conv with sat features
+        self.mask_embed_dim = 256  # Dimension for mask embedding
+        
+        # Project location queries to mask embeddings
+        self.loc_to_mask_embed = nn.Sequential(
+            nn.Linear(self.output_dim, self.output_dim // 2),
+            nn.ReLU(),
+            nn.Linear(self.output_dim // 2, self.mask_embed_dim),
+        )
+        # Project location queries to weights (for combining multiple queries)
+        self.loc_to_weight = nn.Linear(self.output_dim, 1)
+        
+        # Project satellite features to mask embedding dimension
+        self.sat_to_mask_feat = nn.Sequential(
+            nn.Linear(self.output_dim, self.mask_embed_dim),
+            nn.LayerNorm(self.mask_embed_dim),
+        )
         
         # ============ 6. Camera Head (Yaw prediction) ============
         self.camera_head = CameraHead(
@@ -169,34 +189,6 @@ class CrossViewLocalizerDETR(nn.Module):
             init_values=0.01,
             num_iterations=4,
         )
-    
-    def _create_2d_pos_encoding(self, grid_size: int, dim: int) -> torch.Tensor:
-        """Create 2D sinusoidal positional encoding for location queries."""
-        y_coords = torch.linspace(-1, 1, grid_size)
-        x_coords = torch.linspace(-1, 1, grid_size)
-        grid_y, grid_x = torch.meshgrid(y_coords, x_coords, indexing='ij')
-        grid_coords = torch.stack([grid_x.flatten(), grid_y.flatten()], dim=1)  # [G*G, 2]
-        
-        # Sinusoidal encoding
-        max_freq_power = min(10, dim // 4)
-        pos_encoding = []
-        for i in range(max_freq_power):
-            freq = 2.0 ** i
-            pos_encoding.append(torch.sin(freq * grid_coords[:, 0:1]))
-            pos_encoding.append(torch.cos(freq * grid_coords[:, 0:1]))
-            pos_encoding.append(torch.sin(freq * grid_coords[:, 1:2]))
-            pos_encoding.append(torch.cos(freq * grid_coords[:, 1:2]))
-        
-        pos_encoding = torch.cat(pos_encoding, dim=1)
-        
-        # Pad or truncate to match dim
-        if pos_encoding.shape[1] < dim:
-            padding = torch.zeros(grid_size * grid_size, dim - pos_encoding.shape[1])
-            pos_encoding = torch.cat([pos_encoding, padding], dim=1)
-        else:
-            pos_encoding = pos_encoding[:, :dim]
-        
-        return pos_encoding  # [G*G, dim]
     
     def _soft_argmax(self, heatmap: torch.Tensor) -> torch.Tensor:
         """Differentiable soft-argmax to extract 2D coordinates from heatmap."""
@@ -301,28 +293,41 @@ class CrossViewLocalizerDETR(nn.Module):
             target_guidance = front_patch_features.mean(dim=1)  # [B, 2*C]
         
         # ============ Step 4: Unified DETR Decoder ============
-        # Prepare object queries
+        # Prepare object queries with positional encoding
         obj_queries = self.object_queries.weight.unsqueeze(0).expand(B, -1, -1)  # [B, N_obj, C]
+        obj_query_pos = self.object_query_pos.weight.unsqueeze(0).expand(B, -1, -1)  # [B, N_obj, C]
         
         # Prepare location queries with positional encoding
-        loc_queries = self.location_queries.weight.unsqueeze(0).expand(B, -1, -1)  # [B, G*G, C]
-        loc_query_pos = self.location_query_pos.unsqueeze(0).expand(B, -1, -1)  # [B, G*G, C]
-        loc_queries = loc_queries + loc_query_pos  # Add 2D positional info
+        loc_queries = self.location_queries.weight.unsqueeze(0).expand(B, -1, -1)  # [B, N_loc, C]
+        loc_query_pos = self.location_query_pos.weight.unsqueeze(0).expand(B, -1, -1)  # [B, N_loc, C]
         
-        # Add target guidance to ALL queries
+        # Add target guidance to ALL queries (content, not position)
         target_proj = self.target_guidance_proj(target_guidance)  # [B, C]
         obj_queries = obj_queries + target_proj.unsqueeze(1)
         loc_queries = loc_queries + target_proj.unsqueeze(1)
         
-        # Concatenate queries: [Object Queries | Location Queries]
-        unified_queries = torch.cat([obj_queries, loc_queries], dim=1)  # [B, N_obj + G*G, C]
+        # Concatenate queries and their positional encodings
+        unified_queries = torch.cat([obj_queries, loc_queries], dim=1)  # [B, N_total, C]
+        unified_query_pos = torch.cat([obj_query_pos, loc_query_pos], dim=1)  # [B, N_total, C]
+        
+        # Memory positional encoding for satellite features
+        # sat_patch_features: [B, P, C] where P = 37*37 = 1369
+        device = sat_patch_features.device
+        memory_pos = self.memory_pos_embed(
+            (self.num_patches_per_side, self.num_patches_per_side), device=device
+        )  # [C, H, W]
+        memory_pos = memory_pos.flatten(1).permute(1, 0)  # [P, C]
+        memory_pos = memory_pos.unsqueeze(0).expand(B, -1, -1)  # [B, P, C]
         
         # Single decoder pass for all queries
         decoder_out = self.decoder(
             tgt=unified_queries,
             memory=sat_patch_features,
+            pos=memory_pos,
+            query_pos=unified_query_pos,
         )  # [1, B, N_total, C] or [B, N_total, C]
         
+        # Handle output shape
         if decoder_out.dim() == 4:
             decoder_out = decoder_out[-1]  # Take last layer: [B, N_total, C]
         
@@ -335,11 +340,24 @@ class CrossViewLocalizerDETR(nn.Module):
         bbox_scores = self.bbox_score_head(obj_decoder_out).squeeze(-1).sigmoid()  # [B, N_obj]
         
         # ============ Step 5b: Heatmap Predictions (from location queries) ============
-        # Each location query outputs a scalar score
-        heatmap_logits = self.heatmap_proj(loc_decoder_out).squeeze(-1)  # [B, G*G]
-        heatmap_grid = heatmap_logits.view(B, self.location_grid_size, self.location_grid_size)  # [B, G, G]
+        # Use Mask2Former-style dot product: query embeddings dot product with sat features
         
-        # Upsample to target size
+        # Project satellite features to mask embedding space
+        H_feat = W_feat = self.num_patches_per_side  # 37
+        sat_mask_feat = self.sat_to_mask_feat(sat_patch_features)  # [B, P, mask_dim]
+        sat_mask_feat = sat_mask_feat.permute(0, 2, 1).view(B, -1, H_feat, W_feat)  # [B, mask_dim, H, W]
+        
+        # Generate mask embeddings from location queries
+        mask_embeds = self.loc_to_mask_embed(loc_decoder_out)  # [B, N_loc, mask_dim]
+        query_weights = self.loc_to_weight(loc_decoder_out).softmax(dim=1)  # [B, N_loc, 1]
+        
+        # Weighted combination of mask embeddings
+        combined_mask_embed = (mask_embeds * query_weights).sum(dim=1)  # [B, mask_dim]
+        
+        # Dot product: [B, mask_dim] x [B, mask_dim, H, W] -> [B, H, W]
+        heatmap_grid = torch.einsum('bc,bchw->bhw', combined_mask_embed, sat_mask_feat)
+        
+        # Upsample to target heatmap size first, then to image size
         heatmap_upsampled = F.interpolate(
             heatmap_grid.unsqueeze(1),
             size=(self.img_size, self.img_size),

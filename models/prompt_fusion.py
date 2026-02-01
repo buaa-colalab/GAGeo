@@ -117,7 +117,3 @@ class PromptFusionWithDense(nn.Module):
         target_guidance = self.target_proj(target_guidance)
         
         return fused_sparse, fused_image, target_guidance
-
-
-# Alias for backward compatibility
-PromptFusionModule = TwoWayTransformer

@@ -1,10 +1,12 @@
-"""Cross-View Localization Loss Utilities
-
-Heatmap generation utilities for camera position supervision.
-"""
+"""Cross-View Localization Loss Functions"""
 
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from typing import Tuple
+
+from .box_ops import box_cxcywh_to_xyxy, generalized_box_iou
+
 
 class DETRCriterion(nn.Module):
     """
@@ -127,47 +129,3 @@ class DETRCriterion(nn.Module):
         losses['loss'] = total_loss
         
         return losses
-
-def generate_gaussian_heatmap(
-    center: torch.Tensor,
-    size: Tuple[int, int],
-    device: torch.device,
-    sigma: float = 2.0,
-) -> torch.Tensor:
-    """
-    Generate a 2D Gaussian heatmap centered at the given position.
-    
-    Args:
-        center: [B, 2] Normalized (x, y) coordinates in [0, 1]
-        size: (H, W) Heatmap size
-        device: Device to create tensor on
-        sigma: Gaussian standard deviation in pixels
-    
-    Returns:
-        heatmap: [B, H, W] Gaussian heatmap with peak at center
-    """
-    B = center.shape[0]
-    H, W = size
-    
-    # Convert normalized coordinates to pixel coordinates
-    center_x = center[:, 0] * (W - 1)  # [B]
-    center_y = center[:, 1] * (H - 1)  # [B]
-    
-    # Create coordinate grids
-    y_coords = torch.arange(H, device=device, dtype=torch.float32)
-    x_coords = torch.arange(W, device=device, dtype=torch.float32)
-    y_grid, x_grid = torch.meshgrid(y_coords, x_coords, indexing='ij')
-    
-    # Expand for batch
-    y_grid = y_grid.unsqueeze(0).expand(B, -1, -1)  # [B, H, W]
-    x_grid = x_grid.unsqueeze(0).expand(B, -1, -1)  # [B, H, W]
-    
-    # Compute Gaussian
-    center_x = center_x.view(B, 1, 1)
-    center_y = center_y.view(B, 1, 1)
-    
-    gaussian = torch.exp(
-        -((x_grid - center_x) ** 2 + (y_grid - center_y) ** 2) / (2 * sigma ** 2)
-    )
-    
-    return gaussian

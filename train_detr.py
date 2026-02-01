@@ -19,7 +19,7 @@ from accelerate import Accelerator
 from accelerate.utils import set_seed
 from transformers import get_scheduler
 
-from models import CrossViewLocalizerDETR, build_cross_view_localizer_detr, SimpleMatcher
+from models import CrossViewLocalizerDETR
 from data import CrossViewDataset, collate_fn
 from utils import (
     load_vggt_weights,
@@ -31,7 +31,6 @@ from utils import (
     generalized_box_iou,
     DETRCriterion,
 )
-
 
 
 def parse_args():
