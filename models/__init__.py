@@ -1,14 +1,18 @@
-from .cross_view_localizer_detr import CrossViewLocalizerDETR, build_cross_view_localizer_detr
-from .vggt_aggregator import Aggregator
-from .encoder import GeometryPromptEncoder
-from .prompt_fusion import TwoWayTransformer
-from .heads import CameraHead
+from .cross_view_localizer_pi3 import CrossViewLocalizerPi3, build_cross_view_localizer_pi3
+from .backbone import Pi3Backbone, load_pi3_weights
+from .encoder import GeometryPromptEncoder, PromptFusionWithDense
+from .heads import Pi3CameraHead
+
+# Alias for backward compatibility
+CrossViewLocalizer = CrossViewLocalizerPi3
 
 __all__ = [
-    'CrossViewLocalizerDETR',
-    'build_cross_view_localizer_detr',
-    'Aggregator',
+    'CrossViewLocalizerPi3',
+    'CrossViewLocalizer',
+    'build_cross_view_localizer_pi3',
+    'Pi3Backbone',
+    'load_pi3_weights',
     'GeometryPromptEncoder',
-    'TwoWayTransformer',
-    'CameraHead',
+    'PromptFusionWithDense',
+    'Pi3CameraHead',
 ]

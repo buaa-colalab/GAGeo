@@ -22,11 +22,9 @@ def test_model():
         vggt_depth=24,
         num_heads=16,
         num_decoder_layers=6,
-        num_object_queries=10,       # Reduced for single-object detection
-        num_location_queries=16,     # Reduced for efficiency
-        heatmap_size=32,             # Output heatmap size
+        num_object_queries=10,
+        num_location_queries=16,
         freeze_vggt=False,
-        use_prompt_fusion=True,
     )
     print("   ✓ Model created")
     
@@ -88,6 +86,50 @@ def test_model():
     print(f"   heatmap sum: {outputs['heatmap'].sum(dim=[1,2])} (expected ~1.0 per sample)")
     print(f"   position: {outputs['position']} (expected [0,1])")
     print(f"   yaw_radians: {outputs['yaw_radians']} (expected [-π, π])")
+    
+    # ============ Test different prompt combinations ============
+    print("\n8. Testing different prompt combinations...")
+    
+    # Clear cache before testing combinations
+    del outputs
+    torch.cuda.empty_cache()
+    
+    # Test with only bbox
+    print("   Testing: bbox only...")
+    boxes = torch.rand(B, 1, 4, device=device) * 200  # [B, 1, 4] (x, y, w, h)
+    with torch.no_grad():
+        outputs_bbox = model(front_view, satellite_view, boxes=boxes)
+    assert outputs_bbox['heatmap'].shape == (B, 518, 518)
+    print("   ✓ bbox only passed")
+    del outputs_bbox
+    torch.cuda.empty_cache()
+    
+    # Test with only mask
+    print("   Testing: mask only...")
+    masks = torch.zeros(B, 1, 518, 518, device=device)
+    masks[:, :, 100:200, 100:200] = 1.0
+    with torch.no_grad():
+        outputs_mask = model(front_view, satellite_view, masks=masks)
+    assert outputs_mask['heatmap'].shape == (B, 518, 518)
+    print("   ✓ mask only passed")
+    del outputs_mask
+    torch.cuda.empty_cache()
+    
+    # Test with point + bbox
+    print("   Testing: point + bbox...")
+    with torch.no_grad():
+        outputs_pb = model(front_view, satellite_view, points=points, boxes=boxes)
+    assert outputs_pb['heatmap'].shape == (B, 518, 518)
+    print("   ✓ point + bbox passed")
+    del outputs_pb
+    torch.cuda.empty_cache()
+    
+    # Test with all three
+    print("   Testing: point + bbox + mask...")
+    with torch.no_grad():
+        outputs_all = model(front_view, satellite_view, points=points, boxes=boxes, masks=masks)
+    assert outputs_all['heatmap'].shape == (B, 518, 518)
+    print("   ✓ point + bbox + mask passed")
     
     print("\n" + "=" * 50)
     print("✓ All tests passed!")

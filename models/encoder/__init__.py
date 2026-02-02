@@ -1,8 +1,8 @@
 from .transformer import Attention, MLP, TwoWayAttentionBlock, TwoWayTransformer
-from .pe import PositionEmbeddingRandom
-from .position_encoding import PositionEmbeddingSine
+from .pe_random import PositionEmbeddingRandom
 from .layer_norm import LayerNorm2d
 from .prompt_encoder import GeometryPromptEncoder
+from .prompt_fusion import PromptFusionWithDense
 
 __all__ = [
     'Attention',
@@ -10,7 +10,7 @@ __all__ = [
     'TwoWayAttentionBlock',
     'TwoWayTransformer',
     'PositionEmbeddingRandom',
-    'PositionEmbeddingSine',
     'LayerNorm2d',
     'GeometryPromptEncoder',
+    'PromptFusionWithDense',
 ]

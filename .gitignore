@@ -33,9 +33,9 @@ output/
 output_*/
 logs/
 
-data/train.json
-data/val.json
-data/test.json
-data/cesium_drone_dataset.json
-data/cesium_drone_dataset2.json
+
+
+data/val_all.json
+data/train_all.json
 visualizations/
+data_preprocess/

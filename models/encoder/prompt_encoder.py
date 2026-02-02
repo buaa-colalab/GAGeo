@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .pe import PositionEmbeddingRandom
+from .pe_random import PositionEmbeddingRandom
 from .layer_norm import LayerNorm2d
 
 

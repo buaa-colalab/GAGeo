@@ -2,19 +2,23 @@
 
 # Data
 data:
-  train_json: "/data/xhj/location/data/train.json"
-  val_json: "/data/xhj/location/data/val.json"
-  data_root: "/data/GoogleEarth"
+  #train_json: "/data/xhj/location/data/single.json"
+  train_json: "/data/xhj/location/data/train_all.json"
+  #val_json: "/data/xhj/location/data/single.json"
+  val_json: "/data/xhj/location/data/val_all.json"
+  data_root: "/data/xhj/data/"
   img_size: 518
   crop_size: 518
   num_workers: 1  # Reduced from 4 to prevent thread exhaustion with 8 GPUs
 
 # Model
 model:
-  embed_dim: 1024
-  vggt_depth: 24
+  # Pi3 backbone settings
+  decoder_size: 'large'  # 'small', 'base', 'large'
   num_heads: 16
   num_decoder_layers: 6
+  num_object_queries: 10
+  num_location_queries: 16
   
   # 多任务开关
   enable_bbox: true
@@ -22,11 +26,10 @@ model:
   enable_camera: true
   enable_position: true
   
-  # 预训练权重 (放在ckpt/目录下便于管理)
-  vggt_weights: /data/xhj/location/ckpt/vggt/model.pt  # 例如: ckpt/vggt.pth
-  dinov2_weights: null  # 例如: ckpt/dinov2_vitl14_reg.pth
-  freeze_patch_embed: true
-  freeze_aggregator: false  # Set to false and use DeepSpeed ZeRO for better training
+  # Pi3 预训练权重
+  pi3_weights: /data/xhj/location/ckpt/pi3/model.safetensors
+  freeze_dinov2: true  # 冻结DINOv2 encoder部分
+  freeze_decoder: false  # Pi3 decoder可训练
 
 # Training
 training:
@@ -60,17 +63,17 @@ training:
   # 混合精度训练 (推荐bf16用于RTX 4090)
   use_amp: true
   mixed_precision: bf16  # "bf16" or "fp16"
-  gpu: "5,6,7"
+  gpu: "0,1,2,3"
 
 # Checkpointing
 checkpoint:
-  output_dir: "/data/run01/scxi704/xhj/location/output"  # 绝对路径，避免写到有配额限制的home目录
+  output_dir: "/data/xhj/location/output"  # 绝对路径，避免写到有配额限制的home目录
   save_freq: 5
   resume: null
 
 # Logging
 logging:
   val_freq: 1  # 每N个epoch验证一次
-  vis_freq: 5  # 每N个epoch可视化一次
+  vis_freq: 1  # 每N个epoch可视化一次
   num_vis_samples: 10  # 可视化样本数量
   use_tensorboard: true

@@ -35,13 +35,10 @@
   "mono_filename": "r-170_51.46010613,-0.05627133_2025-04_QEa0iGpFoGkJVe3Z64hSdA_d141_z3.jpg",
   "mono_point": [370.5, 227.0],
   "mono_bbox": [304.0, 172.0, 133.0, 110.0],
-  "mono_segmentation": {
-    "size": [518, 518],
-    "counts": "VPj44d?c0I6J3M20O01O..."
-  },
+  "mono_segmentation": ,
   "sat_filename": "51.46010613,-0.05627133_2025-04_QEa0iGpFoGkJVe3Z64hSdA_d141_z3.jpg",
-  "sate_bbox": [123.64, 554.17, 148, 233],
-  "sate_segmentation": [[228.64, 554.17, 123.64, 765.17, ...]],
+  "sate_bbox": ,
+  "sate_segmentation": ,
   "rotation": -131.0,
   "camera_position": [640.0, 640.0]
 }

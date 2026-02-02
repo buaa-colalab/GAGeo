@@ -57,8 +57,15 @@ def visualize_batch_sample(batch, outputs, idx, img_size, save_path):
     gt_yaw = batch['yaw_radians'][idx].cpu().item()
     gt_position = batch['camera_position'][idx].cpu().numpy()
     
-    # Extract predictions
-    pred_bbox = outputs['pred_boxes'][idx, 0].detach().cpu().numpy() if 'pred_boxes' in outputs else None
+    # Extract predictions (select best bbox by score)
+    if 'pred_boxes' in outputs and 'bbox_scores' in outputs:
+        scores = outputs['bbox_scores'][idx].detach().cpu()
+        best_idx = scores.argmax().item()
+        pred_bbox = outputs['pred_boxes'][idx, best_idx].detach().cpu().numpy()
+        pred_score = scores[best_idx].item()
+    else:
+        pred_bbox = None
+        pred_score = None
     pred_yaw = outputs['yaw_radians'][idx].detach().cpu().item() if 'yaw_radians' in outputs else None
     pred_position = outputs['position'][idx].detach().cpu().numpy() if 'position' in outputs else None
     
@@ -78,7 +85,8 @@ def visualize_batch_sample(batch, outputs, idx, img_size, save_path):
     axes[1].imshow(sat_img)
     draw_bbox(axes[1], gt_bbox, img_size, 'lime', '-', 3, 'GT BBox')
     if pred_bbox is not None:
-        draw_bbox(axes[1], pred_bbox, img_size, 'red', '--', 2, 'Pred BBox')
+        label = f'Pred (s={pred_score:.2f})' if pred_score is not None else 'Pred BBox'
+        draw_bbox(axes[1], pred_bbox, img_size, 'red', '--', 2, label)
     axes[1].set_title('Satellite - BBox', fontsize=14)
     axes[1].legend(loc='upper right')
     axes[1].axis('off')

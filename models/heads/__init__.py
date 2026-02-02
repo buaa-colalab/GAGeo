@@ -1,7 +1,10 @@
 # Task-specific prediction heads for cross-view localization
-from .yaw_head import CameraHead, YawHead
+from .pi3_camera_head import Pi3CameraHead
+from .bbox_head import BBoxHead
+from .heatmap_head import HeatmapHead
 
 __all__ = [
-    'CameraHead',
-    'YawHead',
+    'Pi3CameraHead',
+    'BBoxHead',
+    'HeatmapHead',
 ]

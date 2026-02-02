@@ -19,11 +19,9 @@ from accelerate import Accelerator
 from accelerate.utils import set_seed
 from transformers import get_scheduler
 
-from models import CrossViewLocalizerDETR
+from models import CrossViewLocalizerPi3, build_cross_view_localizer_pi3
 from data import CrossViewDataset, collate_fn
 from utils import (
-    load_vggt_weights,
-    freeze_backbone,
     get_param_groups,
     prepare_random_prompt,
     visualize_validation_samples,
@@ -277,28 +275,32 @@ def main():
     
     accelerator.print(f'Train: {len(train_dataset)} samples, Val: {len(val_dataset)} samples')
     
-    # Create model
-    model = CrossViewLocalizerDETR(
+    # Create model with Pi3 backbone
+    model = build_cross_view_localizer_pi3(
+        pretrained_pi3=cfg['model'].get('pi3_weights'),
+        freeze_backbone=False,  # We'll freeze selectively below
         img_size=cfg['data']['img_size'],
-        embed_dim=cfg['model']['embed_dim'],
-        vggt_depth=cfg['model']['vggt_depth'],
+        decoder_size=cfg['model'].get('decoder_size', 'large'),
         num_heads=cfg['model']['num_heads'],
         num_decoder_layers=cfg['model'].get('num_decoder_layers', 6),
-        num_object_queries=cfg['model'].get('num_object_queries', 100),
-        location_grid_size=cfg['model'].get('location_grid_size', 32),
-        freeze_vggt=False,
-        use_prompt_fusion=cfg['model'].get('use_prompt_fusion', True),
+        num_object_queries=cfg['model'].get('num_object_queries', 10),
+        num_location_queries=cfg['model'].get('num_location_queries', 16),
     )
     
-    # Load pretrained weights
-    if cfg['model'].get('vggt_weights'):
-        load_vggt_weights(model, cfg['model']['vggt_weights'], load_heads=False)
-        accelerator.print(f'Loaded VGGT weights from {cfg["model"]["vggt_weights"]}')
+    if cfg['model'].get('pi3_weights'):
+        accelerator.print(f'Loaded Pi3 weights from {cfg["model"]["pi3_weights"]}')
     
-    # Freeze backbone
-    if cfg['model'].get('freeze_patch_embed', True):
-        freeze_backbone(model, freeze_patch_embed=True, freeze_aggregator=cfg['model'].get('freeze_aggregator', False))
-        accelerator.print('Froze backbone')
+    # Freeze DINOv2 encoder (keep decoder trainable)
+    if cfg['model'].get('freeze_dinov2', True):
+        for param in model.backbone.encoder.parameters():
+            param.requires_grad = False
+        accelerator.print('Froze DINOv2 encoder')
+    
+    # Optionally freeze Pi3 decoder
+    if cfg['model'].get('freeze_decoder', False):
+        for param in model.backbone.decoder.parameters():
+            param.requires_grad = False
+        accelerator.print('Froze Pi3 decoder')
     
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total = sum(p.numel() for p in model.parameters())
@@ -369,6 +371,11 @@ def main():
         if (epoch + 1) % cfg['logging']['val_freq'] == 0:
             val_losses = validate(model, val_loader, criterion, accelerator, cfg, epoch)
             accelerator.print(f'Val   - ' + ', '.join([f'{k}: {v:.4f}' for k, v in val_losses.items()]))
+            
+            # Visualize validation samples
+            if (epoch + 1) % cfg['logging'].get('vis_freq', 1) == 0:
+                num_vis = cfg['logging'].get('num_vis_samples', 10)
+                visualize_validation_samples(model, val_loader, accelerator, cfg, epoch, num_samples=num_vis)
             
             # Save best
             if val_losses['loss'] < best_loss:

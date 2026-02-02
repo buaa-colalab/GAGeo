@@ -15,13 +15,25 @@ import warnings
 import torch
 from torch import nn, Tensor
 
-from .attention import Attention
-from .drop_path import DropPath
-from .layer_scale import LayerScale
-from .mlp import Mlp
+from .attention import Attention, MemEffAttention, CrossAttentionRope, MemEffCrossAttentionRope, FlashAttentionRope
+from ..dinov2.layers.drop_path import DropPath
+from ..dinov2.layers.layer_scale import LayerScale
+from ..dinov2.layers.mlp import Mlp
+from .attention import PRopeFlashAttention
 
+XFORMERS_ENABLED = os.environ.get("XFORMERS_DISABLED") is None
+try:
+    if XFORMERS_ENABLED:
+        from xformers.ops import fmha, scaled_index_add, index_select_cat
 
-XFORMERS_AVAILABLE = False
+        XFORMERS_AVAILABLE = True
+        # warnings.warn("xFormers is available (Block)")
+    else:
+        # warnings.warn("xFormers is disabled (Block)")
+        raise ImportError
+except ImportError:
+    XFORMERS_AVAILABLE = False
+    # warnings.warn("xFormers is not available (Block)")
 
 
 class Block(nn.Module):
@@ -30,7 +42,7 @@ class Block(nn.Module):
         dim: int,
         num_heads: int,
         mlp_ratio: float = 4.0,
-        qkv_bias: bool = True,
+        qkv_bias: bool = False,
         proj_bias: bool = True,
         ffn_bias: bool = True,
         drop: float = 0.0,
@@ -41,14 +53,10 @@ class Block(nn.Module):
         norm_layer: Callable[..., nn.Module] = nn.LayerNorm,
         attn_class: Callable[..., nn.Module] = Attention,
         ffn_layer: Callable[..., nn.Module] = Mlp,
-        qk_norm: bool = False,
-        fused_attn: bool = True,  # use F.scaled_dot_product_attention or not
-        rope=None,
     ) -> None:
         super().__init__()
-
+        # print(f"biases: qkv: {qkv_bias}, proj: {proj_bias}, ffn: {ffn_bias}")
         self.norm1 = norm_layer(dim)
-
         self.attn = attn_class(
             dim,
             num_heads=num_heads,
@@ -56,9 +64,6 @@ class Block(nn.Module):
             proj_bias=proj_bias,
             attn_drop=attn_drop,
             proj_drop=drop,
-            qk_norm=qk_norm,
-            fused_attn=fused_attn,
-            rope=rope,
         )
 
         self.ls1 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
@@ -67,16 +72,20 @@ class Block(nn.Module):
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = ffn_layer(
-            in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop, bias=ffn_bias
+            in_features=dim,
+            hidden_features=mlp_hidden_dim,
+            act_layer=act_layer,
+            drop=drop,
+            bias=ffn_bias,
         )
         self.ls2 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
         self.drop_path2 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
         self.sample_drop_ratio = drop_path
 
-    def forward(self, x: Tensor, pos=None) -> Tensor:
-        def attn_residual_func(x: Tensor, pos=None) -> Tensor:
-            return self.ls1(self.attn(self.norm1(x), pos=pos))
+    def forward(self, x: Tensor) -> Tensor:
+        def attn_residual_func(x: Tensor) -> Tensor:
+            return self.ls1(self.attn(self.norm1(x)))
 
         def ffn_residual_func(x: Tensor) -> Tensor:
             return self.ls2(self.mlp(self.norm2(x)))
@@ -84,22 +93,28 @@ class Block(nn.Module):
         if self.training and self.sample_drop_ratio > 0.1:
             # the overhead is compensated only for a drop path rate larger than 0.1
             x = drop_add_residual_stochastic_depth(
-                x, pos=pos, residual_func=attn_residual_func, sample_drop_ratio=self.sample_drop_ratio
+                x,
+                residual_func=attn_residual_func,
+                sample_drop_ratio=self.sample_drop_ratio,
             )
             x = drop_add_residual_stochastic_depth(
-                x, residual_func=ffn_residual_func, sample_drop_ratio=self.sample_drop_ratio
+                x,
+                residual_func=ffn_residual_func,
+                sample_drop_ratio=self.sample_drop_ratio,
             )
         elif self.training and self.sample_drop_ratio > 0.0:
-            x = x + self.drop_path1(attn_residual_func(x, pos=pos))
+            x = x + self.drop_path1(attn_residual_func(x))
             x = x + self.drop_path1(ffn_residual_func(x))  # FIXME: drop_path2
         else:
-            x = x + attn_residual_func(x, pos=pos)
+            x = x + attn_residual_func(x)
             x = x + ffn_residual_func(x)
         return x
 
 
 def drop_add_residual_stochastic_depth(
-    x: Tensor, residual_func: Callable[[Tensor], Tensor], sample_drop_ratio: float = 0.0, pos=None
+    x: Tensor,
+    residual_func: Callable[[Tensor], Tensor],
+    sample_drop_ratio: float = 0.0,
 ) -> Tensor:
     # 1) extract subset using permutation
     b, n, d = x.shape
@@ -108,12 +123,7 @@ def drop_add_residual_stochastic_depth(
     x_subset = x[brange]
 
     # 2) apply residual_func to get residual
-    if pos is not None:
-        # if necessary, apply rope to the subset
-        pos = pos[brange]
-        residual = residual_func(x_subset, pos=pos)
-    else:
-        residual = residual_func(x_subset)
+    residual = residual_func(x_subset)
 
     x_flat = x.flatten(1)
     residual = residual.flatten(1)
@@ -214,13 +224,13 @@ class NestedTensorBlock(Block):
                 x_list,
                 residual_func=attn_residual_func,
                 sample_drop_ratio=self.sample_drop_ratio,
-                scaling_vector=(self.ls1.gamma if isinstance(self.ls1, LayerScale) else None),
+                scaling_vector=self.ls1.gamma if isinstance(self.ls1, LayerScale) else None,
             )
             x_list = drop_add_residual_stochastic_depth_list(
                 x_list,
                 residual_func=ffn_residual_func,
                 sample_drop_ratio=self.sample_drop_ratio,
-                scaling_vector=(self.ls2.gamma if isinstance(self.ls1, LayerScale) else None),
+                scaling_vector=self.ls2.gamma if isinstance(self.ls1, LayerScale) else None,
             )
             return x_list
         else:
@@ -245,3 +255,311 @@ class NestedTensorBlock(Block):
             return self.forward_nested(x_or_x_list)
         else:
             raise AssertionError
+
+class BlockRope(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int,
+        mlp_ratio: float = 4.0,
+        qkv_bias: bool = False,
+        proj_bias: bool = True,
+        ffn_bias: bool = True,
+        drop: float = 0.0,
+        attn_drop: float = 0.0,
+        init_values=None,
+        drop_path: float = 0.0,
+        act_layer: Callable[..., nn.Module] = nn.GELU,
+        norm_layer: Callable[..., nn.Module] = nn.LayerNorm,
+        attn_class: Callable[..., nn.Module] = Attention,
+        ffn_layer: Callable[..., nn.Module] = Mlp,
+        qk_norm: bool=False,
+        rope=None
+    ) -> None:
+        super().__init__()
+        # print(f"biases: qkv: {qkv_bias}, proj: {proj_bias}, ffn: {ffn_bias}")
+        self.norm1 = norm_layer(dim)
+        self.attn = attn_class(
+            dim,
+            num_heads=num_heads,
+            qkv_bias=qkv_bias,
+            proj_bias=proj_bias,
+            attn_drop=attn_drop,
+            proj_drop=drop,
+            qk_norm=qk_norm,
+            rope=rope
+        )
+
+        self.ls1 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
+        self.drop_path1 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+
+        self.norm2 = norm_layer(dim)
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        self.mlp = ffn_layer(
+            in_features=dim,
+            hidden_features=mlp_hidden_dim,
+            act_layer=act_layer,
+            drop=drop,
+            bias=ffn_bias,
+        )
+        self.ls2 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
+        self.drop_path2 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+
+        self.sample_drop_ratio = drop_path
+
+    def forward(self, x: Tensor, xpos=None) -> Tensor:
+        def attn_residual_func(x: Tensor) -> Tensor:
+            return self.ls1(self.attn(self.norm1(x), xpos=xpos))
+
+        def ffn_residual_func(x: Tensor) -> Tensor:
+            return self.ls2(self.mlp(self.norm2(x)))
+
+        if self.training and self.sample_drop_ratio > 0.1:
+            # the overhead is compensated only for a drop path rate larger than 0.1
+            x = drop_add_residual_stochastic_depth(
+                x,
+                residual_func=attn_residual_func,
+                sample_drop_ratio=self.sample_drop_ratio,
+            )
+            x = drop_add_residual_stochastic_depth(
+                x,
+                residual_func=ffn_residual_func,
+                sample_drop_ratio=self.sample_drop_ratio,
+            )
+        elif self.training and self.sample_drop_ratio > 0.0:
+            x = x + self.drop_path1(attn_residual_func(x))
+            x = x + self.drop_path1(ffn_residual_func(x))  # FIXME: drop_path2
+        else:
+            x = x + attn_residual_func(x)
+            x = x + ffn_residual_func(x)
+        return x
+
+
+class CrossBlockRope(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int,
+        mlp_ratio: float = 4.0,
+        qkv_bias: bool = False,
+        proj_bias: bool = True,
+        ffn_bias: bool = True,
+        act_layer: Callable[..., nn.Module] = nn.GELU,
+        norm_layer: Callable[..., nn.Module] = nn.LayerNorm,
+        attn_class: Callable[..., nn.Module] = Attention,
+        cross_attn_class: Callable[..., nn.Module] = CrossAttentionRope,
+        ffn_layer: Callable[..., nn.Module] = Mlp,
+        init_values=None,
+        qk_norm: bool=False,
+        rope=None
+    ) -> None:
+        super().__init__()
+        # print(f"biases: qkv: {qkv_bias}, proj: {proj_bias}, ffn: {ffn_bias}")
+        self.ls1 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
+        self.norm1 = norm_layer(dim)
+        self.attn = attn_class(
+            dim,
+            num_heads=num_heads,
+            qkv_bias=qkv_bias,
+            proj_bias=proj_bias,
+            rope=rope,
+            qk_norm=qk_norm
+        )
+
+        self.ls2 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
+        self.ls_y = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
+        self.norm2 = norm_layer(dim)
+        self.norm_y = norm_layer(dim)
+        self.cross_attn = cross_attn_class(
+            dim,
+            num_heads=num_heads,
+            qkv_bias=qkv_bias,
+            proj_bias=proj_bias,
+            rope=rope,
+            qk_norm=qk_norm
+        )
+
+        self.norm3 = norm_layer(dim)
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        self.mlp = ffn_layer(
+            in_features=dim,
+            hidden_features=mlp_hidden_dim,
+            act_layer=act_layer,
+            bias=ffn_bias,
+        )
+
+    def forward(self, x: Tensor, y: Tensor, xpos=None, ypos=None) -> Tensor:
+        def attn_residual_func(x: Tensor) -> Tensor:
+            return self.ls1(self.attn(self.norm1(x), xpos=xpos))
+
+        def cross_attn_residual_func(x: Tensor, y: Tensor) -> Tensor:
+            return self.ls_y(self.cross_attn(self.norm2(x), y, y, qpos=xpos, kpos=ypos))
+
+        def ffn_residual_func(x: Tensor) -> Tensor:
+            return self.ls2(self.mlp(self.norm3(x)))
+
+        x = x + attn_residual_func(x)
+        y_ = self.norm_y(y)
+        x = x + cross_attn_residual_func(x, y_)
+        x = x + ffn_residual_func(x)
+
+        return x
+    
+
+
+
+class PoseInjectBlock(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int,
+        mlp_ratio: float = 4.0,
+        qkv_bias: bool = False,
+        proj_bias: bool = True,
+        ffn_bias: bool = True,
+        drop: float = 0.0,
+        attn_drop: float = 0.0,
+        init_values=None,
+        drop_path: float = 0.0,
+        act_layer: Callable[..., nn.Module] = nn.GELU,
+        norm_layer: Callable[..., nn.Module] = nn.LayerNorm,
+        attn_class: Callable[..., nn.Module] = PRopeFlashAttention,
+        ffn_layer: Callable[..., nn.Module] = Mlp,
+        qk_norm: bool=False,
+        rope=None
+    ) -> None:
+        super().__init__()
+        # print(f"biases: qkv: {qkv_bias}, proj: {proj_bias}, ffn: {ffn_bias}")
+        self.norm1 = norm_layer(dim)
+        self.attn = attn_class(
+            dim,
+            num_heads=num_heads,
+            qkv_bias=qkv_bias,
+            proj_bias=proj_bias,
+            attn_drop=attn_drop,
+            proj_drop=drop,
+            qk_norm=qk_norm,
+            rope=rope
+        )
+
+        self.ls1 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
+        self.drop_path1 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+
+        self.norm2 = norm_layer(dim)
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        self.mlp = ffn_layer(
+            in_features=dim,
+            hidden_features=mlp_hidden_dim,
+            act_layer=act_layer,
+            drop=drop,
+            bias=ffn_bias,
+        )
+        self.ls2 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
+        self.drop_path2 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+
+        self.sample_drop_ratio = drop_path
+
+    def forward(self, x: Tensor, poses, H, W, patch_h, patch_w, K=None, connect=False, attn_mask=None) -> Tensor:
+        extrinsics = se3_inverse(poses)
+        def attn_residual_func(x: Tensor) -> Tensor:
+            return self.ls1(self.attn(self.norm1(x), extrinsics, H, W, patch_h, patch_w, K=K, attn_mask=attn_mask))
+
+        def ffn_residual_func(x: Tensor) -> Tensor:
+            return self.ls2(self.mlp(self.norm2(x)))
+
+        if connect:
+            return x + attn_residual_func(x) + ffn_residual_func(x)
+        return attn_residual_func(x) + ffn_residual_func(x)
+
+class CrossOnlyBlockRope(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int,
+        mlp_ratio: float = 4.0,
+        qkv_bias: bool = False,
+        proj_bias: bool = True,
+        ffn_bias: bool = True,
+        act_layer: Callable[..., nn.Module] = nn.GELU,
+        norm_layer: Callable[..., nn.Module] = nn.LayerNorm,
+        # attn_class 已被移除，因为它不再被使用
+        cross_attn_class: Callable[..., nn.Module] = CrossAttentionRope,
+        ffn_layer: Callable[..., nn.Module] = Mlp,
+        init_values=None,
+        qk_norm: bool=False,
+        rope=None
+    ) -> None:
+        super().__init__()
+        # print(f"biases: qkv: {qkv_bias}, proj: {proj_bias}, ffn: {ffn_bias}")
+        
+        # ---------------------------------------------------
+
+        self.ls2 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
+        self.ls_y = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
+        self.norm2 = norm_layer(dim)
+        self.norm_y = norm_layer(dim)
+        self.cross_attn = cross_attn_class(
+            dim,
+            num_heads=num_heads,
+            qkv_bias=qkv_bias,
+            proj_bias=proj_bias,
+            rope=rope,
+            qk_norm=qk_norm
+        )
+
+        self.norm3 = norm_layer(dim)
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        self.mlp = ffn_layer(
+            in_features=dim,
+            hidden_features=mlp_hidden_dim,
+            act_layer=act_layer,
+            bias=ffn_bias,
+        )
+
+    def forward(self, x: Tensor, y: Tensor, xpos=None, ypos=None) -> Tensor:
+        
+        # ---------------------------
+
+        def cross_attn_residual_func(x: Tensor, y: Tensor) -> Tensor:
+            # 注意：self.norm2(x) 是 x 经过 pre-normalization
+            return self.ls_y(self.cross_attn(self.norm2(x), y, y, qpos=xpos, kpos=ypos))
+
+        def ffn_residual_func(x: Tensor) -> Tensor:
+            return self.ls2(self.mlp(self.norm3(x)))
+
+        # x = x + attn_residual_func(x) 
+        
+        y_ = self.norm_y(y) 
+        x = x + cross_attn_residual_func(x, y_)
+        x = x + ffn_residual_func(x)
+
+        return x
+
+def se3_inverse(T):
+    """
+    Computes the inverse of a batch of SE(3) matrices.
+    """
+
+    if torch.is_tensor(T):
+        R = T[..., :3, :3]
+        t = T[..., :3, 3].unsqueeze(-1)
+        R_inv = R.transpose(-2, -1)
+        t_inv = -torch.matmul(R_inv, t)
+        T_inv = torch.cat([
+            torch.cat([R_inv, t_inv], dim=-1),
+            torch.tensor([0, 0, 0, 1], device=T.device, dtype=T.dtype).repeat(*T.shape[:-2], 1, 1)
+        ], dim=-2)
+    else:
+        R = T[..., :3, :3]
+        t = T[..., :3, 3, np.newaxis]
+
+        R_inv = np.swapaxes(R, -2, -1)
+        t_inv = -R_inv @ t
+
+        bottom_row = np.zeros((*T.shape[:-2], 1, 4), dtype=T.dtype)
+        bottom_row[..., :, 3] = 1
+
+        top_part = np.concatenate([R_inv, t_inv], axis=-1)
+        T_inv = np.concatenate([top_part, bottom_row], axis=-2)
+
+    return T_inv

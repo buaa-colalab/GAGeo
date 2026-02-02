@@ -41,7 +41,7 @@ export CUDA_VISIBLE_DEVICES=$GPUS
 # Run with accelerate
 accelerate launch \
     --config_file $ACCELERATE_CONFIG \
-    train_accelerate.py \
+    train_detr.py \
     --config $TRAINING_CONFIG
 
 echo "Training completed!"

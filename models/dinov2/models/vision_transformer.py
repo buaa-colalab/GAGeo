@@ -16,9 +16,12 @@ import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 from torch.nn.init import trunc_normal_
-from . import Mlp, PatchEmbed, SwiGLUFFNFused, MemEffAttention, NestedTensorBlock as Block
 
-logger = logging.getLogger("dinov2")
+from ..layers import Mlp, PatchEmbed, SwiGLUFFNFused, MemEffAttention, NestedTensorBlock as Block
+from ...layers.attention import FlashAttention
+
+
+# logger = logging.getLogger("dinov2")
 
 
 def named_apply(fn: Callable, module: nn.Module, name="", depth_first=True, include_root=False) -> nn.Module:
@@ -63,7 +66,6 @@ class DinoVisionTransformer(nn.Module):
         num_register_tokens=0,
         interpolate_antialias=False,
         interpolate_offset=0.1,
-        qk_norm=False,
     ):
         """
         Args:
@@ -101,7 +103,6 @@ class DinoVisionTransformer(nn.Module):
         self.num_register_tokens = num_register_tokens
         self.interpolate_antialias = interpolate_antialias
         self.interpolate_offset = interpolate_offset
-        self.use_reentrant = False # hardcoded to False
 
         self.patch_embed = embed_layer(img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
         num_patches = self.patch_embed.num_patches
@@ -119,13 +120,13 @@ class DinoVisionTransformer(nn.Module):
             dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
 
         if ffn_layer == "mlp":
-            logger.info("using MLP layer as FFN")
+            # logger.info("using MLP layer as FFN")
             ffn_layer = Mlp
         elif ffn_layer == "swiglufused" or ffn_layer == "swiglu":
-            logger.info("using SwiGLU layer as FFN")
+            # logger.info("using SwiGLU layer as FFN")
             ffn_layer = SwiGLUFFNFused
         elif ffn_layer == "identity":
-            logger.info("using Identity layer as FFN")
+            # logger.info("using Identity layer as FFN")
 
             def f(*args, **kwargs):
                 return nn.Identity()
@@ -147,7 +148,7 @@ class DinoVisionTransformer(nn.Module):
                 act_layer=act_layer,
                 ffn_layer=ffn_layer,
                 init_values=init_values,
-                qk_norm=qk_norm,
+                attn_class=FlashAttention
             )
             for i in range(depth)
         ]
@@ -221,16 +222,22 @@ class DinoVisionTransformer(nn.Module):
         x = x + self.interpolate_pos_encoding(x, w, h)
 
         if self.register_tokens is not None:
-            x = torch.cat((x[:, :1], self.register_tokens.expand(x.shape[0], -1, -1), x[:, 1:]), dim=1)
+            x = torch.cat(
+                (
+                    x[:, :1],
+                    self.register_tokens.expand(x.shape[0], -1, -1),
+                    x[:, 1:],
+                ),
+                dim=1,
+            )
 
         return x
 
     def forward_features_list(self, x_list, masks_list):
         x = [self.prepare_tokens_with_masks(x, masks) for x, masks in zip(x_list, masks_list)]
-
         for blk in self.blocks:
             if self.training:
-                x = checkpoint(blk, x, use_reentrant=self.use_reentrant)
+                x = checkpoint(blk, x, use_reentrant=False)
             else:
                 x = blk(x)
 
@@ -257,7 +264,7 @@ class DinoVisionTransformer(nn.Module):
 
         for blk in self.blocks:
             if self.training:
-                x = checkpoint(blk, x, use_reentrant=self.use_reentrant)
+                x = checkpoint(blk, x, use_reentrant=False)
             else:
                 x = blk(x)
 
@@ -322,7 +329,7 @@ class DinoVisionTransformer(nn.Module):
             return tuple(zip(outputs, class_tokens))
         return tuple(outputs)
 
-    def forward(self, *args, is_training=True, **kwargs):
+    def forward(self, *args, is_training=False, **kwargs):
         ret = self.forward_features(*args, **kwargs)
         if is_training:
             return ret

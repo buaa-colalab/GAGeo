@@ -13,7 +13,7 @@ from matplotlib.patches import FancyArrowPatch
 import torch
 from tqdm import tqdm
 
-from models import CrossViewLocalizerDETR
+from models import CrossViewLocalizerPi3
 from data import CrossViewDataset
 
 
@@ -37,16 +37,15 @@ def parse_args():
 
 def load_model(checkpoint_path, cfg, device):
     """Load model from checkpoint."""
-    model = CrossViewLocalizerDETR(
+    model = rossViewLocalizerPi3(
         img_size=cfg['data']['img_size'],
         embed_dim=cfg['model']['embed_dim'],
         vggt_depth=cfg['model']['vggt_depth'],
         num_heads=cfg['model']['num_heads'],
         num_decoder_layers=cfg['model'].get('num_decoder_layers', 6),
-        num_object_queries=cfg['model'].get('num_object_queries', 100),
-        location_grid_size=cfg['model'].get('location_grid_size', 32),
+        num_object_queries=cfg['model'].get('num_object_queries', 10),
+        num_location_queries=cfg['model'].get('num_location_queries', 16),
         freeze_vggt=False,
-        use_prompt_fusion=cfg['model'].get('use_prompt_fusion', True),
     )
     
     ckpt_path = Path(checkpoint_path)

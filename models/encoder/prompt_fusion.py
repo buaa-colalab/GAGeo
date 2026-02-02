@@ -8,7 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Tuple, Optional, Type, List
 from torch import Tensor
-from .encoder import TwoWayTransformer
+from .transformer import TwoWayTransformer
 
 
 
