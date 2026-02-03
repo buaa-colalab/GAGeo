@@ -20,12 +20,21 @@ import torchvision.transforms.functional as TF
 
 class CrossViewDataset(Dataset):
     """
-    跨视角定位数据集
+    跨视角定位数据集 - 支持双向定位
     
-    支持双向定位:
-    - direction='mono_to_sat': 无人机图作为query，在卫星图中定位 (默认)
-    - direction='sat_to_mono': 卫星图作为query，预测无人机视角
-    - direction='both': 训练时随机选择方向，数据量翻倍
+    双向定位设计:
+    - 定位始终在卫星图上做 (heatmap, camera_position, sat_bbox)
+    - 根据方向决定 prompt 来源:
+      - 'mono_to_sat': prompt 在 mono 图上 (mono_bbox, mono_point, mono_mask)
+      - 'sat_to_mono': prompt 在 sat 图上 (sat_bbox, camera_position)
+      - 'both': 训练时随机选择方向
+    
+    输出字段:
+    - mono_view, sat_view: 两个视图图像 (始终固定)
+    - prompt_point, prompt_bbox, prompt_mask: prompt 信息 (根据方向变化)
+    - target_bbox, target_position: 目标信息 (始终在 sat 图上)
+    - yaw_radians, yaw_degrees: 相对旋转角度
+    - direction: 当前采样的方向
     
     数据格式:
     {
@@ -107,10 +116,12 @@ class CrossViewDataset(Dataset):
         # 获取标注
         mono_point = np.array(item['mono_point'], dtype=np.float32)
         mono_bbox = np.array(item['mono_bbox'], dtype=np.float32)  # [x, y, w, h]
+        sat_point = np.array(item['sate_point'], dtype=np.float32)
         sat_bbox = np.array(item['sate_bbox'], dtype=np.float32)
         
         # 解码segmentation为mask
-        mono_mask = self._decode_segmentation(item['mono_segmentation'])
+        mono_mask = self._decode_segmentation(item.get('mono_segmentation'), self.mono_size)
+        sat_mask = self._decode_segmentation(item.get('sate_segmentation'), self.sat_size)
         
         # 相机位置和yaw
         camera_position = np.array(item.get('camera_position', [self.sat_size/2, self.sat_size/2]), dtype=np.float32)
@@ -147,54 +158,59 @@ class CrossViewDataset(Dataset):
         # 转换mono_mask为tensor
         mono_mask_tensor = torch.from_numpy(mono_mask).unsqueeze(0).float()  # [1, H, W]
         
-        # ============ 根据方向决定输出 ============
+        # ============ 根据方向决定 prompt 和 target ============
+        # 双向定位:
+        # - mono_to_sat: prompt 在 mono 图，target bbox 在 sat 图
+        # - sat_to_mono: prompt 在 sat 图，target bbox 在 mono 图
+        # 注意: camera_position 始终在 sat 图上（因为卫星图范围更广）
         if current_direction == 'mono_to_sat':
-            # 原始方向: mono作为front_view (query), sat作为satellite_view (target)
-            # prompt来自mono图，在sat图中定位
-            front_view = mono_tensor
-            satellite_view = sat_tensor
-            # prompt信息来自front_view (mono)
-            prompt_point = torch.from_numpy(mono_point)
-            prompt_bbox = torch.from_numpy(mono_bbox_norm)
+            # prompt 来自 mono 图，在 sat 图中定位
+            prompt_point = torch.from_numpy(mono_point)  # 像素坐标
+            prompt_bbox = torch.from_numpy(mono_bbox_norm)  # 归一化 [cx, cy, w, h]
             prompt_mask = mono_mask_tensor
-            # 目标信息在satellite_view (sat)
+            prompt_view = 'mono'
+            # 目标 bbox 在 sat 图上
             target_bbox = torch.from_numpy(sat_bbox_norm)
-            target_position = torch.from_numpy(camera_position_norm)
-            # yaw: mono相对于sat的旋转角度
-            target_yaw_radians = torch.tensor(yaw_radians, dtype=torch.float32)
-            target_yaw_degrees = torch.tensor(yaw_degrees, dtype=torch.float32)
         else:
-            # 反向: sat作为front_view (query), mono作为satellite_view (target)
-            # prompt来自sat图，在mono图中定位（概念上）
-            front_view = sat_tensor
-            satellite_view = mono_tensor
-            # prompt信息来自front_view (sat) - 使用sat_bbox作为prompt
-            # 注意：sat图中的目标bbox作为prompt
-            prompt_point = torch.from_numpy(camera_position_norm * np.array([self.crop_size, self.crop_size]))  # 相机位置作为point
+            # prompt 来自 sat 图，在 mono 图中定位
+            sat_point_cropped = self._adjust_point_for_crop(sat_point, crop_offset)
+            prompt_point = torch.from_numpy(sat_point_cropped)
             prompt_bbox = torch.from_numpy(sat_bbox_norm)
-            prompt_mask = torch.zeros_like(mono_mask_tensor)  # sat没有mask，用空mask
-            # 目标信息在satellite_view (mono)
+            # sat 也有 mask，需要 crop 和 resize
+            sat_mask_cropped = self._crop_and_resize_mask(sat_mask, crop_offset)
+            prompt_mask = torch.from_numpy(sat_mask_cropped).unsqueeze(0).float()
+            prompt_view = 'sat'
             target_bbox = torch.from_numpy(mono_bbox_norm)
-            target_position = torch.from_numpy(mono_point / np.array([self.mono_size, self.mono_size], dtype=np.float32))
-            # yaw: sat相对于mono的旋转角度 = -原始yaw
-            target_yaw_radians = torch.tensor(-yaw_radians, dtype=torch.float32)
-            target_yaw_degrees = torch.tensor(-yaw_degrees, dtype=torch.float32)
+        
+        # camera_position 始终在 sat 图上（无人机拍摄位置）
+        target_position = torch.from_numpy(camera_position_norm)
+        target_yaw_radians = torch.tensor(yaw_radians, dtype=torch.float32)
+        target_yaw_degrees = torch.tensor(yaw_degrees, dtype=torch.float32)
         
         return {
-            'front_view': front_view,
-            'satellite_view': satellite_view,
-            'mono_point': prompt_point,
-            'mono_bbox': prompt_bbox,
-            'mono_mask': prompt_mask,
-            'sat_bbox': target_bbox,
-            'camera_position': target_position,
+            # 两个视图 (始终固定)
+            'mono_view': mono_tensor,
+            'sat_view': sat_tensor,
+            
+            # Prompt 信息 (根据方向变化)
+            'prompt_point': prompt_point,
+            'prompt_bbox': prompt_bbox,
+            'prompt_mask': prompt_mask,
+            
+            # 目标信息 (始终在 sat 图上)
+            'target_bbox': target_bbox,
+            'target_position': target_position,
             'yaw_radians': target_yaw_radians,
             'yaw_degrees': target_yaw_degrees,
+            
+            # 元信息
+            'direction': current_direction,
+            'prompt_view': prompt_view,
             'city': item['city'],
             'mono_filename': item['mono_filename'],
             'sat_filename': item['sat_filename'],
             'crop_offset': torch.from_numpy(crop_offset),
-            'direction': current_direction,  # 记录本次采样的方向
+            
         }
     
     def _load_image(self, city: str, view_type: str, filename: str) -> Image.Image:
@@ -202,14 +218,38 @@ class CrossViewDataset(Dataset):
         img_path = self.data_root / city / view_type / filename
         return Image.open(img_path).convert('RGB')
     
-    def _decode_segmentation(self, segmentation) -> np.ndarray:
+    def _decode_segmentation(self, segmentation, size: int) -> np.ndarray:
         """解码RLE格式的segmentation为mask"""
         if segmentation is None:
-            return np.zeros((self.mono_size, self.mono_size), dtype=np.uint8)
+            return np.zeros((size, size), dtype=np.uint8)
         
-        # 只处理RLE格式
         mask = mask_utils.decode(segmentation)
         return mask.astype(np.uint8)
+    
+    def _adjust_point_for_crop(self, point: np.ndarray, crop_offset: np.ndarray) -> np.ndarray:
+        """调整点坐标以适应 crop 后的卫星图"""
+        adjusted = (point - crop_offset)
+        # 如果 crop_size != sat_size，还需要缩放
+        if self.crop_size != self.sat_size:
+            scale = self.crop_size / self.sat_size
+            adjusted = adjusted * scale
+        return adjusted.astype(np.float32)
+    
+    def _crop_and_resize_mask(self, mask: np.ndarray, crop_offset: np.ndarray) -> np.ndarray:
+        """Crop 并 resize 卫星图 mask 以匹配 crop 后的卫星图"""
+        H, W = mask.shape
+        left, top = int(crop_offset[0]), int(crop_offset[1])
+        cs = min(self.crop_size, W - left, H - top)
+        
+        # Crop
+        cropped = mask[top:top+cs, left:left+cs]
+        
+        # Resize to crop_size if needed
+        if cropped.shape[0] != self.crop_size or cropped.shape[1] != self.crop_size:
+            cropped = cv2.resize(cropped, (self.crop_size, self.crop_size), 
+                                 interpolation=cv2.INTER_NEAREST)
+        
+        return cropped.astype(np.uint8)
     
     def _resize_mono(
         self,
@@ -339,50 +379,42 @@ class CrossViewDataset(Dataset):
 
 
 def collate_fn(batch: List[Dict]) -> Dict:
-    """
-    自定义collate函数，处理变长数据
-    """
-    # 简单stack所有tensor
-    front_views = torch.stack([item['front_view'] for item in batch])
-    satellite_views = torch.stack([item['satellite_view'] for item in batch])
-    mono_points = torch.stack([item['mono_point'] for item in batch])
-    mono_bboxes = torch.stack([item['mono_bbox'] for item in batch])
-    mono_masks = torch.stack([item['mono_mask'] for item in batch])
-    sat_bboxes = torch.stack([item['sat_bbox'] for item in batch])
-    camera_positions = torch.stack([item['camera_position'] for item in batch])
-    yaw_radians = torch.stack([item['yaw_radians'] for item in batch])
-    yaw_degrees = torch.stack([item['yaw_degrees'] for item in batch])
-    crop_offsets = torch.stack([item['crop_offset'] for item in batch])
-    
-    result = {
-        'front_view': front_views,
-        'satellite_view': satellite_views,
-        'mono_point': mono_points,
-        'mono_bbox': mono_bboxes,
-        'mono_mask': mono_masks,
-        'sat_bbox': sat_bboxes,
-        'camera_position': camera_positions,
-        'yaw_radians': yaw_radians,
-        'yaw_degrees': yaw_degrees,
-        'crop_offset': crop_offsets,
+    """自定义collate函数"""
+    return {
+        # 两个视图
+        'mono_view': torch.stack([item['mono_view'] for item in batch]),
+        'sat_view': torch.stack([item['sat_view'] for item in batch]),
+        
+        # Prompt 信息
+        'prompt_point': torch.stack([item['prompt_point'] for item in batch]),
+        'prompt_bbox': torch.stack([item['prompt_bbox'] for item in batch]),
+        'prompt_mask': torch.stack([item['prompt_mask'] for item in batch]),
+        
+        # 目标信息
+        'target_bbox': torch.stack([item['target_bbox'] for item in batch]),
+        'target_position': torch.stack([item['target_position'] for item in batch]),
+        'yaw_radians': torch.stack([item['yaw_radians'] for item in batch]),
+        'yaw_degrees': torch.stack([item['yaw_degrees'] for item in batch]),
+        
+        # 方向信息
+        'directions': [item['direction'] for item in batch],
+        'prompt_views': [item['prompt_view'] for item in batch],
+        
+        # 元信息
+        'crop_offset': torch.stack([item['crop_offset'] for item in batch]),
         'cities': [item['city'] for item in batch],
         'mono_filenames': [item['mono_filename'] for item in batch],
         'sat_filenames': [item['sat_filename'] for item in batch],
     }
-    
-    # 添加direction字段（如果存在）
-    if 'direction' in batch[0]:
-        result['directions'] = [item['direction'] for item in batch]
-    
-    return result
 
 
 if __name__ == '__main__':
     # 测试
     dataset = CrossViewDataset(
-        json_path='/data/xhj/location/data/test_samples.json',
+        json_path='/data/xhj/location/data/single.json',
         crop_sat=True,
         random_crop=False,
+        direction='both',
     )
     
     print(f"Dataset size: {len(dataset)}")
@@ -390,20 +422,20 @@ if __name__ == '__main__':
     # 测试第一个样本
     sample = dataset[0]
     print("\nSample 0:")
-    print(f"  Front view: {sample['front_view'].shape}")
-    print(f"  Satellite view: {sample['satellite_view'].shape}")
-    print(f"  Mono bbox: {sample['mono_bbox']}")
-    print(f"  Sat bbox: {sample['sat_bbox']}")
-    print(f"  Camera position: {sample['camera_position']}")
+    print(f"  Mono view: {sample['mono_view'].shape}")
+    print(f"  Sat view: {sample['sat_view'].shape}")
+    print(f"  Direction: {sample['direction']}")
+    print(f"  Prompt view: {sample['prompt_view']}")
+    print(f"  Target bbox: {sample['target_bbox']}")
+    print(f"  Target position: {sample['target_position']}")
     print(f"  Yaw (degrees): {sample['yaw_degrees']:.1f}")
-    print(f"  Crop offset: {sample['crop_offset']}")
     
     # 测试DataLoader
     from torch.utils.data import DataLoader
     
     loader = DataLoader(
         dataset,
-        batch_size=2,
+        batch_size=1,
         shuffle=False,
         collate_fn=collate_fn,
         num_workers=0,
@@ -411,7 +443,7 @@ if __name__ == '__main__':
     
     batch = next(iter(loader))
     print("\nBatch:")
-    print(f"  Front views: {batch['front_view'].shape}")
-    print(f"  Satellite views: {batch['satellite_view'].shape}")
-    print(f"  Camera positions: {batch['camera_position'].shape}")
-    print(f"  Yaw radians: {batch['yaw_radians'].shape}")
+    print(f"  Mono views: {batch['mono_view'].shape}")
+    print(f"  Sat views: {batch['sat_view'].shape}")
+    print(f"  Directions: {batch['directions']}")
+    print(f"  Prompt views: {batch['prompt_views']}")

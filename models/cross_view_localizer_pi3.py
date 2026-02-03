@@ -1,13 +1,17 @@
 # Cross-View Drone Localization System with Pi3 Backbone
 # Uses Pi3 (upgraded from VGGT) for feature extraction
 #
-# Key difference from VGGT version:
+# Key features:
 # - Pi3 doesn't require a fixed reference frame - all views are treated equally
 # - Uses DINOv2 encoder + Pi3 decoder blocks with RoPE positional encoding
+# - Supports bidirectional localization:
+#   - mono_to_sat: prompt on mono, locate bbox on sat
+#   - sat_to_mono: prompt on sat, locate bbox on mono
+# - camera_position is always predicted on sat (satellite has wider coverage)
 
 import torch
 import torch.nn as nn
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 from .backbone import Pi3Backbone, load_pi3_weights
 from .encoder import GeometryPromptEncoder, PromptFusionWithDense
@@ -132,30 +136,36 @@ class CrossViewLocalizerPi3(nn.Module):
     
     def forward(
         self,
-        front_view: torch.Tensor,
-        satellite_view: torch.Tensor,
+        mono_view: torch.Tensor,
+        sat_view: torch.Tensor,
         points: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         boxes: Optional[torch.Tensor] = None,
         masks: Optional[torch.Tensor] = None,
+        prompt_views: Optional[List[str]] = None,
     ) -> Dict[str, torch.Tensor]:
         """
-        Forward pass.
+        Forward pass with bidirectional localization support.
         
         Args:
-            front_view: [B, 3, H, W] Front-view image
-            satellite_view: [B, 3, H, W] Satellite image
+            mono_view: [B, 3, H, W] Ground-view (mono) image
+            sat_view: [B, 3, H, W] Satellite image
             points: Tuple of (coords [B, N, 2], labels [B, N]) - optional
             boxes: [B, M, 4] in (x, y, w, h) format - optional
             masks: [B, 1, H, W] Binary masks - optional
+            prompt_views: List of 'mono' or 'sat' indicating prompt source for each sample
+                         If None, defaults to 'mono' (mono_to_sat direction)
             
             Note: Any combination of points/boxes/masks is supported.
         
         Returns:
             Dict containing predictions and intermediate features.
         """
+        B = mono_view.shape[0]
+        
         # ============ Step 1: Pi3 Feature Extraction ============
-        front_patch_features, sat_patch_features, front_camera_token, sat_camera_token = \
-            self.backbone.get_front_sat_features(front_view, satellite_view)
+        # 始终提取两个视图的特征
+        mono_patch_features, sat_patch_features, mono_camera_token, sat_camera_token = \
+            self.backbone.get_front_sat_features(mono_view, sat_view)
         
         # ============ Step 2: Prompt Encoding (supports any combination) ============
         sparse_embeddings, dense_embeddings = self.prompt_encoder(
@@ -164,24 +174,54 @@ class CrossViewLocalizerPi3(nn.Module):
             masks=masks,
         )
         
-        # ============ Step 3: Prompt Fusion ============
+        # ============ Step 3: Direction-aware Prompt Fusion ============
+        # 根据 prompt_views 决定从哪个视图提取 prompt features
+        if prompt_views is None:
+            # 默认: 所有样本都是 mono_to_sat
+            prompt_features = mono_patch_features
+        else:
+            # 混合 batch: 需要根据每个样本的方向选择特征
+            prompt_features = self._select_prompt_features(
+                mono_patch_features, sat_patch_features, prompt_views
+            )
+        
         dense_for_fusion = dense_embeddings if masks is not None else None
-        fused_sparse, fused_front, target_guidance = self.prompt_fusion(
-            image_features=front_patch_features,
+        fused_sparse, fused_prompt, target_guidance = self.prompt_fusion(
+            image_features=prompt_features,
             sparse_embeddings=sparse_embeddings,
             dense_embeddings=dense_for_fusion,
         )
         
         # ============ Step 4: Unified Query Decoder ============
+        # 双 memory 设计:
+        # - obj_memory: object queries 作用的目标视图（根据方向变化）
+        # - loc_memory: location queries 作用的视图（始终是 sat，因为 camera_position 在 sat 上）
+        if prompt_views is None:
+            # 默认 mono_to_sat: bbox 在 sat 图上
+            obj_memory = sat_patch_features
+        else:
+            # 根据方向选择目标视图特征
+            obj_memory = self._select_target_features(
+                mono_patch_features, sat_patch_features, prompt_views
+            )
+        
+        # location queries 始终作用在 sat 图上
+        loc_memory = sat_patch_features
+        
         decoder_outputs = self.query_decoder(
-            memory=sat_patch_features,
+            obj_memory=obj_memory,
+            loc_memory=loc_memory,
             target_guidance=target_guidance,
         )
         obj_features = decoder_outputs['obj_features']
         loc_features = decoder_outputs['loc_features']
         
         # ============ Step 5: Task Heads ============
+        # BBox: 在目标视图上预测
         bbox_outputs = self.bbox_head(obj_features)
+        
+        # Heatmap (camera position): 始终在 sat 图上预测
+        # 因为 camera_position 是无人机在卫星图上的位置
         heatmap_outputs = self.heatmap_head(
             query_features=loc_features,
             spatial_features=sat_patch_features,
@@ -190,18 +230,18 @@ class CrossViewLocalizerPi3(nn.Module):
         
         # ============ Step 6: Camera Yaw Prediction (Pi3-style, uses patch tokens) ============
         camera_output = self.camera_head(
-            front_patch_features=front_patch_features,
+            front_patch_features=mono_patch_features,
             sat_patch_features=sat_patch_features,
             img_size=self.img_size,
         )
         
         # ============ Combine Outputs ============
         return {
-            # BBox detection
+            # BBox detection (在 sat 图上)
             'pred_boxes': bbox_outputs['pred_boxes'],
             'bbox_scores': bbox_outputs['bbox_scores'],
             
-            # Camera position
+            # Camera position (在 sat 图上)
             'heatmap': heatmap_outputs['heatmap'],
             'position': heatmap_outputs['position'],
             'heatmap_logits': heatmap_outputs['heatmap_logits'],
@@ -213,12 +253,86 @@ class CrossViewLocalizerPi3(nn.Module):
             'pose_enc': camera_output['pose_enc'],
             
             # Features for visualization/debugging
-            'front_features': front_patch_features,
+            'mono_features': mono_patch_features,
             'sat_features': sat_patch_features,
+            'prompt_features': prompt_features,
             'sparse_embeddings': sparse_embeddings,
-            'fused_front_features': fused_front,
+            'fused_prompt_features': fused_prompt,
             'target_guidance': target_guidance,
         }
+    
+    def _select_prompt_features(
+        self,
+        mono_features: torch.Tensor,
+        sat_features: torch.Tensor,
+        prompt_views: List[str],
+    ) -> torch.Tensor:
+        """
+        根据 prompt_views 选择每个样本的 prompt features.
+        
+        Args:
+            mono_features: [B, N, C] mono 视图特征
+            sat_features: [B, N, C] sat 视图特征
+            prompt_views: List of 'mono' or 'sat'
+        
+        Returns:
+            prompt_features: [B, N, C] 选择后的特征
+        """
+        B = mono_features.shape[0]
+        
+        # 检查是否所有样本方向相同（优化常见情况）
+        if all(v == 'mono' for v in prompt_views):
+            return mono_features
+        if all(v == 'sat' for v in prompt_views):
+            return sat_features
+        
+        # 混合 batch: 逐样本选择
+        prompt_features = torch.zeros_like(mono_features)
+        for i, view in enumerate(prompt_views):
+            if view == 'mono':
+                prompt_features[i] = mono_features[i]
+            else:
+                prompt_features[i] = sat_features[i]
+        
+        return prompt_features
+    
+    def _select_target_features(
+        self,
+        mono_features: torch.Tensor,
+        sat_features: torch.Tensor,
+        prompt_views: List[str],
+    ) -> torch.Tensor:
+        """
+        根据 prompt_views 选择目标视图特征 (与 prompt 相反).
+        
+        - prompt_view='mono' (mono_to_sat): 目标是 sat
+        - prompt_view='sat' (sat_to_mono): 目标是 mono
+        
+        Args:
+            mono_features: [B, N, C] mono 视图特征
+            sat_features: [B, N, C] sat 视图特征
+            prompt_views: List of 'mono' or 'sat'
+        
+        Returns:
+            target_features: [B, N, C] 目标视图特征
+        """
+        B = mono_features.shape[0]
+        
+        # 检查是否所有样本方向相同（优化常见情况）
+        if all(v == 'mono' for v in prompt_views):
+            return sat_features  # mono_to_sat: 目标是 sat
+        if all(v == 'sat' for v in prompt_views):
+            return mono_features  # sat_to_mono: 目标是 mono
+        
+        # 混合 batch: 逐样本选择（与 prompt 相反）
+        target_features = torch.zeros_like(mono_features)
+        for i, view in enumerate(prompt_views):
+            if view == 'mono':
+                target_features[i] = sat_features[i]  # mono_to_sat
+            else:
+                target_features[i] = mono_features[i]  # sat_to_mono
+        
+        return target_features
 
 
 def build_cross_view_localizer_pi3(

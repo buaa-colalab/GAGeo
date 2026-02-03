@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 from typing import Dict
 
-from ..decoder import MLP
+from ..layers.mlp import MLP
 
 
 class BBoxHead(nn.Module):
