@@ -81,7 +81,12 @@ class CameraHead(nn.Module):
         """
         if m.dim() < 3:
             m = m.reshape((-1, 3, 3))
-        m_transpose = torch.transpose(torch.nn.functional.normalize(m, p=2, dim=-1), dim0=-1, dim1=-2)
+        
+        # SVD 不支持 bf16，需要转换为 float32
+        original_dtype = m.dtype
+        m_float = m.float() if m.dtype != torch.float32 else m
+        
+        m_transpose = torch.transpose(torch.nn.functional.normalize(m_float, p=2, dim=-1), dim0=-1, dim1=-2)
         u, s, v = torch.svd(m_transpose)
         det = torch.det(torch.matmul(v, u.transpose(-2, -1)))
         # Check orientation reflection.
@@ -89,4 +94,4 @@ class CameraHead(nn.Module):
             torch.cat([v[:, :, :-1], v[:, :, -1:] * det.view(-1, 1, 1)], dim=2),
             u.transpose(-2, -1)
         )
-        return r
+        return r.to(original_dtype)

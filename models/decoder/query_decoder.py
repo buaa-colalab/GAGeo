@@ -99,27 +99,28 @@ class UnifiedQueryDecoder(nn.Module):
         """
         B = obj_memory.shape[0]
         device = obj_memory.device
+        target_dtype = obj_memory.dtype  # 确保类型一致
         
         # Prepare object queries
-        obj_queries = self.object_queries.weight.unsqueeze(0).expand(B, -1, -1)  # [B, N_obj, C]
-        obj_query_pos = self.object_query_pos.weight.unsqueeze(0).expand(B, -1, -1)
+        obj_queries = self.object_queries.weight.unsqueeze(0).expand(B, -1, -1).to(target_dtype)
+        obj_query_pos = self.object_query_pos.weight.unsqueeze(0).expand(B, -1, -1).to(target_dtype)
         
         # Prepare location queries
-        loc_queries = self.location_queries.weight.unsqueeze(0).expand(B, -1, -1)  # [B, N_loc, C]
-        loc_query_pos = self.location_query_pos.weight.unsqueeze(0).expand(B, -1, -1)
+        loc_queries = self.location_queries.weight.unsqueeze(0).expand(B, -1, -1).to(target_dtype)
+        loc_query_pos = self.location_query_pos.weight.unsqueeze(0).expand(B, -1, -1).to(target_dtype)
         
         # Add guidance to query content (not position)
         # Object queries: concat prompt view features (告诉模型"要找什么")
-        obj_guidance_proj = self.target_guidance_proj(obj_guidance)  # [B, C]
+        obj_guidance_proj = self.target_guidance_proj(obj_guidance.to(target_dtype))
         obj_queries = obj_queries + obj_guidance_proj.unsqueeze(1)
         
         # Location queries: concat mono view features (告诉模型"从哪个视角拍的")
-        loc_guidance_proj = self.target_guidance_proj(loc_guidance)  # [B, C]
+        loc_guidance_proj = self.target_guidance_proj(loc_guidance.to(target_dtype))
         loc_queries = loc_queries + loc_guidance_proj.unsqueeze(1)
         
         # Memory positional encoding
         memory_pos = self.memory_pos_embed(self.spatial_size, device=device)  # [C, H, W]
-        memory_pos = memory_pos.flatten(1).permute(1, 0)  # [P, C]
+        memory_pos = memory_pos.flatten(1).permute(1, 0).to(target_dtype)  # [P, C]
         memory_pos = memory_pos.unsqueeze(0).expand(B, -1, -1)  # [B, P, C]
         
         # Object decoder: queries attend to obj_memory (target view)

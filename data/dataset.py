@@ -173,9 +173,7 @@ class CrossViewDataset(Dataset):
             target_bbox = torch.from_numpy(sat_bbox_norm)
         else:
             # prompt 来自 sat 图，在 mono 图中定位
-            # 计算 crop 缩放比例（卫星图 crop 后不 resize，所以 scale=1.0）
-            scale = 1.0
-            sat_point_cropped = self._adjust_sat_coord(sat_point, crop_offset, scale)
+            sat_point_cropped = self._adjust_sat_coord(sat_point, crop_offset)
             prompt_point = torch.from_numpy(sat_point_cropped)
             prompt_bbox = torch.from_numpy(sat_bbox_norm)
             sat_mask_cropped = self._crop_sat_mask(sat_mask, crop_offset, self.crop_size)
@@ -198,7 +196,7 @@ class CrossViewDataset(Dataset):
             'prompt_bbox': prompt_bbox,
             'prompt_mask': prompt_mask,
             
-            # 目标信息 (始终在 sat 图上)
+            # 目标信息 (target_bbox 根据方向变化，target_position 始终在 sat 图上)
             'target_bbox': target_bbox,
             'target_position': target_position,
             'yaw_radians': target_yaw_radians,
@@ -227,19 +225,14 @@ class CrossViewDataset(Dataset):
         mask = mask_utils.decode(segmentation)
         return mask.astype(np.uint8)
     
-    def _adjust_sat_coord(self, coord: np.ndarray, crop_offset: np.ndarray, scale: float) -> np.ndarray:
-        """调整卫星图坐标（点或bbox的一部分）以适应 crop"""
-        return ((coord - crop_offset) * scale).astype(np.float32)
+    def _adjust_sat_coord(self, coord: np.ndarray, crop_offset: np.ndarray) -> np.ndarray:
+        """调整卫星图坐标以适应 crop（卫星图只 crop 不 resize）"""
+        return (coord - crop_offset).astype(np.float32)
     
     def _crop_sat_mask(self, mask: np.ndarray, crop_offset: np.ndarray, crop_size: int) -> np.ndarray:
-        """Crop 卫星图 mask"""
-        H, W = mask.shape
+        """Crop 卫星图 mask（与 _crop_satellite 使用相同的 crop_offset）"""
         left, top = int(crop_offset[0]), int(crop_offset[1])
-        cs = min(crop_size, W - left, H - top)
-        cropped = mask[top:top+cs, left:left+cs]
-        if cropped.shape[0] != crop_size or cropped.shape[1] != crop_size:
-            cropped = cv2.resize(cropped, (crop_size, crop_size), interpolation=cv2.INTER_NEAREST)
-        return cropped.astype(np.uint8)
+        return mask[top:top+crop_size, left:left+crop_size].astype(np.uint8)
     
     def _resize_mono(
         self,

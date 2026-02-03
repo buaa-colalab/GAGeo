@@ -170,6 +170,18 @@ class CrossViewLocalizerPi3(nn.Module):
         """
         B = mono_view.shape[0]
         
+        # 确保输入类型与模型权重一致（解决 bf16 混合精度问题）
+        target_dtype = next(self.parameters()).dtype
+        if mono_view.dtype != target_dtype:
+            mono_view = mono_view.to(target_dtype)
+            sat_view = sat_view.to(target_dtype)
+            if points is not None:
+                points = (points[0].to(target_dtype), points[1])
+            if boxes is not None:
+                boxes = boxes.to(target_dtype)
+            if masks is not None:
+                masks = masks.to(target_dtype)
+        
         # ============ Step 1: Pi3 Feature Extraction ============
         # 始终提取两个视图的特征
         mono_patch_features, sat_patch_features, mono_camera_token, sat_camera_token = \
@@ -181,6 +193,10 @@ class CrossViewLocalizerPi3(nn.Module):
             boxes=boxes,
             masks=masks,
         )
+        # 确保 embeddings 类型一致
+        sparse_embeddings = sparse_embeddings.to(target_dtype)
+        if dense_embeddings is not None:
+            dense_embeddings = dense_embeddings.to(target_dtype)
         
         # ============ Step 3: Direction-aware Prompt Fusion ============
         # prompt_features: prompt 所在视图的特征

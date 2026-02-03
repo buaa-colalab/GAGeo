@@ -63,40 +63,45 @@ def visualize_batch_sample(batch, outputs, idx, img_size, save_path):
     
     # Extract predictions (select best bbox by score)
     if 'pred_boxes' in outputs and 'bbox_scores' in outputs:
-        scores = outputs['bbox_scores'][idx].detach().cpu()
+        scores = outputs['bbox_scores'][idx].detach().float().cpu()
         best_idx = scores.argmax().item()
-        pred_bbox = outputs['pred_boxes'][idx, best_idx].detach().cpu().numpy()
+        pred_bbox = outputs['pred_boxes'][idx, best_idx].detach().float().cpu().numpy()
         pred_score = scores[best_idx].item()
     else:
         pred_bbox = None
         pred_score = None
-    pred_yaw = outputs['yaw_radians'][idx].detach().cpu().item() if 'yaw_radians' in outputs else None
-    pred_position = outputs['position'][idx].detach().cpu().numpy() if 'position' in outputs else None
+    pred_yaw = outputs['yaw_radians'][idx].detach().float().cpu().item() if 'yaw_radians' in outputs else None
+    pred_position = outputs['position'][idx].detach().float().cpu().numpy() if 'position' in outputs else None
     
     # Create figure
     fig, axes = plt.subplots(1, 3, figsize=(18, 6))
     
-    # Panel 1: Mono view with prompt point (if prompt from mono)
+    # Panel 1: Mono view
     axes[0].imshow(mono_img)
     if prompt_view == 'mono':
         axes[0].scatter(prompt_pt[0], prompt_pt[1], c='lime', marker='x', s=200, linewidths=3, label='Prompt')
+    if direction == 'sat_to_mono':
+        # Target bbox is on mono
+        draw_bbox(axes[0], gt_bbox, img_size, 'lime', '-', 3, 'GT BBox')
+        if pred_bbox is not None:
+            draw_bbox(axes[0], pred_bbox, img_size, 'red', '--', 2, f'Pred (s={pred_score:.2f})')
     axes[0].set_title(f'Mono View ({direction})', fontsize=14)
-    axes[0].legend(loc='upper right')
+    if axes[0].get_legend_handles_labels()[0]:
+        axes[0].legend(loc='upper right')
     axes[0].axis('off')
     
-    # Panel 2: Satellite - BBox (target bbox location depends on direction)
+    # Panel 2: Satellite view
     axes[1].imshow(sat_img)
     if prompt_view == 'sat':
-        # sat_to_mono: prompt on sat, show prompt point
         axes[1].scatter(prompt_pt[0], prompt_pt[1], c='cyan', marker='x', s=200, linewidths=3, label='Prompt')
     if direction == 'mono_to_sat':
         # Target bbox is on sat
         draw_bbox(axes[1], gt_bbox, img_size, 'lime', '-', 3, 'GT BBox')
         if pred_bbox is not None:
-            label = f'Pred (s={pred_score:.2f})' if pred_score is not None else 'Pred BBox'
-            draw_bbox(axes[1], pred_bbox, img_size, 'red', '--', 2, label)
+            draw_bbox(axes[1], pred_bbox, img_size, 'red', '--', 2, f'Pred (s={pred_score:.2f})')
     axes[1].set_title('Satellite View', fontsize=14)
-    axes[1].legend(loc='upper right')
+    if axes[1].get_legend_handles_labels()[0]:
+        axes[1].legend(loc='upper right')
     axes[1].axis('off')
     
     # Panel 3: Satellite - Camera Pose (always on sat)

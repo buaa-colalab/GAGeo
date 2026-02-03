@@ -194,6 +194,12 @@ class Pi3Backbone(nn.Module):
         
         # Encode with DINOv2
         images_flat = images.reshape(B * N, 3, H, W)
+        
+        # 确保输入类型与模型权重一致（解决 bf16 混合精度问题）
+        target_dtype = next(self.encoder.parameters()).dtype
+        if images_flat.dtype != target_dtype:
+            images_flat = images_flat.to(target_dtype)
+        
         hidden = self.encoder(images_flat, is_training=True)
         
         if isinstance(hidden, dict):
