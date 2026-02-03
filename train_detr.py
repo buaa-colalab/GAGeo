@@ -21,9 +21,9 @@ from transformers import get_scheduler
 
 from models import CrossViewLocalizerPi3, build_cross_view_localizer_pi3
 from data import CrossViewDataset, collate_fn
+from utils.prompt_utils import prepare_random_prompt, prepare_single_prompt
 from utils import (
     get_param_groups,
-    prepare_random_prompt,
     visualize_validation_samples,
     box_cxcywh_to_xyxy, 
     generalized_box_iou,
@@ -66,9 +66,9 @@ def train_one_epoch(
             mono_view = batch['mono_view']
             sat_view = batch['sat_view']
             
-            # Prepare targets (始终在 sat 图上)
+            # Prepare targets
             targets = {
-                'sat_bbox': batch['target_bbox'],
+                'target_bbox': batch['target_bbox'],
                 'yaw_radians': batch['yaw_radians'],
                 'camera_position': batch['target_position'],
             }
@@ -145,7 +145,7 @@ def validate(
         sat_view = batch['sat_view']
         
         targets = {
-            'sat_bbox': batch['target_bbox'],
+            'target_bbox': batch['target_bbox'],
             'yaw_radians': batch['yaw_radians'],
             'camera_position': batch['target_position'],
         }
@@ -153,19 +153,16 @@ def validate(
         # Get prompt_views for bidirectional support
         prompt_views = batch.get('prompt_views', None)
         
-        # Use point prompt for validation
-        B = mono_view.shape[0]
-        prompt_point = batch['prompt_point']
-        point_coords = prompt_point.unsqueeze(1)
-        point_labels = torch.ones(B, 1, device=mono_view.device)
+        # Use single prompt type for stable validation
+        points, boxes, masks = prepare_single_prompt(batch, mono_view.device, prompt_type='point')
         
         with accelerator.autocast():
             outputs = model(
                 mono_view=mono_view,
                 sat_view=sat_view,
-                points=(point_coords, point_labels),
-                boxes=None,
-                masks=None,
+                points=points,
+                boxes=boxes,
+                masks=masks,
                 prompt_views=prompt_views,
             )
             losses = criterion(outputs, targets)
@@ -248,7 +245,7 @@ def main():
         )
     
     # Create datasets with bidirectional support
-    train_direction = cfg['data'].get('direction', 'mono_to_sat')
+    train_direction = cfg['data'].get('train_direction', 'mono_to_sat')
     train_dataset = CrossViewDataset(
         json_path=cfg['data']['train_json'],
         data_root=cfg['data']['data_root'],
@@ -258,7 +255,7 @@ def main():
     )
     
     # Validation uses same direction as training for fair evaluation
-    val_direction = cfg['data'].get('val_direction', train_direction)
+    val_direction = cfg['data'].get('val_direction', 'mono_to_sat')
     val_dataset = CrossViewDataset(
         json_path=cfg['data']['val_json'],
         data_root=cfg['data']['data_root'],

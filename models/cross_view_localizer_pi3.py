@@ -194,9 +194,11 @@ class CrossViewLocalizerPi3(nn.Module):
             masks=masks,
         )
         # 确保 embeddings 类型一致
+        # 注意: prompt_encoder 保证返回非 None 的 tensor
+        # - sparse_embeddings: 可能是 [B, 0, C] (无 sparse prompt)
+        # - dense_embeddings: 有 no_mask_embed 兜底，永远非 None
         sparse_embeddings = sparse_embeddings.to(target_dtype)
-        if dense_embeddings is not None:
-            dense_embeddings = dense_embeddings.to(target_dtype)
+        dense_embeddings = dense_embeddings.to(target_dtype)
         
         # ============ Step 3: Direction-aware Prompt Fusion ============
         # prompt_features: prompt 所在视图的特征

@@ -148,7 +148,7 @@ class CrossViewDataset(Dataset):
         mono_tensor = self._to_tensor(mono_img)
         sat_tensor = self._to_tensor(sat_img)
         
-        # 归一化bbox到[0, 1]
+        # 归一化bbox到[0, 1]，[cx, cy, w, h] 格式
         mono_bbox_norm = self._normalize_bbox(mono_bbox, self.mono_size, self.mono_size)
         sat_bbox_norm = self._normalize_bbox(sat_bbox, sat_tensor.shape[2], sat_tensor.shape[1])
         
@@ -157,7 +157,7 @@ class CrossViewDataset(Dataset):
         
         # 转换mono_mask为tensor
         mono_mask_tensor = torch.from_numpy(mono_mask).unsqueeze(0).float()  # [1, H, W]
-        
+        sat_mask_cropped = self._crop_sat_mask(sat_mask, crop_offset, self.crop_size)
         # ============ 根据方向决定 prompt 和 target ============
         # 双向定位:
         # - mono_to_sat: prompt 在 mono 图，target bbox 在 sat 图
@@ -166,7 +166,7 @@ class CrossViewDataset(Dataset):
         if current_direction == 'mono_to_sat':
             # prompt 来自 mono 图，在 sat 图中定位
             prompt_point = torch.from_numpy(mono_point)  # 像素坐标
-            prompt_bbox = torch.from_numpy(mono_bbox_norm)  # 归一化 [cx, cy, w, h]
+            prompt_bbox = torch.from_numpy(mono_bbox)  # 像素坐标 [x, y, w, h]
             prompt_mask = mono_mask_tensor
             prompt_view = 'mono'
             # 目标 bbox 在 sat 图上
@@ -175,8 +175,7 @@ class CrossViewDataset(Dataset):
             # prompt 来自 sat 图，在 mono 图中定位
             sat_point_cropped = self._adjust_sat_coord(sat_point, crop_offset)
             prompt_point = torch.from_numpy(sat_point_cropped)
-            prompt_bbox = torch.from_numpy(sat_bbox_norm)
-            sat_mask_cropped = self._crop_sat_mask(sat_mask, crop_offset, self.crop_size)
+            prompt_bbox = torch.from_numpy(sat_bbox)
             prompt_mask = torch.from_numpy(sat_mask_cropped).unsqueeze(0).float()
             prompt_view = 'sat'
             target_bbox = torch.from_numpy(mono_bbox_norm)

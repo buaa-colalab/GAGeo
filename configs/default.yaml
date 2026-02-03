@@ -10,7 +10,8 @@ data:
   img_size: 518
   crop_size: 518
   num_workers: 1  # Reduced from 4 to prevent thread exhaustion with 8 GPUs
-  direction: 'both'  # 'mono_to_sat', 'sat_to_mono', 'both' for bidirectional training
+  train_direction: 'both'  # 'mono_to_sat', 'sat_to_mono', 'both' for bidirectional training
+  val_direction: 'both'  # 'mono_to_sat', 'sat_to_mono', 'both' for bidirectional training
 
 # Model
 model:

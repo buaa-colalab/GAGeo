@@ -1,63 +1,108 @@
 """
-Prompt utilities for training with random prompt selection
+Prompt utilities for training with random prompt combination
 """
 
 import random
 import torch
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
+
+
+def _get_point_prompt(batch: Dict, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
+    """获取 point prompt"""
+    B = batch['mono_view'].shape[0]
+    prompt_point = batch['prompt_point'].to(device)
+    point_coords = prompt_point.unsqueeze(1)  # [B, 1, 2]
+    point_labels = torch.ones(B, 1, device=device)
+    return point_coords, point_labels
+
+
+def _get_bbox_prompt(batch: Dict, device: torch.device) -> torch.Tensor:
+    """获取 bbox prompt，转换为 [x1, y1, x2, y2] 格式"""
+    B = batch['mono_view'].shape[0]
+    prompt_bbox = batch['prompt_bbox'].to(device)  # [B, 4] in [cx, cy, w, h]
+    boxes = torch.zeros(B, 1, 4, device=device)
+    boxes[:, 0, 0] = prompt_bbox[:, 0] - prompt_bbox[:, 2] / 2  # x1
+    boxes[:, 0, 1] = prompt_bbox[:, 1] - prompt_bbox[:, 3] / 2  # y1
+    boxes[:, 0, 2] = prompt_bbox[:, 0] + prompt_bbox[:, 2] / 2  # x2
+    boxes[:, 0, 3] = prompt_bbox[:, 1] + prompt_bbox[:, 3] / 2  # y2
+    return boxes
+
+
+def _get_mask_prompt(batch: Dict, device: torch.device) -> torch.Tensor:
+    """获取 mask prompt"""
+    return batch['prompt_mask'].to(device)  # [B, 1, H, W]
 
 
 def prepare_random_prompt(
     batch: Dict,
     device: torch.device,
-    prompt_types: list = ['point', 'bbox', 'mask'],
+    prompt_types: List[str] = ['point', 'bbox', 'mask'],
+    min_prompts: int = 1,
+    max_prompts: int = 3,
 ) -> Tuple[Optional[Tuple], Optional[torch.Tensor], Optional[torch.Tensor]]:
     """
-    随机选择一种prompt类型进行训练（模拟真实场景）
-    
-    支持双向定位: 使用 prompt_point, prompt_bbox, prompt_mask 字段
-    这些字段根据 direction 自动选择来自 mono 或 sat 视图的 prompt
+    随机组合多种 prompt 类型进行训练
     
     Args:
-        batch: 数据batch
+        batch: 数据 batch
         device: 设备
-        prompt_types: 可选的prompt类型列表
+        prompt_types: 可选的 prompt 类型列表
+        min_prompts: 最少使用的 prompt 数量
+        max_prompts: 最多使用的 prompt 数量
     
     Returns:
         points: (coords, labels) 或 None
         boxes: bbox tensor 或 None
         masks: mask tensor 或 None
     """
-    # 随机选择一种prompt类型
-    prompt_type = random.choice(prompt_types)
-    
-    B = batch['mono_view'].shape[0]
+    # 随机选择使用几种 prompt（1 到 min(max_prompts, len(prompt_types))）
+    num_prompts = random.randint(min_prompts, min(max_prompts, len(prompt_types)))
+    selected_types = random.sample(prompt_types, num_prompts)
     
     points = None
     boxes = None
     masks = None
     
-    if prompt_type == 'point':
-        # Point prompt: 使用 prompt_point (根据方向自动选择)
-        prompt_point = batch.get('prompt_point', batch.get('mono_point')).to(device)
-        point_coords = prompt_point.unsqueeze(1)  # [B, 1, 2]
-        point_labels = torch.ones(B, 1, device=device)  # 正点
+    if 'point' in selected_types:
+        point_coords, point_labels = _get_point_prompt(batch, device)
         points = (point_coords, point_labels)
-        
+    
+    if 'bbox' in selected_types:
+        boxes = _get_bbox_prompt(batch, device)
+    
+    if 'mask' in selected_types:
+        masks = _get_mask_prompt(batch, device)
+    
+    return points, boxes, masks
+
+
+def prepare_single_prompt(
+    batch: Dict,
+    device: torch.device,
+    prompt_type: str = 'point',
+) -> Tuple[Optional[Tuple], Optional[torch.Tensor], Optional[torch.Tensor]]:
+    """
+    准备单一类型的 prompt（用于稳定验证）
+    
+    Args:
+        batch: 数据 batch
+        device: 设备
+        prompt_type: 'point', 'bbox', 或 'mask'
+    
+    Returns:
+        points, boxes, masks
+    """
+    points = None
+    boxes = None
+    masks = None
+    
+    if prompt_type == 'point':
+        point_coords, point_labels = _get_point_prompt(batch, device)
+        points = (point_coords, point_labels)
     elif prompt_type == 'bbox':
-        # Box prompt: 使用 prompt_bbox (根据方向自动选择)
-        prompt_bbox = batch.get('prompt_bbox', batch.get('mono_bbox')).to(device)  # [B, 4] in [cx, cy, w, h]
-        # 注意: prompt_bbox 是归一化的 [cx, cy, w, h] 格式
-        # 转换为 [x1, y1, x2, y2] 格式 (归一化坐标)
-        boxes = torch.zeros(B, 1, 4, device=device)
-        boxes[:, 0, 0] = prompt_bbox[:, 0] - prompt_bbox[:, 2] / 2  # x1 = cx - w/2
-        boxes[:, 0, 1] = prompt_bbox[:, 1] - prompt_bbox[:, 3] / 2  # y1 = cy - h/2
-        boxes[:, 0, 2] = prompt_bbox[:, 0] + prompt_bbox[:, 2] / 2  # x2 = cx + w/2
-        boxes[:, 0, 3] = prompt_bbox[:, 1] + prompt_bbox[:, 3] / 2  # y2 = cy + h/2
-        
+        boxes = _get_bbox_prompt(batch, device)
     elif prompt_type == 'mask':
-        # Mask prompt: 使用 prompt_mask (根据方向自动选择)
-        masks = batch.get('prompt_mask', batch.get('mono_mask')).to(device)  # [B, 1, H, W]
+        masks = _get_mask_prompt(batch, device)
     
     return points, boxes, masks
 
@@ -65,14 +110,12 @@ def prepare_random_prompt(
 def prepare_all_prompts(
     batch: Dict,
     device: torch.device,
-) -> Tuple[Optional[Tuple], Optional[torch.Tensor], Optional[torch.Tensor]]:
+) -> Tuple[Tuple, torch.Tensor, torch.Tensor]:
     """
-    准备所有prompt（用于调试或特殊场景）
-    
-    支持双向定位: 使用 prompt_* 字段
+    准备所有 prompt（用于完整测试）
     
     Args:
-        batch: 数据batch
+        batch: 数据 batch
         device: 设备
     
     Returns:
@@ -80,23 +123,8 @@ def prepare_all_prompts(
         boxes: bbox tensor
         masks: mask tensor
     """
-    B = batch['mono_view'].shape[0]
+    point_coords, point_labels = _get_point_prompt(batch, device)
+    boxes = _get_bbox_prompt(batch, device)
+    masks = _get_mask_prompt(batch, device)
     
-    # Point prompt
-    prompt_point = batch.get('prompt_point', batch.get('mono_point')).to(device)
-    point_coords = prompt_point.unsqueeze(1)  # [B, 1, 2]
-    point_labels = torch.ones(B, 1, device=device)
-    points = (point_coords, point_labels)
-    
-    # Box prompt
-    prompt_bbox = batch.get('prompt_bbox', batch.get('mono_bbox')).to(device)  # [B, 4] in [cx, cy, w, h]
-    boxes = torch.zeros(B, 1, 4, device=device)
-    boxes[:, 0, 0] = prompt_bbox[:, 0] - prompt_bbox[:, 2] / 2  # x1
-    boxes[:, 0, 1] = prompt_bbox[:, 1] - prompt_bbox[:, 3] / 2  # y1
-    boxes[:, 0, 2] = prompt_bbox[:, 0] + prompt_bbox[:, 2] / 2  # x2
-    boxes[:, 0, 3] = prompt_bbox[:, 1] + prompt_bbox[:, 3] / 2  # y2
-    
-    # Mask prompt
-    masks = batch.get('prompt_mask', batch.get('mono_mask')).to(device)
-    
-    return points, boxes, masks
+    return (point_coords, point_labels), boxes, masks
