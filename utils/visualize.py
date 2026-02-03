@@ -42,20 +42,24 @@ def visualize_batch_sample(batch, outputs, idx, img_size, save_path):
     Visualize a single sample from batch during training
     
     Args:
-        batch: dict with 'front_view', 'satellite_view', 'mono_point', 'sat_bbox', etc.
+        batch: dict with 'mono_view', 'sat_view', 'prompt_point', 'target_bbox', etc.
         outputs: model outputs dict
         idx: index in batch to visualize
         img_size: image size for coordinate conversion
         save_path: where to save the figure
     """
     # Extract data for this sample
-    front_img = to_numpy_img(batch['front_view'][idx])
-    sat_img = to_numpy_img(batch['satellite_view'][idx])
-    mono_pt = batch['mono_point'][idx].cpu().numpy()
+    mono_img = to_numpy_img(batch['mono_view'][idx])
+    sat_img = to_numpy_img(batch['sat_view'][idx])
+    prompt_pt = batch['prompt_point'][idx].cpu().numpy()
     
-    gt_bbox = batch['sat_bbox'][idx].cpu().numpy()
+    gt_bbox = batch['target_bbox'][idx].cpu().numpy()
     gt_yaw = batch['yaw_radians'][idx].cpu().item()
-    gt_position = batch['camera_position'][idx].cpu().numpy()
+    gt_position = batch['target_position'][idx].cpu().numpy()
+    
+    # Get direction info
+    direction = batch['directions'][idx] if 'directions' in batch else 'mono_to_sat'
+    prompt_view = batch['prompt_views'][idx] if 'prompt_views' in batch else 'mono'
     
     # Extract predictions (select best bbox by score)
     if 'pred_boxes' in outputs and 'bbox_scores' in outputs:
@@ -72,31 +76,35 @@ def visualize_batch_sample(batch, outputs, idx, img_size, save_path):
     # Create figure
     fig, axes = plt.subplots(1, 3, figsize=(18, 6))
     
-    # Front view with mono point
-    axes[0].imshow(front_img)
-    h, w = front_img.shape[:2]
-    pt_x, pt_y = mono_pt[0], mono_pt[1]
-    axes[0].scatter(pt_x, pt_y, c='lime', marker='x', s=200, linewidths=3, label='Mono Point')
-    axes[0].set_title('Front View', fontsize=14)
+    # Panel 1: Mono view with prompt point (if prompt from mono)
+    axes[0].imshow(mono_img)
+    if prompt_view == 'mono':
+        axes[0].scatter(prompt_pt[0], prompt_pt[1], c='lime', marker='x', s=200, linewidths=3, label='Prompt')
+    axes[0].set_title(f'Mono View ({direction})', fontsize=14)
     axes[0].legend(loc='upper right')
     axes[0].axis('off')
     
-    # Satellite - BBox
+    # Panel 2: Satellite - BBox (target bbox location depends on direction)
     axes[1].imshow(sat_img)
-    draw_bbox(axes[1], gt_bbox, img_size, 'lime', '-', 3, 'GT BBox')
-    if pred_bbox is not None:
-        label = f'Pred (s={pred_score:.2f})' if pred_score is not None else 'Pred BBox'
-        draw_bbox(axes[1], pred_bbox, img_size, 'red', '--', 2, label)
-    axes[1].set_title('Satellite - BBox', fontsize=14)
+    if prompt_view == 'sat':
+        # sat_to_mono: prompt on sat, show prompt point
+        axes[1].scatter(prompt_pt[0], prompt_pt[1], c='cyan', marker='x', s=200, linewidths=3, label='Prompt')
+    if direction == 'mono_to_sat':
+        # Target bbox is on sat
+        draw_bbox(axes[1], gt_bbox, img_size, 'lime', '-', 3, 'GT BBox')
+        if pred_bbox is not None:
+            label = f'Pred (s={pred_score:.2f})' if pred_score is not None else 'Pred BBox'
+            draw_bbox(axes[1], pred_bbox, img_size, 'red', '--', 2, label)
+    axes[1].set_title('Satellite View', fontsize=14)
     axes[1].legend(loc='upper right')
     axes[1].axis('off')
     
-    # Satellite - Camera Pose
+    # Panel 3: Satellite - Camera Pose (always on sat)
     axes[2].imshow(sat_img)
     draw_camera_pose(axes[2], gt_position, gt_yaw, img_size, 'lime', 'o', 'GT')
     if pred_position is not None and pred_yaw is not None:
         draw_camera_pose(axes[2], pred_position, pred_yaw, img_size, 'red', '^', 'Pred')
-    axes[2].set_title('Satellite - Pose', fontsize=14)
+    axes[2].set_title('Camera Pose (on Sat)', fontsize=14)
     axes[2].legend(loc='upper right')
     axes[2].axis('off')
     
@@ -149,20 +157,22 @@ def visualize_validation_samples(model, dataloader, accelerator, cfg, epoch, num
                 break
             
             # Prepare inputs
-            front_view = batch['front_view']
-            sat_view = batch['satellite_view']
-            mono_point = batch['mono_point']
+            mono_view = batch['mono_view']
+            sat_view = batch['sat_view']
+            prompt_point = batch['prompt_point']
+            prompt_views = batch.get('prompt_views', None)
             
-            B = front_view.shape[0]
-            point_coords = mono_point.unsqueeze(1)
-            point_labels = torch.ones(B, 1, device=front_view.device)
+            B = mono_view.shape[0]
+            point_coords = prompt_point.unsqueeze(1)
+            point_labels = torch.ones(B, 1, device=mono_view.device)
             
             # Forward pass
             with accelerator.autocast():
                 outputs = model(
-                    front_view=front_view,
-                    satellite_view=sat_view,
+                    mono_view=mono_view,
+                    sat_view=sat_view,
                     points=(point_coords, point_labels),
+                    prompt_views=prompt_views,
                 )
             
             # Visualize samples from this batch

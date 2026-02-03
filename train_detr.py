@@ -257,13 +257,14 @@ def main():
         direction=train_direction,
     )
     
-    # Validation always uses mono_to_sat for consistent evaluation
+    # Validation uses same direction as training for fair evaluation
+    val_direction = cfg['data'].get('val_direction', train_direction)
     val_dataset = CrossViewDataset(
         json_path=cfg['data']['val_json'],
         data_root=cfg['data']['data_root'],
         crop_size=cfg['data']['crop_size'],
         random_crop=False,
-        direction='mono_to_sat',  # Fixed direction for validation
+        direction=val_direction,
     )
     
     train_loader = DataLoader(

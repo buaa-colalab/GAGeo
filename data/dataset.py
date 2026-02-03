@@ -173,11 +173,12 @@ class CrossViewDataset(Dataset):
             target_bbox = torch.from_numpy(sat_bbox_norm)
         else:
             # prompt 来自 sat 图，在 mono 图中定位
-            sat_point_cropped = self._adjust_point_for_crop(sat_point, crop_offset)
+            # 计算 crop 缩放比例（卫星图 crop 后不 resize，所以 scale=1.0）
+            scale = 1.0
+            sat_point_cropped = self._adjust_sat_coord(sat_point, crop_offset, scale)
             prompt_point = torch.from_numpy(sat_point_cropped)
             prompt_bbox = torch.from_numpy(sat_bbox_norm)
-            # sat 也有 mask，需要 crop 和 resize
-            sat_mask_cropped = self._crop_and_resize_mask(sat_mask, crop_offset)
+            sat_mask_cropped = self._crop_sat_mask(sat_mask, crop_offset, self.crop_size)
             prompt_mask = torch.from_numpy(sat_mask_cropped).unsqueeze(0).float()
             prompt_view = 'sat'
             target_bbox = torch.from_numpy(mono_bbox_norm)
@@ -226,29 +227,18 @@ class CrossViewDataset(Dataset):
         mask = mask_utils.decode(segmentation)
         return mask.astype(np.uint8)
     
-    def _adjust_point_for_crop(self, point: np.ndarray, crop_offset: np.ndarray) -> np.ndarray:
-        """调整点坐标以适应 crop 后的卫星图"""
-        adjusted = (point - crop_offset)
-        # 如果 crop_size != sat_size，还需要缩放
-        if self.crop_size != self.sat_size:
-            scale = self.crop_size / self.sat_size
-            adjusted = adjusted * scale
-        return adjusted.astype(np.float32)
+    def _adjust_sat_coord(self, coord: np.ndarray, crop_offset: np.ndarray, scale: float) -> np.ndarray:
+        """调整卫星图坐标（点或bbox的一部分）以适应 crop"""
+        return ((coord - crop_offset) * scale).astype(np.float32)
     
-    def _crop_and_resize_mask(self, mask: np.ndarray, crop_offset: np.ndarray) -> np.ndarray:
-        """Crop 并 resize 卫星图 mask 以匹配 crop 后的卫星图"""
+    def _crop_sat_mask(self, mask: np.ndarray, crop_offset: np.ndarray, crop_size: int) -> np.ndarray:
+        """Crop 卫星图 mask"""
         H, W = mask.shape
         left, top = int(crop_offset[0]), int(crop_offset[1])
-        cs = min(self.crop_size, W - left, H - top)
-        
-        # Crop
+        cs = min(crop_size, W - left, H - top)
         cropped = mask[top:top+cs, left:left+cs]
-        
-        # Resize to crop_size if needed
-        if cropped.shape[0] != self.crop_size or cropped.shape[1] != self.crop_size:
-            cropped = cv2.resize(cropped, (self.crop_size, self.crop_size), 
-                                 interpolation=cv2.INTER_NEAREST)
-        
+        if cropped.shape[0] != crop_size or cropped.shape[1] != crop_size:
+            cropped = cv2.resize(cropped, (crop_size, crop_size), interpolation=cv2.INTER_NEAREST)
         return cropped.astype(np.uint8)
     
     def _resize_mono(

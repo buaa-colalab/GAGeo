@@ -37,15 +37,16 @@ def parse_args():
 
 def load_model(checkpoint_path, cfg, device):
     """Load model from checkpoint."""
-    model = rossViewLocalizerPi3(
+    from models import build_cross_view_localizer_pi3
+    model = build_cross_view_localizer_pi3(
+        pretrained_pi3=None,
+        freeze_backbone=False,
         img_size=cfg['data']['img_size'],
-        embed_dim=cfg['model']['embed_dim'],
-        vggt_depth=cfg['model']['vggt_depth'],
+        decoder_size=cfg['model'].get('decoder_size', 'large'),
         num_heads=cfg['model']['num_heads'],
         num_decoder_layers=cfg['model'].get('num_decoder_layers', 6),
         num_object_queries=cfg['model'].get('num_object_queries', 10),
         num_location_queries=cfg['model'].get('num_location_queries', 16),
-        freeze_vggt=False,
     )
     
     ckpt_path = Path(checkpoint_path)
@@ -117,17 +118,19 @@ def draw_camera_pose(ax, position, yaw, img_size, color, marker, label_pos):
 def visualize_sample(model, sample, device, img_size, output_path, show, show_heatmap):
     """Visualize a single sample."""
     with torch.no_grad():
-        front_view = sample['front_view'].unsqueeze(0).to(device)
-        sat_view = sample['satellite_view'].unsqueeze(0).to(device)
-        mono_point = sample['mono_point'].unsqueeze(0).to(device)
+        mono_view = sample['mono_view'].unsqueeze(0).to(device)
+        sat_view = sample['sat_view'].unsqueeze(0).to(device)
+        prompt_point = sample['prompt_point'].unsqueeze(0).to(device)
+        prompt_view = sample.get('prompt_view', 'mono')
         
-        point_coords = mono_point.unsqueeze(1)
+        point_coords = prompt_point.unsqueeze(1)
         point_labels = torch.ones(1, 1, device=device)
         
         outputs = model(
-            front_view=front_view,
-            satellite_view=sat_view,
+            mono_view=mono_view,
+            sat_view=sat_view,
             points=(point_coords, point_labels),
+            prompt_views=[prompt_view],
         )
     
     # Extract predictions
@@ -142,26 +145,28 @@ def visualize_sample(model, sample, device, img_size, output_path, show, show_he
     heatmap = outputs['heatmap'][0].cpu().numpy() if 'heatmap' in outputs else None
     
     # Ground truth
-    gt_bbox = sample['sat_bbox'].numpy()
+    gt_bbox = sample['target_bbox'].numpy()
     gt_yaw = sample['yaw_radians'].item()
-    gt_position = sample['camera_position'].numpy()
+    gt_position = sample['target_position'].numpy()
+    direction = sample.get('direction', 'mono_to_sat')
     
     # Create figure
     n_cols = 4 if show_heatmap and heatmap is not None else 3
     fig, axes = plt.subplots(1, n_cols, figsize=(6 * n_cols, 6))
     
-    # 1. Front view with prompt point
-    front_img = to_numpy_img(sample['front_view'])
-    axes[0].imshow(front_img)
-    mono_pt = sample['mono_point'].numpy()
-    axes[0].scatter(mono_pt[0], mono_pt[1], c='lime', marker='x', s=200,
-                    linewidths=3, label='Prompt Point')
-    axes[0].set_title('Front View', fontsize=14)
+    # 1. Mono view with prompt point
+    mono_img = to_numpy_img(sample['mono_view'])
+    axes[0].imshow(mono_img)
+    prompt_pt = sample['prompt_point'].numpy()
+    if prompt_view == 'mono':
+        axes[0].scatter(prompt_pt[0], prompt_pt[1], c='lime', marker='x', s=200,
+                        linewidths=3, label='Prompt')
+    axes[0].set_title(f'Mono View ({direction})', fontsize=14)
     axes[0].legend(loc='upper right')
     axes[0].axis('off')
     
     # 2. Satellite view with BBox
-    sat_img = to_numpy_img(sample['satellite_view'])
+    sat_img = to_numpy_img(sample['sat_view'])
     axes[1].imshow(sat_img)
     draw_bbox(axes[1], gt_bbox, img_size, 'lime', '-', 3, 'GT BBox')
     draw_bbox(axes[1], pred_bbox, img_size, 'red', '--', 2, f'Pred (score={pred_score:.2f})')

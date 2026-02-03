@@ -76,19 +76,21 @@ class UnifiedQueryDecoder(nn.Module):
         self,
         obj_memory: torch.Tensor,
         loc_memory: torch.Tensor,
-        target_guidance: torch.Tensor,
+        obj_guidance: torch.Tensor,
+        loc_guidance: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
         """
         Forward pass through the unified decoder.
         
         支持双向定位：
-        - object queries 作用在 obj_memory 上（根据方向变化）
-        - location queries 作用在 loc_memory 上（始终是 sat，因为 camera_position 在 sat 上）
+        - object queries 作用在 obj_memory 上，concat obj_guidance（prompt 视图特征）
+        - location queries 作用在 loc_memory 上，concat loc_guidance（始终是 mono 特征）
         
         Args:
             obj_memory: [B, P, C] target view features for bbox detection
             loc_memory: [B, P, C] satellite features for location prediction
-            target_guidance: [B, C] target guidance vector from prompt fusion
+            obj_guidance: [B, C] guidance for object queries (from prompt view)
+            loc_guidance: [B, C] guidance for location queries (always from mono view)
             
         Returns:
             Dict with:
@@ -106,10 +108,14 @@ class UnifiedQueryDecoder(nn.Module):
         loc_queries = self.location_queries.weight.unsqueeze(0).expand(B, -1, -1)  # [B, N_loc, C]
         loc_query_pos = self.location_query_pos.weight.unsqueeze(0).expand(B, -1, -1)
         
-        # Add target guidance to query content (not position)
-        target_proj = self.target_guidance_proj(target_guidance)  # [B, C]
-        obj_queries = obj_queries + target_proj.unsqueeze(1)
-        loc_queries = loc_queries + target_proj.unsqueeze(1)
+        # Add guidance to query content (not position)
+        # Object queries: concat prompt view features (告诉模型"要找什么")
+        obj_guidance_proj = self.target_guidance_proj(obj_guidance)  # [B, C]
+        obj_queries = obj_queries + obj_guidance_proj.unsqueeze(1)
+        
+        # Location queries: concat mono view features (告诉模型"从哪个视角拍的")
+        loc_guidance_proj = self.target_guidance_proj(loc_guidance)  # [B, C]
+        loc_queries = loc_queries + loc_guidance_proj.unsqueeze(1)
         
         # Memory positional encoding
         memory_pos = self.memory_pos_embed(self.spatial_size, device=device)  # [C, H, W]

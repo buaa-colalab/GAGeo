@@ -102,6 +102,14 @@ class CrossViewLocalizerPi3(nn.Module):
             dropout=0.1,
         )
         
+        # Mono guidance projection (for location queries)
+        self.mono_guidance_proj = nn.Sequential(
+            nn.Linear(self.output_dim, self.output_dim),
+            nn.LayerNorm(self.output_dim),
+            nn.GELU(),
+            nn.Linear(self.output_dim, self.output_dim),
+        )
+        
         # ============ 5. Task-Specific Heads ============
         self.bbox_head = BBoxHead(
             hidden_dim=self.output_dim,
@@ -175,15 +183,10 @@ class CrossViewLocalizerPi3(nn.Module):
         )
         
         # ============ Step 3: Direction-aware Prompt Fusion ============
-        # 根据 prompt_views 决定从哪个视图提取 prompt features
-        if prompt_views is None:
-            # 默认: 所有样本都是 mono_to_sat
-            prompt_features = mono_patch_features
-        else:
-            # 混合 batch: 需要根据每个样本的方向选择特征
-            prompt_features = self._select_prompt_features(
-                mono_patch_features, sat_patch_features, prompt_views
-            )
+        # prompt_features: prompt 所在视图的特征
+        prompt_features = self._select_features_by_view(
+            mono_patch_features, sat_patch_features, prompt_views, default='mono'
+        )
         
         dense_for_fusion = dense_embeddings if masks is not None else None
         fused_sparse, fused_prompt, target_guidance = self.prompt_fusion(
@@ -193,25 +196,23 @@ class CrossViewLocalizerPi3(nn.Module):
         )
         
         # ============ Step 4: Unified Query Decoder ============
-        # 双 memory 设计:
-        # - obj_memory: object queries 作用的目标视图（根据方向变化）
-        # - loc_memory: location queries 作用的视图（始终是 sat，因为 camera_position 在 sat 上）
-        if prompt_views is None:
-            # 默认 mono_to_sat: bbox 在 sat 图上
-            obj_memory = sat_patch_features
-        else:
-            # 根据方向选择目标视图特征
-            obj_memory = self._select_target_features(
-                mono_patch_features, sat_patch_features, prompt_views
-            )
-        
-        # location queries 始终作用在 sat 图上
+        # obj_memory: 目标视图（与 prompt 相反）
+        # loc_memory: 始终是 sat（camera_position 在 sat 上）
+        # obj_guidance: 来自 prompt 视图（告诉模型“要找什么”）
+        # loc_guidance: 始终来自 mono（告诉模型“从哪个视角拍的”）
+        obj_memory = self._select_features_by_view(
+            mono_patch_features, sat_patch_features, prompt_views, default='sat', invert=True
+        )
         loc_memory = sat_patch_features
+        
+        # mono_guidance: 用投影层处理，保持与 target_guidance 一致性
+        mono_guidance = self.mono_guidance_proj(mono_patch_features.mean(dim=1))
         
         decoder_outputs = self.query_decoder(
             obj_memory=obj_memory,
             loc_memory=loc_memory,
-            target_guidance=target_guidance,
+            obj_guidance=target_guidance,
+            loc_guidance=mono_guidance,
         )
         obj_features = decoder_outputs['obj_features']
         loc_features = decoder_outputs['loc_features']
@@ -261,78 +262,50 @@ class CrossViewLocalizerPi3(nn.Module):
             'target_guidance': target_guidance,
         }
     
-    def _select_prompt_features(
+    def _select_features_by_view(
         self,
         mono_features: torch.Tensor,
         sat_features: torch.Tensor,
-        prompt_views: List[str],
+        prompt_views: Optional[List[str]],
+        default: str = 'mono',
+        invert: bool = False,
     ) -> torch.Tensor:
         """
-        根据 prompt_views 选择每个样本的 prompt features.
+        统一的特征选择方法。
         
         Args:
             mono_features: [B, N, C] mono 视图特征
             sat_features: [B, N, C] sat 视图特征
-            prompt_views: List of 'mono' or 'sat'
+            prompt_views: List of 'mono' or 'sat'，None 时使用 default
+            default: prompt_views 为 None 时的默认值
+            invert: True 时选择与 prompt_view 相反的视图（用于 obj_memory）
         
         Returns:
-            prompt_features: [B, N, C] 选择后的特征
+            selected_features: [B, N, C]
         """
         B = mono_features.shape[0]
         
-        # 检查是否所有样本方向相同（优化常见情况）
-        if all(v == 'mono' for v in prompt_views):
+        # 处理 None 情况
+        if prompt_views is None:
+            prompt_views = [default] * B
+        
+        # 如果 invert，则选择相反视图
+        if invert:
+            views = ['sat' if v == 'mono' else 'mono' for v in prompt_views]
+        else:
+            views = prompt_views
+        
+        # 快速路径：所有样本相同
+        if all(v == 'mono' for v in views):
             return mono_features
-        if all(v == 'sat' for v in prompt_views):
+        if all(v == 'sat' for v in views):
             return sat_features
         
-        # 混合 batch: 逐样本选择
-        prompt_features = torch.zeros_like(mono_features)
-        for i, view in enumerate(prompt_views):
-            if view == 'mono':
-                prompt_features[i] = mono_features[i]
-            else:
-                prompt_features[i] = sat_features[i]
-        
-        return prompt_features
-    
-    def _select_target_features(
-        self,
-        mono_features: torch.Tensor,
-        sat_features: torch.Tensor,
-        prompt_views: List[str],
-    ) -> torch.Tensor:
-        """
-        根据 prompt_views 选择目标视图特征 (与 prompt 相反).
-        
-        - prompt_view='mono' (mono_to_sat): 目标是 sat
-        - prompt_view='sat' (sat_to_mono): 目标是 mono
-        
-        Args:
-            mono_features: [B, N, C] mono 视图特征
-            sat_features: [B, N, C] sat 视图特征
-            prompt_views: List of 'mono' or 'sat'
-        
-        Returns:
-            target_features: [B, N, C] 目标视图特征
-        """
-        B = mono_features.shape[0]
-        
-        # 检查是否所有样本方向相同（优化常见情况）
-        if all(v == 'mono' for v in prompt_views):
-            return sat_features  # mono_to_sat: 目标是 sat
-        if all(v == 'sat' for v in prompt_views):
-            return mono_features  # sat_to_mono: 目标是 mono
-        
-        # 混合 batch: 逐样本选择（与 prompt 相反）
-        target_features = torch.zeros_like(mono_features)
-        for i, view in enumerate(prompt_views):
-            if view == 'mono':
-                target_features[i] = sat_features[i]  # mono_to_sat
-            else:
-                target_features[i] = mono_features[i]  # sat_to_mono
-        
-        return target_features
+        # 混合 batch
+        selected = torch.zeros_like(mono_features)
+        for i, v in enumerate(views):
+            selected[i] = mono_features[i] if v == 'mono' else sat_features[i]
+        return selected
 
 
 def build_cross_view_localizer_pi3(
