@@ -74,76 +74,65 @@ class UnifiedQueryDecoder(nn.Module):
     
     def forward(
         self,
-        obj_memory: torch.Tensor,
-        loc_memory: torch.Tensor,
-        obj_guidance: torch.Tensor,
-        loc_guidance: torch.Tensor,
+        memory: torch.Tensor,
+        target_guidance: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
         """
         Forward pass through the unified decoder.
         
-        支持双向定位：
-        - object queries 作用在 obj_memory 上，concat obj_guidance（prompt 视图特征）
-        - location queries 作用在 loc_memory 上，concat loc_guidance（始终是 mono 特征）
-        
         Args:
-            obj_memory: [B, P, C] target view features for bbox detection
-            loc_memory: [B, P, C] satellite features for location prediction
-            obj_guidance: [B, C] guidance for object queries (from prompt view)
-            loc_guidance: [B, C] guidance for location queries (always from mono view)
+            memory: [B, P, C] satellite patch features (memory for cross-attention)
+            target_guidance: [B, C] target guidance vector from prompt fusion
             
         Returns:
             Dict with:
                 - obj_features: [B, N_obj, C] object query outputs
                 - loc_features: [B, N_loc, C] location query outputs
+                - decoder_out: [B, N_total, C] full decoder output
         """
-        B = obj_memory.shape[0]
-        device = obj_memory.device
-        target_dtype = obj_memory.dtype  # 确保类型一致
-        
+        B = memory.shape[0]
+        device = memory.device
+        target_dtype = memory.dtype
         # Prepare object queries
-        obj_queries = self.object_queries.weight.unsqueeze(0).expand(B, -1, -1).to(target_dtype)
+        obj_queries = self.object_queries.weight.unsqueeze(0).expand(B, -1, -1).to(target_dtype)  # [B, N_obj, C]
         obj_query_pos = self.object_query_pos.weight.unsqueeze(0).expand(B, -1, -1).to(target_dtype)
         
         # Prepare location queries
-        loc_queries = self.location_queries.weight.unsqueeze(0).expand(B, -1, -1).to(target_dtype)
+        loc_queries = self.location_queries.weight.unsqueeze(0).expand(B, -1, -1).to(target_dtype)  # [B, N_loc, C]
         loc_query_pos = self.location_query_pos.weight.unsqueeze(0).expand(B, -1, -1).to(target_dtype)
         
-        # Add guidance to query content (not position)
-        # Object queries: concat prompt view features (告诉模型"要找什么")
-        obj_guidance_proj = self.target_guidance_proj(obj_guidance.to(target_dtype))
-        obj_queries = obj_queries + obj_guidance_proj.unsqueeze(1)
+        # Add target guidance to query content (not position)
+        target_proj = self.target_guidance_proj(target_guidance.to(target_dtype))  # [B, C]
+        obj_queries = obj_queries + target_proj.unsqueeze(1)
+        loc_queries = loc_queries + target_proj.unsqueeze(1)
         
-        # Location queries: concat mono view features (告诉模型"从哪个视角拍的")
-        loc_guidance_proj = self.target_guidance_proj(loc_guidance.to(target_dtype))
-        loc_queries = loc_queries + loc_guidance_proj.unsqueeze(1)
+        # Concatenate queries and positional encodings
+        unified_queries = torch.cat([obj_queries, loc_queries], dim=1)  # [B, N_total, C]
+        unified_query_pos = torch.cat([obj_query_pos, loc_query_pos], dim=1)
         
         # Memory positional encoding
         memory_pos = self.memory_pos_embed(self.spatial_size, device=device)  # [C, H, W]
         memory_pos = memory_pos.flatten(1).permute(1, 0).to(target_dtype)  # [P, C]
         memory_pos = memory_pos.unsqueeze(0).expand(B, -1, -1)  # [B, P, C]
         
-        # Object decoder: queries attend to obj_memory (target view)
-        obj_out = self.decoder(
-            tgt=obj_queries,
-            memory=obj_memory,
+        # Decoder forward
+        decoder_out = self.decoder(
+            tgt=unified_queries,
+            memory=memory,
             pos=memory_pos,
-            query_pos=obj_query_pos,
+            query_pos=unified_query_pos,
         )
-        if obj_out.dim() == 4:
-            obj_out = obj_out[-1]
         
-        # Location decoder: queries attend to loc_memory (always sat)
-        loc_out = self.decoder(
-            tgt=loc_queries,
-            memory=loc_memory,
-            pos=memory_pos,
-            query_pos=loc_query_pos,
-        )
-        if loc_out.dim() == 4:
-            loc_out = loc_out[-1]
+        # Handle output shape (may have intermediate layers dimension)
+        if decoder_out.dim() == 4:
+            decoder_out = decoder_out[-1]  # Take last layer: [B, N_total, C]
+        
+        # Split outputs
+        obj_features = decoder_out[:, :self.num_object_queries, :]
+        loc_features = decoder_out[:, self.num_object_queries:, :]
         
         return {
-            'obj_features': obj_out,
-            'loc_features': loc_out,
+            'obj_features': obj_features,
+            'loc_features': loc_features,
+            'decoder_out': decoder_out,
         }

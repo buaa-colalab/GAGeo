@@ -15,7 +15,7 @@ TRAINING_CONFIG=${1:-"configs/default.yaml"}
 # ============================================
 # Accelerate Parameters (hardware setup)
 # ============================================
-GPUS=${2:-"4,5"}
+GPUS=${2:-"4,5,6,7"}
 NUM_GPUS=$(echo $GPUS | tr ',' '\n' | wc -l)
 
 # Accelerate config file
@@ -27,21 +27,35 @@ if [ -f "$ACCELERATE_CONFIG" ]; then
     sed -i "s/^num_processes: .*/num_processes: $NUM_GPUS/" "$ACCELERATE_CONFIG"
 fi
 
+# ============================================
+# Logging Setup
+# ============================================
+LOG_DIR="output/logs"
+mkdir -p $LOG_DIR
+LOG_FILE="$LOG_DIR/train.log"
+TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+
 echo "=========================================="
 echo "Accelerate Training with DeepSpeed ZeRO-2"
 echo "=========================================="
 echo "Training Config: $TRAINING_CONFIG"
 echo "GPUs: $GPUS (${NUM_GPUS} GPUs)"
 echo "Accelerate Config: $ACCELERATE_CONFIG (num_processes auto-set to $NUM_GPUS)"
+echo "Log File: $LOG_FILE"
+echo "Timestamp: $TIMESTAMP"
 echo "=========================================="
 
 # Set visible GPUs
 export CUDA_VISIBLE_DEVICES=$GPUS
 
-# Run with accelerate
-accelerate launch \
-    --config_file $ACCELERATE_CONFIG \
-    train_detr.py \
-    --config $TRAINING_CONFIG
+# Run with accelerate and redirect output to log file
+{
+    echo "=== Training Started at $(date) ==="
+    accelerate launch \
+        --config_file $ACCELERATE_CONFIG \
+        train_detr.py \
+        --config $TRAINING_CONFIG
+    echo "=== Training Completed at $(date) ==="
+} 2>&1 | tee $LOG_FILE
 
-echo "Training completed!"
+echo "Training completed! Log saved to: $LOG_FILE"

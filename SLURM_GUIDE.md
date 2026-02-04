@@ -2,6 +2,8 @@
 
 This guide helps you run training on SLURM clusters with NVIDIA 5090 GPUs.
 
+**定位方式**: 单向定位（前视图 → 卫星图）- 基于前视图的提示，在卫星图上进行定位。
+
 ## 📋 Quick Start
 
 ### 1. Single GPU (5090 has 32GB, should fit the model)

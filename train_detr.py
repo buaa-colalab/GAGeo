@@ -63,31 +63,27 @@ def train_one_epoch(
     
     for batch_idx, batch in enumerate(pbar):
         with accelerator.accumulate(model):
-            mono_view = batch['mono_view']
-            sat_view = batch['sat_view']
+            front_view = batch['front_view']
+            sat_view = batch['satellite_view']
             
             # Prepare targets
             targets = {
-                'target_bbox': batch['target_bbox'],
+                'sat_bbox': batch['sat_bbox'],
                 'yaw_radians': batch['yaw_radians'],
-                'camera_position': batch['target_position'],
+                'camera_position': batch['camera_position'],
             }
             
-            # Get prompt_views for bidirectional support
-            prompt_views = batch.get('prompt_views', None)
-            
-            # Random prompt selection (使用 prompt_* 字段)
+            # Random prompt selection
             points, boxes, masks = prepare_random_prompt(batch, accelerator.device)
             
-            # Forward with direction-aware prompt
+            # Forward
             with accelerator.autocast():
                 outputs = model(
-                    mono_view=mono_view,
-                    sat_view=sat_view,
+                    front_view=front_view,
+                    satellite_view=sat_view,
                     points=points,
                     boxes=boxes,
                     masks=masks,
-                    prompt_views=prompt_views,
                 )
                 losses = criterion(outputs, targets)
                 loss = losses['loss']
@@ -141,29 +137,28 @@ def validate(
     all_yaw_errors = []
     
     for batch in tqdm(dataloader, desc='Validation', disable=not accelerator.is_main_process):
-        mono_view = batch['mono_view']
-        sat_view = batch['sat_view']
+        front_view = batch['front_view']
+        sat_view = batch['satellite_view']
         
         targets = {
-            'target_bbox': batch['target_bbox'],
+            'sat_bbox': batch['sat_bbox'],
             'yaw_radians': batch['yaw_radians'],
-            'camera_position': batch['target_position'],
+            'camera_position': batch['camera_position'],
         }
         
-        # Get prompt_views for bidirectional support
-        prompt_views = batch.get('prompt_views', None)
-        
-        # Use single prompt type for stable validation
-        points, boxes, masks = prepare_single_prompt(batch, mono_view.device, prompt_type='point')
+        # Use point prompt for validation
+        B = front_view.shape[0]
+        mono_point = batch['mono_point']
+        point_coords = mono_point.unsqueeze(1)
+        point_labels = torch.ones(B, 1, device=front_view.device)
         
         with accelerator.autocast():
             outputs = model(
-                mono_view=mono_view,
-                sat_view=sat_view,
-                points=points,
-                boxes=boxes,
-                masks=masks,
-                prompt_views=prompt_views,
+                front_view=front_view,
+                satellite_view=sat_view,
+                points=(point_coords, point_labels),
+                boxes=None,
+                masks=None,
             )
             losses = criterion(outputs, targets)
         
@@ -244,24 +239,19 @@ def main():
             },
         )
     
-    # Create datasets with bidirectional support
-    train_direction = cfg['data'].get('train_direction', 'mono_to_sat')
+    # Create datasets
     train_dataset = CrossViewDataset(
         json_path=cfg['data']['train_json'],
         data_root=cfg['data']['data_root'],
         crop_size=cfg['data']['crop_size'],
         random_crop=True,
-        direction=train_direction,
     )
     
-    # Validation uses same direction as training for fair evaluation
-    val_direction = cfg['data'].get('val_direction', 'mono_to_sat')
     val_dataset = CrossViewDataset(
         json_path=cfg['data']['val_json'],
         data_root=cfg['data']['data_root'],
         crop_size=cfg['data']['crop_size'],
         random_crop=False,
-        direction=val_direction,
     )
     
     train_loader = DataLoader(

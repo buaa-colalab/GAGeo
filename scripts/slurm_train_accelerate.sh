@@ -63,7 +63,7 @@ mkdir -p logs
 # Run with accelerate
 srun accelerate launch \
     --config_file $ACCELERATE_CONFIG \
-    train_accelerate.py \
+    train_detr.py \
     --config $TRAINING_CONFIG
 
 echo "Training completed!"

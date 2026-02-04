@@ -5,26 +5,25 @@ import sys
 
 def test_model():
     print("=" * 50)
-    print("Testing CrossViewLocalizerDETR Forward Pass")
+    print("Testing CrossViewLocalizerPi3 Forward Pass")
     print("=" * 50)
     
     # Import model
     print("\n1. Importing model...")
-    from models import CrossViewLocalizerDETR
+    from models import build_cross_view_localizer_pi3
     print("   ✓ Import successful")
     
     # Create model with smaller config for testing
     print("\n2. Creating model...")
-    model = CrossViewLocalizerDETR(
+    model = build_cross_view_localizer_pi3(
+        pretrained_pi3=None,
+        freeze_backbone=False,
         img_size=518,
-        patch_size=14,
-        embed_dim=1024,
-        vggt_depth=24,
+        decoder_size='large',
         num_heads=16,
         num_decoder_layers=6,
         num_object_queries=10,
         num_location_queries=16,
-        freeze_vggt=False,
     )
     print("   ✓ Model created")
     

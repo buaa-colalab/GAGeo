@@ -2,14 +2,14 @@
 
 # Data
 data:
-  train_json: "/data/xhj/location/data/single.json"
-  #train_json: "/data/xhj/location/data/train_all.json"
-  val_json: "/data/xhj/location/data/single.json"
-  #val_json: "/data/xhj/location/data/val_all.json"
+  #train_json: "/data/xhj/location/data/single.json"
+  train_json: "/data/xhj/location/data/train_all.json"
+  #val_json: "/data/xhj/location/data/single.json"
+  val_json: "/data/xhj/location/data/val_all.json"
   data_root: "/data/xhj/data/"
   img_size: 518
   crop_size: 518
-  num_workers: 1  # Reduced from 4 to prevent thread exhaustion with 8 GPUs
+  num_workers: 0  # Reduced from 4 to prevent thread exhaustion with 8 GPUs
   train_direction: 'both'  # 'mono_to_sat', 'sat_to_mono', 'both' for bidirectional training
   val_direction: 'both'  # 'mono_to_sat', 'sat_to_mono', 'both' for bidirectional training
 
@@ -22,12 +22,6 @@ model:
   num_object_queries: 10
   num_location_queries: 16
   
-  # 多任务开关
-  enable_bbox: true
-  enable_seg: false
-  enable_camera: true
-  enable_position: true
-  
   # Pi3 预训练权重
   pi3_weights: /data/xhj/location/ckpt/pi3/model.safetensors
   freeze_dinov2: true  # 冻结DINOv2 encoder部分
@@ -35,9 +29,9 @@ model:
 
 # Training
 training:
-  batch_size: 8
-  gradient_accumulation_steps: 2
-  num_epochs: 100
+  batch_size: 4
+  gradient_accumulation_steps: 4
+  num_epochs: 20
   
   # 学习率
   lr_backbone: 1.0e-5

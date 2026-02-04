@@ -2,13 +2,14 @@
 
 ## 概述
 
-基于 **Pi3** (Pose-conditioned Image-to-Image-to-Image) 的跨视角无人机定位系统。该系统融合前视图像和卫星图像，通过用户提供的几何提示（点/框/掩码）实现精确的无人机定位和姿态估计。
+基于 **Pi3** (Pose-conditioned Image-to-Image-to-Image) 的跨视角无人机定位系统。该系统使用**单向定位**方式：基于前视图（视野较小），在卫星图上进行定位。通过用户提供的几何提示（点/框/掩码）标注前视图中的目标，系统预测该目标在卫星图上的位置和相机姿态。
 
 **核心特性**：
 - 🔄 **Pi3 Backbone**: 使用 DINOv2 encoder + Pi3 decoder，支持跨视角特征提取
-- 🎯 **灵活的提示系统**: 支持点、边界框、掩码的任意组合（基于 SAM2）
-- 🎨 **统一查询解码器**: DETR-style 解码器同时处理目标检测和位置预测
-- 📍 **多任务输出**: BBox 检测 + 热力图定位 + 相机姿态估计
+- 🎯 **灵活的提示系统**: 支持点、边界框、掩码的任意组合（基于 SAM2），在前视图上标注目标
+- 🎨 **统一查询解码器**: DETR-style 解码器处理卫星图上的位置预测
+- 📍 **单向定位**: 前视图 → 卫星图定位 + 相机姿态估计
+- 🌍 **热力图输出**: 在卫星图上生成位置概率热力图
 
 ---
 
@@ -17,30 +18,34 @@
 ### 整体流程
 
 ```
-输入: Front-view Image + Satellite Image + Prompts (point/bbox/mask)
+输入: Front-view Image + Satellite Image + Prompts (point/bbox/mask on front-view)
   ↓
 [1] Pi3 Backbone (DINOv2 + Pi3 Decoder)
   → Front Features: [B, 1369, 2048]
   → Satellite Features: [B, 1369, 2048]
   ↓
 [2] Prompt Encoder (SAM2-style)
+  → 编码前视图上的提示（点/框/掩码）
   → Sparse Embeddings: [B, N, 2048]
   → Dense Embeddings: [B, 2048, 37, 37] (if mask provided)
   ↓
 [3] Prompt Fusion (Two-Way Transformer)
+  → 将提示信息融合到前视图特征中
   → Fused Front Features: [B, 1369, 2048]
   → Target Guidance: [B, N, 2048]
   ↓
 [4] Unified Query Decoder (DETR-style)
+  → 使用 Target Guidance 引导，在卫星图特征上查询
   → Object Features: [B, 10, 2048]  (for bbox)
-  → Location Features: [B, 16, 2048] (for heatmap)
+  → Location Features: [B, 16, 2048] (for heatmap on satellite)
   ↓
 [5] Task-Specific Heads
   ├─ BBox Head → [B, 10, 4] + [B, 10, 1]
-  ├─ Heatmap Head → [B, 1, 518, 518]
-  └─ Camera Head (Pi3-style) → [B, 4, 4] SE(3) pose
+  ├─ Heatmap Head → [B, 1, 518, 518] (卫星图上的位置热力图)
+  └─ Camera Head (Pi3-style) → [B, 4, 4] SE(3) pose (相机姿态)
 ```
 
+  
 ---
 
 ## 模块详解
@@ -67,7 +72,7 @@ Decoder: Pi3 Blocks with RoPE (2048-dim)
 
 **关键特性**:
 - 不需要固定参考帧（与 VGGT 的主要区别）
-- 所有视角平等对待
+- 支持跨视角特征提取（前视图 ↔ 卫星图）
 - RoPE 位置编码支持任意分辨率
 
 ---
@@ -133,13 +138,10 @@ Direct Addition:
 
 **查询设计**:
 ```python
-Object Queries: [B, 10, 2048]  # 用于 bbox 检测
-  - Learnable embeddings
-  - 用于检测前视图中的目标
-
 Location Queries: [B, 16, 2048]  # 用于热力图预测
   - Learnable embeddings
   - 用于预测卫星图上的位置
+  - 通过 Target Guidance 引导（来自前视图的提示信息）
 ```
 
 **Decoder 结构**:
@@ -148,35 +150,19 @@ TransformerDecoder (6 layers):
   - Self-Attention: queries 之间的交互
   - Cross-Attention: queries attend to satellite features
   - FFN: 特征变换
-  - Target Guidance Injection: 在第一层注入 target_guidance
+  - Target Guidance Injection: 在第一层注入 target_guidance（前视图目标信息）
 ```
 
 **输出**:
-- `obj_features`: [B, 10, 2048] - 用于 bbox head
-- `loc_features`: [B, 16, 2048] - 用于 heatmap head
+- `loc_features`: [B, 16, 2048] - 用于 heatmap head（卫星图定位）
 
 ---
 
 ### 5. Task-Specific Heads
 
-#### 5.1 BBox Head (`heads/bbox_head.py`)
+#### 5.1 Heatmap Head (`heads/heatmap_head.py`)
 
-**作用**: 预测前视图中目标的边界框
-
-**结构**:
-```python
-Input: obj_features [B, 10, 2048]
-  ↓
-MLP (3 layers)
-  ↓
-Output:
-  - pred_boxes: [B, 10, 4]  # (cx, cy, w, h) normalized
-  - bbox_scores: [B, 10, 1]  # confidence scores
-```
-
-#### 5.2 Heatmap Head (`heads/heatmap_head.py`)
-
-**作用**: 预测卫星图上的位置热力图
+**作用**: 预测卫星图上的位置热力图（单向定位：前视图 → 卫星图）
 
 **结构**:
 ```python
@@ -194,7 +180,7 @@ Output:
   - heatmap_logits: [B, 1, 518, 518]  # raw logits
 ```
 
-#### 5.3 Camera Head (`heads/pi3_camera_head.py`)
+#### 5.2 Camera Head (`heads/pi3_camera_head.py`)
 
 **作用**: 预测相机姿态（基于 Pi3 的设计）
 
@@ -315,12 +301,10 @@ outputs = model(
 )
 
 # 输出
-print(outputs['pred_boxes'].shape)      # [2, 10, 4]
-print(outputs['bbox_scores'].shape)     # [2, 10, 1]
-print(outputs['heatmap'].shape)         # [2, 1, 518, 518]
-print(outputs['position'].shape)        # [2, 2]
-print(outputs['yaw_degrees'].shape)     # [2]
-print(outputs['quaternion'].shape)      # [2, 4]
+print(outputs['heatmap'].shape)         # [2, 1, 518, 518] - 卫星图上的位置热力图
+print(outputs['position'].shape)        # [2, 2] - 预测的卫星图坐标
+print(outputs['yaw_degrees'].shape)     # [2] - 相机偏航角
+print(outputs['quaternion'].shape)      # [2, 4] - 相机姿态四元数
 ```
 
 

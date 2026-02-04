@@ -2,7 +2,9 @@
 
 ## 项目完成情况
 
-已按照您的需求完成基于 VGGT、DETR 和 SAM 的跨视角无人机定位系统的代码实现。
+已完成基于 Pi3、DETR 和 SAM 的跨视角无人机定位系统的代码实现。
+
+**定位方式**: **单向定位** - 基于前视图（视野较小），在卫星图上进行定位。
 
 ## 实现的核心组件
 
@@ -53,22 +55,23 @@
 完整的端到端模型，整合所有组件：
 
 ```
-Pipeline:
-1. VGGT Backbone → F_f, F_s (前视图和卫星图特征)
+Pipeline (单向定位: 前视图 → 卫星图):
+1. Pi3 Backbone → F_f, F_s (前视图和卫星图特征)
 2. SAM Prompt Encoder → E_p (sparse), E_d (dense)
+   - 在前视图上标注目标（点/框/掩码）
 3. Prompt Fusion → F_target (目标感知特征)
+   - 将前视图的提示信息融合
 4. DETR Decoder:
-   - Object Queries → BBox predictions
-   - Location Queries → Position heatmap
-5. Camera Head → Yaw angle
+   - Location Queries → Position heatmap (在卫星图上定位)
+5. Camera Head → Camera pose (相机姿态)
 ```
 
 **特性**:
-- ✅ 支持点/框/掩码三种提示类型
-- ✅ F_target 引导所有下游任务
-- ✅ 多任务输出: BBox + Heatmap + Yaw
+- ✅ 支持点/框/掩码三种提示类型（在前视图上标注）
+- ✅ F_target 引导卫星图定位任务
+- ✅ 单向定位输出: Heatmap (卫星图) + Camera Pose
 - ✅ 可选的 prompt fusion (可开关)
-- ✅ 支持加载预训练 VGGT 权重
+- ✅ 支持加载预训练 Pi3 权重
 - ✅ 灵活的冻结/解冻 backbone
 
 ## 文件清单
@@ -121,29 +124,22 @@ Pipeline:
 
 ## 架构对比
 
-### 原始架构 (cross_view_localizer_v2.py)
+### 当前架构 (单向定位)
 ```
-VGGT → Prompt Encoder → BBox Head (简单 cross-attention)
-                      → Mask Head (DPT-style)
-                      → Camera Head
-                      → Position Head (regression)
-```
-
-### 新架构 (cross_view_localizer_detr.py)
-```
-VGGT → Prompt Encoder → Prompt Fusion (SAM-style)
-                      → DETR Decoder:
-                          - Object Queries → BBox
-                          - Location Queries → Heatmap
-                      → Camera Head (unchanged)
+Pi3 Backbone → Prompt Encoder (前视图提示)
+            → Prompt Fusion (SAM-style)
+            → DETR Decoder:
+                - Location Queries → Heatmap (卫星图定位)
+            → Camera Head (相机姿态)
 ```
 
-**主要改进**:
-1. ✅ SAM-style prompt fusion (双向 transformer)
-2. ✅ DETR-style decoder (标准化架构)
-3. ✅ Query-based heatmap (更精确的位置预测)
-4. ✅ Penalty-reduced focal loss (专门的热力图损失)
-5. ✅ F_target guidance (目标感知引导)
+**主要特性**:
+1. ✅ 单向定位: 前视图 → 卫星图
+2. ✅ SAM-style prompt fusion (双向 transformer)
+3. ✅ DETR-style decoder (标准化架构)
+4. ✅ Query-based heatmap (精确的位置预测)
+5. ✅ Penalty-reduced focal loss (专门的热力图损失)
+6. ✅ F_target guidance (前视图目标引导卫星图定位)
 
 ## 使用示例
 
@@ -168,12 +164,10 @@ points = (torch.rand(2, 5, 2) * 518, torch.ones(2, 5))
 # 前向传播
 outputs = model(front_view, satellite_view, points=points)
 
-# 输出
-outputs['pred_boxes']    # [2, 100, 4] - BBox
-outputs['bbox_scores']   # [2, 100] - 分数
-outputs['heatmap']       # [2, 518, 518] - 热力图
-outputs['position']      # [2, 2] - 位置
-outputs['yaw_radians']   # [2] - 角度
+# 输出 (单向定位)
+outputs['heatmap']       # [2, 518, 518] - 卫星图上的位置热力图
+outputs['position']      # [2, 2] - 卫星图上的预测位置
+outputs['yaw_radians']   # [2] - 相机偏航角
 ```
 
 ### 训练
@@ -288,30 +282,28 @@ yaw_radians = camera_output['yaw_radians']  # [B]
 
 1. **输入数据** ✅
    - Front-View Image, Satellite Image
-   - Prompts: Point, BBox, Mask
-   - GT Labels: BBox, Camera Position, Yaw
+   - Prompts: Point, BBox, Mask (在前视图上标注目标)
+   - GT Labels: Camera Position (卫星图坐标), Yaw
 
-2. **VGGT Backbone** ✅
-   - 提取 F_f 和 F_s
-   - ViT 架构，单层 Token 输出
+2. **Pi3 Backbone** ✅
+   - 提取 F_f 和 F_s (前视图和卫星图特征)
+   - DINOv2 + Pi3 Decoder 架构
 
 3. **SAM Prompt Encoder** ✅
-   - Point/BBox/Mask 编码为 E_p
-   - 与 F_f 融合生成 F_target
+   - Point/BBox/Mask 编码为 E_p (在前视图上标注)
+   - 与 F_f 融合生成 F_target (前视图目标特征)
    - Sparse prompts: Cross-Attention
    - Dense prompts: 直接相加
 
 4. **DETR Transformer** ✅
-   - Encoder: 增强卫星图特征 (已在 VGGT 中完成)
-   - Decoder: 两组 Queries
-     - Object Queries → BBox
-     - Location Queries (G×G) → Heatmap
+   - Encoder: 增强卫星图特征 (已在 Pi3 中完成)
+   - Decoder: Location Queries (G×G) → Heatmap (卫星图定位)
    - F_target 引导: `Q_final = Q_init + Linear(F_target)`
+   - 单向定位: 前视图目标信息 → 卫星图位置
 
 5. **预测头** ✅
-   - BBox Head: 3 层 MLP (DETR-style)
-   - Heatmap Head: Query-based，双线性插值上采样
-   - Camera Head: VGGT 原生 Head
+   - Heatmap Head: Query-based，双线性插值上采样（卫星图定位）
+   - Camera Head: Pi3 原生 Head（相机姿态）
 
 6. **损失函数** ✅
    - BBox Loss: L1 + GIoU ✅
@@ -336,9 +328,9 @@ yaw_radians = camera_output['yaw_radians']  # [B]
 ```
 
 ### 3. 评估指标
-- BBox: mAP, IoU
-- Position: 像素误差、距离误差
+- Position: 像素误差、距离误差（卫星图上）
 - Yaw: 角度误差 (度)
+- Heatmap: Peak accuracy, AUC
 
 ### 4. 可视化工具
 - 热力图可视化
@@ -354,13 +346,15 @@ yaw_radians = camera_output['yaw_radians']  # [B]
 ## 技术栈
 
 - PyTorch
-- VGGT (Visual Geometry Grounded Transformer)
-- DETR (End-to-End Object Detection with Transformers)
-- SAM (Segment Anything Model)
+- Pi3 (Pose-conditioned Image-to-Image-to-Image)
 - DINOv2 (Self-supervised Vision Transformer)
+- DETR (End-to-End Object Detection with Transformers)
+- SAM2 (Segment Anything Model 2)
 
 ---
 
-**实现完成日期**: 2026-01-31
+**最后更新日期**: 2026-02-04
 
-所有核心组件已按照您的需求实现完毕，可以直接使用或根据实际需求进行调整。
+**定位方式**: 单向定位（前视图 → 卫星图），因为前视图视野较小，不方便进行双向定位。
+
+所有核心组件已按照单向定位需求实现完毕，可以直接使用或根据实际需求进行调整。
