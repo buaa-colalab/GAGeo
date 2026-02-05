@@ -17,10 +17,17 @@ data:
 model:
   # Pi3 backbone settings
   decoder_size: 'large'  # 'small', 'base', 'large'
-  num_heads: 16
-  num_decoder_layers: 6
-  num_object_queries: 10
-  num_location_queries: 16
+  
+  # Two-Stage Cross-Attention 参数
+  num_intent_queries: 32  # Stage 1: 可学习的Intent Queries数量
+  num_object_queries: 10  # Stage 2: Object detection queries数量
+  num_location_queries: 16  # Stage 2: Location queries数量
+  
+  # Transformer 参数
+  num_heads: 8  # Attention heads数量 (prompt_fusion和query_decoder共用)
+  prompt_fusion_layers: 3  # Stage 1: Intent Formation的decoder层数
+  num_decoder_layers: 6  # Stage 2: Query Decoder的decoder层数
+  dropout: 0.1  # Dropout rate
   
   # Pi3 预训练权重
   pi3_weights: /data/xhj/location/ckpt/pi3/model.safetensors
@@ -42,8 +49,7 @@ training:
   weight_bbox: 5.0
   weight_giou: 2.0
   weight_yaw: 1.0
-  weight_position: 1.0
-  weight_mask: 1.0
+  weight_heatmap: 1.0
   
   # Optimizer
   optimizer: "adamw"

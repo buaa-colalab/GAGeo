@@ -39,14 +39,14 @@ class DETRCriterion(nn.Module):
         
         Args:
             outputs: Model outputs dict
-            targets: Target dict with 'target_bbox', 'camera_position', 'yaw_radians'
+            targets: Target dict with 'sate_bbox', 'camera_position', 'yaw_radians'
         """
         losses = {}
         
         # ============ BBox Loss ============
-        if 'pred_boxes' in outputs and 'target_bbox' in targets:
+        if 'pred_boxes' in outputs and 'sate_bbox' in targets:
             pred_boxes = outputs['pred_boxes']  # [B, N, 4]
-            target_boxes = targets['target_bbox']  # [B, 4]
+            target_boxes = targets['sate_bbox']  # [B, 4]
             bbox_scores = outputs['bbox_scores']  # [B, N]
             
             B = pred_boxes.shape[0]

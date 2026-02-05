@@ -281,10 +281,13 @@ def main():
         freeze_backbone=False,  # We'll freeze selectively below
         img_size=cfg['data']['img_size'],
         decoder_size=cfg['model'].get('decoder_size', 'large'),
-        num_heads=cfg['model']['num_heads'],
-        num_decoder_layers=cfg['model'].get('num_decoder_layers', 6),
+        num_intent_queries=cfg['model'].get('num_intent_queries', 32),
         num_object_queries=cfg['model'].get('num_object_queries', 10),
         num_location_queries=cfg['model'].get('num_location_queries', 16),
+        num_heads=cfg['model'].get('num_heads', 8),
+        prompt_fusion_layers=cfg['model'].get('prompt_fusion_layers', 3),
+        num_decoder_layers=cfg['model'].get('num_decoder_layers', 6),
+        dropout=cfg['model'].get('dropout', 0.1),
     )
     
     if cfg['model'].get('pi3_weights'):
@@ -308,10 +311,10 @@ def main():
     
     # Create criterion
     criterion = DETRCriterion(
-        weight_bbox=cfg['training'].get('weight_bbox', 5.0),
-        weight_giou=cfg['training'].get('weight_giou', 2.0),
-        weight_heatmap=cfg['training'].get('weight_heatmap', 1.0),
-        weight_yaw=cfg['training'].get('weight_yaw', 1.0),
+        weight_bbox=cfg['training']['weight_bbox'],
+        weight_giou=cfg['training']['weight_giou'],
+        weight_heatmap=cfg['training']['weight_heatmap'],
+        weight_yaw=cfg['training']['weight_yaw'],
         img_size=cfg['data']['img_size'],
     )
     

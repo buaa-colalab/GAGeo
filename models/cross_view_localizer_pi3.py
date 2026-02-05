@@ -31,10 +31,13 @@ class CrossViewLocalizerPi3(nn.Module):
         img_size: Input image size (default 518)
         patch_size: Patch size (default 14)
         decoder_size: Pi3 decoder size ('small', 'base', 'large')
-        num_heads: Number of attention heads
-        num_decoder_layers: DETR decoder layers
-        num_object_queries: Number of object queries for bbox detection
-        num_location_queries: Number of location queries for heatmap
+        num_intent_queries: Number of learnable Intent Queries in Stage 1 (default 32)
+        num_object_queries: Number of object queries for bbox detection (default 10)
+        num_location_queries: Number of location queries for heatmap (default 16)
+        num_heads: Number of attention heads for both stages (default 8)
+        prompt_fusion_layers: Number of decoder layers in Stage 1 Intent Formation (default 3)
+        num_decoder_layers: Number of decoder layers in Stage 2 Query Decoder (default 6)
+        dropout: Dropout rate (default 0.1)
         freeze_backbone: Freeze Pi3 backbone
     """
     
@@ -43,10 +46,13 @@ class CrossViewLocalizerPi3(nn.Module):
         img_size: int = 518,
         patch_size: int = 14,
         decoder_size: str = 'large',
-        num_heads: int = 16,
-        num_decoder_layers: int = 6,
+        num_intent_queries: int = 32,
         num_object_queries: int = 10,
         num_location_queries: int = 16,
+        num_heads: int = 8,
+        prompt_fusion_layers: int = 3,
+        num_decoder_layers: int = 6,
+        dropout: float = 0.1,
         freeze_backbone: bool = False,
     ):
         super().__init__()
@@ -79,22 +85,22 @@ class CrossViewLocalizerPi3(nn.Module):
         # ============ 3. Two-Stage Cross-Attention Prompt Fusion ============
         self.prompt_fusion = PromptFusionWithDense(
             embedding_dim=self.output_dim,
-            num_intent_queries=32,  # Learnable intent queries
-            num_heads=num_heads // 2,
-            num_layers=3,  # Number of self-attn + cross-attn layers
+            num_intent_queries=num_intent_queries,
+            num_heads=num_heads,
+            num_layers=prompt_fusion_layers,
             image_embedding_size=(self.num_patches_per_side, self.num_patches_per_side),
-            dropout=0.1,
+            dropout=dropout,
         )
         
         # ============ 4. Unified Query Decoder ============
         self.query_decoder = UnifiedQueryDecoder(
             hidden_dim=self.output_dim,
-            num_heads=num_heads // 2,
+            num_heads=num_heads,
             num_decoder_layers=num_decoder_layers,
             num_object_queries=num_object_queries,
             num_location_queries=num_location_queries,
             spatial_size=(self.num_patches_per_side, self.num_patches_per_side),
-            dropout=0.1,
+            dropout=dropout,
         )
         
         # ============ 5. Task-Specific Heads ============
