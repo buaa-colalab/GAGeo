@@ -38,5 +38,7 @@ logs/
 data/val_all.json
 data/train_all.json
 data/test_all.json
+data/unseen_test_G.json
+data/unseen_test_D.json
 visualizations/
 data_preprocess/

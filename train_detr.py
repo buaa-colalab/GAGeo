@@ -244,14 +244,14 @@ def main():
         json_path=cfg['data']['train_json'],
         data_root=cfg['data']['data_root'],
         crop_size=cfg['data']['crop_size'],
-        random_crop=True,
+        crop_sat=True,  # 训练模式：随机crop
     )
     
     val_dataset = CrossViewDataset(
         json_path=cfg['data']['val_json'],
         data_root=cfg['data']['data_root'],
         crop_size=cfg['data']['crop_size'],
-        random_crop=False,
+        crop_sat=False,  # val/test数据已经是crop好的，无需再crop
     )
     
     train_loader = DataLoader(

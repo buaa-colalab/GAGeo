@@ -45,9 +45,7 @@ class CrossViewDataset(Dataset):
         sat_size: int = 1280,
         crop_sat: bool = True,
         crop_size: int = 518,
-        random_crop: bool = True,
         transform: Optional[callable] = None,
-        test_mode: bool = False,  # 测试模式：图像已经是crop好的518x518
     ):
         """
         Args:
@@ -56,19 +54,17 @@ class CrossViewDataset(Dataset):
             mono_size: 单目图尺寸
             sat_size: 卫星图原始尺寸
             crop_sat: 是否crop卫星图
+                     True: 训练模式，从sate/目录加载1280x1280图像并随机crop
+                     False: 验证/测试模式，从crop_sate/目录加载已crop好的518x518图像
             crop_size: crop后的尺寸
-            random_crop: 训练时随机crop，测试时中心crop
             transform: 额外的数据增强
-            test_mode: 测试模式，图像已经是crop好的518x518，跳过crop逻辑
         """
         self.data_root = Path(data_root)
         self.mono_size = mono_size
         self.sat_size = sat_size
         self.crop_sat = crop_sat
         self.crop_size = crop_size
-        self.random_crop = random_crop
         self.transform = transform
-        self.test_mode = test_mode
         
         # 加载数据
         with open(json_path, 'r') as f:
@@ -81,10 +77,16 @@ class CrossViewDataset(Dataset):
     
     def __getitem__(self, idx: int) -> Dict:
         item = self.data[idx]
+        sat_filename = item['sat_filename']
         
         # 加载图像
         mono_img = self._load_image(item['city'], 'mono', item['mono_filename'])
-        sat_img = self._load_image(item['city'], 'sate', item['sat_filename'])
+        if self.crop_sat:
+            # 训练模式: 从sate/目录加载1280x1280原始图像
+            sat_img = self._load_image(item['city'], 'sate', sat_filename)
+        else:
+            # 验证/测试模式: 从crop_sate/目录加载已经crop好的518x518图像
+            sat_img = self._load_image(item['city'], 'crop_sate', sat_filename)
         
         # 获取标注
         mono_point = np.array(item['mono_point'], dtype=np.float32)
@@ -94,7 +96,12 @@ class CrossViewDataset(Dataset):
         
         # 解码segmentation为mask
         mono_mask = self._decode_segmentation(item['mono_segmentation'], self.mono_size)
-        sat_mask = self._decode_segmentation(item.get('sate_segmentation'), self.sat_size)
+        if self.crop_sat:
+            # 训练模式: mask是1280x1280
+            sat_mask = self._decode_segmentation(item.get('sate_segmentation'), self.sat_size)
+        else:
+            # 验证/测试模式: mask已经是crop好的518x518
+            sat_mask = self._decode_segmentation(item.get('sate_segmentation'), self.crop_size)
         
         # 相机位置和yaw
         camera_position = np.array(item.get('camera_position', [self.sat_size/2, self.sat_size/2]), dtype=np.float32)
@@ -106,15 +113,16 @@ class CrossViewDataset(Dataset):
             mono_img, mono_point, mono_bbox, mono_mask
         )
         
-        # Crop卫星图（测试模式下跳过crop）
-        if self.test_mode:
-            # 测试模式：图像已经是crop好的，直接使用
-            crop_offset = np.array([0, 0], dtype=np.float32)
-        elif self.crop_sat:
+        # Crop卫星图（仅训练模式）
+        if self.crop_sat:
+            # 训练模式: 随机crop 1280x1280 -> 518x518
             sat_img, sat_bbox, camera_position, crop_offset = self._crop_satellite(
                 sat_img, sat_bbox, camera_position
             )
+            # 同时需要crop mask
+            sat_mask = self._crop_sat_mask(sat_mask, crop_offset, self.crop_size)
         else:
+            # 验证/测试模式: 图像已经是crop好的，直接使用
             crop_offset = np.array([0, 0], dtype=np.float32)
         
         # 转换为tensor并归一化
@@ -130,7 +138,7 @@ class CrossViewDataset(Dataset):
         
         # 转换mono_mask为tensor
         mono_mask_tensor = torch.from_numpy(mono_mask).unsqueeze(0).float()  # [1, H, W]
-        sat_mask_cropped = self._crop_sat_mask(sat_mask, crop_offset, self.crop_size)
+        sat_mask_tensor = torch.from_numpy(sat_mask).unsqueeze(0).float()  # [1, H, W]
         
         return {
             'front_view': mono_tensor,
@@ -138,6 +146,7 @@ class CrossViewDataset(Dataset):
             'mono_point': torch.from_numpy(mono_point),
             'mono_bbox': torch.from_numpy(mono_bbox_norm),
             'mono_mask': mono_mask_tensor,
+            'sat_mask': sat_mask_tensor,
             'sat_bbox': torch.from_numpy(sat_bbox_norm),
             'camera_position': torch.from_numpy(camera_position_norm),
             'yaw_radians': torch.tensor(yaw_radians, dtype=torch.float32),
@@ -304,6 +313,7 @@ def collate_fn(batch: List[Dict]) -> Dict:
     mono_points = torch.stack([item['mono_point'] for item in batch])
     mono_bboxes = torch.stack([item['mono_bbox'] for item in batch])
     mono_masks = torch.stack([item['mono_mask'] for item in batch])
+    sat_masks = torch.stack([item['sat_mask'] for item in batch])
     sat_bboxes = torch.stack([item['sat_bbox'] for item in batch])
     camera_positions = torch.stack([item['camera_position'] for item in batch])
     yaw_radians = torch.stack([item['yaw_radians'] for item in batch])
@@ -316,6 +326,7 @@ def collate_fn(batch: List[Dict]) -> Dict:
         'mono_point': mono_points,
         'mono_bbox': mono_bboxes,
         'mono_mask': mono_masks,
+        'sat_mask': sat_masks,
         'sat_bbox': sat_bboxes,
         'camera_position': camera_positions,
         'yaw_radians': yaw_radians,
@@ -332,7 +343,6 @@ if __name__ == '__main__':
     dataset = CrossViewDataset(
         json_path='/data/xhj/location/data/test_samples.json',
         crop_sat=True,
-        random_crop=False,
     )
     
     print(f"Dataset size: {len(dataset)}")

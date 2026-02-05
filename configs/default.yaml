@@ -3,10 +3,10 @@
 # Data
 data:
   #train_json: "/data/xhj/location/data/single.json"
-  train_json: "/data/xhj/location/data/train_all.json"
+  train_json: "/shared3/data/xhj/location/data/train_all.json"
   #val_json: "/data/xhj/location/data/single.json"
-  val_json: "/data/xhj/location/data/val_all.json"
-  data_root: "/data/xhj/data/"
+  val_json: "/shared3/data/xhj/location/data/val_all.json"
+  data_root: "/shared3/data/xhj/data/"
   img_size: 518
   crop_size: 518
   num_workers: 0  # Reduced from 4 to prevent thread exhaustion with 8 GPUs
@@ -30,7 +30,7 @@ model:
   dropout: 0.1  # Dropout rate
   
   # Pi3 预训练权重
-  pi3_weights: /data/xhj/location/ckpt/pi3/model.safetensors
+  pi3_weights: "/shared3/data/xhj/location/ckpt/pi3/model.safetensors"
   freeze_dinov2: true  # 冻结DINOv2 encoder部分
   freeze_decoder: false  # Pi3 decoder可训练
 
@@ -69,7 +69,7 @@ training:
 
 # Checkpointing
 checkpoint:
-  output_dir: "/data/xhj/location/output"  # 绝对路径，避免写到有配额限制的home目录
+  output_dir: "/shared3/data/xhj/location/output"  # 绝对路径，避免写到有配额限制的home目录
   save_freq: 5
   resume: null
 
