@@ -9,8 +9,8 @@ from typing import Dict, List, Optional, Tuple
 
 def _get_point_prompt(batch: Dict, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
     """获取 point prompt"""
-    B = batch['mono_view'].shape[0]
-    prompt_point = batch['prompt_point'].to(device)
+    B = batch['front_view'].shape[0]
+    prompt_point = batch['mono_point'].to(device)
     point_coords = prompt_point.unsqueeze(1)  # [B, 1, 2]
     point_labels = torch.ones(B, 1, device=device)
     return point_coords, point_labels
@@ -18,8 +18,8 @@ def _get_point_prompt(batch: Dict, device: torch.device) -> Tuple[torch.Tensor, 
 
 def _get_bbox_prompt(batch: Dict, device: torch.device) -> torch.Tensor:
     """获取 bbox prompt，转换为 [x1, y1, x2, y2] 格式"""
-    B = batch['mono_view'].shape[0]
-    prompt_bbox = batch['prompt_bbox'].to(device)  # [B, 4] in [cx, cy, w, h]
+    B = batch['front_view'].shape[0]
+    prompt_bbox = batch['mono_bbox'].to(device)  # [B, 4] in [cx, cy, w, h]
     boxes = torch.zeros(B, 1, 4, device=device)
     boxes[:, 0, 0] = prompt_bbox[:, 0] - prompt_bbox[:, 2] / 2  # x1
     boxes[:, 0, 1] = prompt_bbox[:, 1] - prompt_bbox[:, 3] / 2  # y1
@@ -30,7 +30,7 @@ def _get_bbox_prompt(batch: Dict, device: torch.device) -> torch.Tensor:
 
 def _get_mask_prompt(batch: Dict, device: torch.device) -> torch.Tensor:
     """获取 mask prompt"""
-    return batch['prompt_mask'].to(device)  # [B, 1, H, W]
+    return batch['mono_mask'].to(device)  # [B, 1, H, W]
 
 
 def prepare_random_prompt(
