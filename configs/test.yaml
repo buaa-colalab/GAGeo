@@ -9,18 +9,24 @@ data:
   num_workers: 2
 
 model:
-  embed_dim: 1024
-  vggt_depth: 24
-  num_heads: 16
+  # Pi3 backbone settings
+  decoder_size: 'large'  # 'small', 'base', 'large'
+  
+  # Two-Stage Cross-Attention 参数
+  num_intent_queries: 32
+  num_object_queries: 10
+  num_location_queries: 16
+  
+  # Transformer 参数
+  num_heads: 8
+  prompt_fusion_layers: 3
   num_decoder_layers: 6
-  enable_bbox: true
-  enable_seg: false
-  enable_camera: true
-  enable_position: true
-  vggt_weights: /data/xhj/location/ckpt/vggt/model.pt
-  dinov2_weights: null
-  freeze_patch_embed: true
-  freeze_aggregator: true
+  dropout: 0.1
+  
+  # Pi3 预训练权重
+  pi3_weights: "/shared3/data/xhj/location/ckpt/pi3/model.safetensors"
+  freeze_dinov2: true
+  freeze_decoder: false
 
 training:
   batch_size: 1
@@ -35,8 +41,7 @@ training:
   weight_bbox: 5.0
   weight_giou: 2.0
   weight_yaw: 1.0
-  weight_position: 1.0
-  weight_mask: 1.0
+  weight_heatmap: 1.0
   
   optimizer: "adamw"
   scheduler: "cosine"
@@ -57,4 +62,9 @@ checkpoint:
 logging:
   val_freq: 1
   use_tensorboard: true
+  
+  # 可视化设置
+  visualize: true
+  vis_samples: 5  # 过拟合测试用较少样本
+  vis_prompt_types: ['point']  # 过拟合测试只用point
 

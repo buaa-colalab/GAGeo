@@ -303,7 +303,7 @@ def main():
         json_path=data_json,
         data_root=cfg['data']['data_root'],
         crop_size=cfg['data']['crop_size'],
-        random_crop=False,
+        crop_sat=False,  # val/test 数据已经是 crop 好的
     )
     
     img_size = cfg['data']['img_size']

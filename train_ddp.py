@@ -24,11 +24,11 @@ from models import CrossViewLocalizerPi3, build_cross_view_localizer_pi3
 from utils.prompt_utils import prepare_random_prompt, prepare_single_prompt
 from utils import (
     get_param_groups,
-    visualize_validation_samples,
     box_cxcywh_to_xyxy, 
     generalized_box_iou,
     DETRCriterion,
 )
+from utils.visualize_ddp import visualize_validation_samples_ddp
 from transformers import get_scheduler
 import math
 from torch.utils.tensorboard import SummaryWriter
@@ -478,9 +478,20 @@ def main():
                         'epoch': epoch,
                         'model': model_without_ddp.state_dict(),
                         'val_losses': val_losses,
+                        'optimizer': optimizer.state_dict(),
+                        'scheduler': scheduler.state_dict(),
                         'best_loss': best_loss,
                     }, output_dir / 'best.pth')
-                    print(f'Saved best model (loss: {best_loss:.4f})')
+                
+                # Visualize validation samples with different prompt types
+                if cfg['logging'].get('visualize', True):
+                    vis_prompt_types = cfg['logging'].get('vis_prompt_types', ['point'])
+                    for prompt_type in vis_prompt_types:
+                        visualize_validation_samples_ddp(
+                            model, val_loader, device, cfg, epoch, is_main_process, 
+                            num_samples=cfg['logging'].get('vis_samples', 10),
+                            prompt_type=prompt_type
+                        )
         
         # Scheduler is stepped inside train_one_epoch
         

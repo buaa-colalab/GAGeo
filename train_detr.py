@@ -375,10 +375,13 @@ def main():
             val_losses = validate(model, val_loader, criterion, accelerator, cfg, epoch)
             accelerator.print(f'Val   - ' + ', '.join([f'{k}: {v:.4f}' for k, v in val_losses.items()]))
             
-            # Visualize validation samples
-            if (epoch + 1) % cfg['logging'].get('vis_freq', 1) == 0:
-                num_vis = cfg['logging'].get('num_vis_samples', 10)
-                visualize_validation_samples(model, val_loader, accelerator, cfg, epoch, num_samples=num_vis)
+            # Visualize validation samples with different prompt types
+            if cfg['logging'].get('visualize', True):
+                vis_prompt_types = cfg['logging'].get('vis_prompt_types', ['point'])
+                num_vis = cfg['logging'].get('vis_samples', 10)
+                for prompt_type in vis_prompt_types:
+                    visualize_validation_samples(model, val_loader, accelerator, cfg, epoch, 
+                                                num_samples=num_vis, prompt_type=prompt_type)
             
             # Save best
             if val_losses['loss'] < best_loss:

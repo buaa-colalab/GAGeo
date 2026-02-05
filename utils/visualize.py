@@ -37,25 +37,25 @@ def draw_camera_pose(ax, position, yaw, img_size, color, marker, label_pos):
     ax.add_patch(arrow)
 
 
-def visualize_batch_sample(batch, outputs, idx, img_size, save_path):
+def visualize_batch_sample(batch, outputs, idx, img_size, save_path, prompt_type='point'):
     """
     Visualize a single sample from batch during training
     
     Args:
-        batch: dict with 'mono_view', 'sat_view', 'prompt_point', 'target_bbox', etc.
+        batch: dict with 'front_view', 'satellite_view', 'mono_point', 'sat_bbox', etc.
         outputs: model outputs dict
         idx: index in batch to visualize
         img_size: image size for coordinate conversion
         save_path: where to save the figure
+        prompt_type: type of prompt used ('point', 'bbox', or 'mask')
     """
     # Extract data for this sample
-    mono_img = to_numpy_img(batch['mono_view'][idx])
-    sat_img = to_numpy_img(batch['sat_view'][idx])
-    prompt_pt = batch['prompt_point'][idx].cpu().numpy()
+    mono_img = to_numpy_img(batch['front_view'][idx])
+    sat_img = to_numpy_img(batch['satellite_view'][idx])
     
-    gt_bbox = batch['target_bbox'][idx].cpu().numpy()
+    gt_bbox = batch['sat_bbox'][idx].cpu().numpy()
     gt_yaw = batch['yaw_radians'][idx].cpu().item()
-    gt_position = batch['target_position'][idx].cpu().numpy()
+    gt_position = batch['camera_position'][idx].cpu().numpy()
     
     # Get direction info
     direction = batch['directions'][idx] if 'directions' in batch else 'mono_to_sat'
@@ -76,30 +76,35 @@ def visualize_batch_sample(batch, outputs, idx, img_size, save_path):
     # Create figure
     fig, axes = plt.subplots(1, 3, figsize=(18, 6))
     
-    # Panel 1: Mono view
+    # Panel 1: Mono view with prompt visualization
     axes[0].imshow(mono_img)
-    if prompt_view == 'mono':
-        axes[0].scatter(prompt_pt[0], prompt_pt[1], c='lime', marker='x', s=200, linewidths=3, label='Prompt')
-    if direction == 'sat_to_mono':
-        # Target bbox is on mono
-        draw_bbox(axes[0], gt_bbox, img_size, 'lime', '-', 3, 'GT BBox')
-        if pred_bbox is not None:
-            draw_bbox(axes[0], pred_bbox, img_size, 'red', '--', 2, f'Pred (s={pred_score:.2f})')
-    axes[0].set_title(f'Mono View ({direction})', fontsize=14)
+    
+    # Visualize different prompt types
+    if prompt_type == 'point':
+        prompt_pt = batch['mono_point'][idx].cpu().numpy()
+        axes[0].scatter(prompt_pt[0], prompt_pt[1], c='lime', marker='x', s=200, linewidths=3, label='Point Prompt')
+    elif prompt_type == 'bbox':
+        prompt_bbox = batch['mono_bbox'][idx].cpu().numpy()
+        draw_bbox(axes[0], prompt_bbox, img_size, 'cyan', '-', 2, 'BBox Prompt')
+    elif prompt_type == 'mask':
+        prompt_mask = batch['mono_mask'][idx].cpu().numpy()
+        if prompt_mask.ndim == 3:
+            prompt_mask = prompt_mask[0]  # [H, W]
+        axes[0].imshow(prompt_mask, cmap='Greens', alpha=0.3)
+        axes[0].text(10, 30, 'Mask Prompt', color='lime', fontsize=12, weight='bold',
+                    bbox=dict(boxstyle='round', facecolor='black', alpha=0.5))
+    
+    axes[0].set_title(f'Front View ({prompt_type.upper()} prompt)', fontsize=14)
     if axes[0].get_legend_handles_labels()[0]:
         axes[0].legend(loc='upper right')
     axes[0].axis('off')
     
-    # Panel 2: Satellite view
+    # Panel 2: Satellite view with BBox predictions
     axes[1].imshow(sat_img)
-    if prompt_view == 'sat':
-        axes[1].scatter(prompt_pt[0], prompt_pt[1], c='cyan', marker='x', s=200, linewidths=3, label='Prompt')
-    if direction == 'mono_to_sat':
-        # Target bbox is on sat
-        draw_bbox(axes[1], gt_bbox, img_size, 'lime', '-', 3, 'GT BBox')
-        if pred_bbox is not None:
-            draw_bbox(axes[1], pred_bbox, img_size, 'red', '--', 2, f'Pred (s={pred_score:.2f})')
-    axes[1].set_title('Satellite View', fontsize=14)
+    draw_bbox(axes[1], gt_bbox, img_size, 'lime', '-', 3, 'GT BBox')
+    if pred_bbox is not None:
+        draw_bbox(axes[1], pred_bbox, img_size, 'red', '--', 2, f'Pred (s={pred_score:.2f})')
+    axes[1].set_title('Satellite - BBox', fontsize=14)
     if axes[1].get_legend_handles_labels()[0]:
         axes[1].legend(loc='upper right')
     axes[1].axis('off')
@@ -131,7 +136,7 @@ def visualize_batch_sample(batch, outputs, idx, img_size, save_path):
     plt.close()
 
 
-def visualize_validation_samples(model, dataloader, accelerator, cfg, epoch, num_samples=10):
+def visualize_validation_samples(model, dataloader, accelerator, cfg, epoch, num_samples=10, prompt_type='point'):
     """
     Visualize a few validation samples during training
     Only runs on main process to avoid duplicate saves
@@ -143,6 +148,7 @@ def visualize_validation_samples(model, dataloader, accelerator, cfg, epoch, num
         cfg: config dict
         epoch: current epoch number
         num_samples: number of samples to visualize
+        prompt_type: type of prompt to use ('point', 'bbox', or 'mask')
     """
     if not accelerator.is_main_process:
         return
@@ -161,30 +167,29 @@ def visualize_validation_samples(model, dataloader, accelerator, cfg, epoch, num
             if samples_saved >= num_samples:
                 break
             
-            # Prepare inputs
-            mono_view = batch['mono_view']
-            sat_view = batch['sat_view']
-            prompt_point = batch['prompt_point']
-            prompt_views = batch.get('prompt_views', None)
+            # Prepare inputs with specified prompt type
+            from utils.prompt_utils import prepare_single_prompt
+            front_view = batch['front_view']
+            sat_view = batch['satellite_view']
             
-            B = mono_view.shape[0]
-            point_coords = prompt_point.unsqueeze(1)
-            point_labels = torch.ones(B, 1, device=mono_view.device)
+            points, boxes, masks = prepare_single_prompt(batch, front_view.device, prompt_type=prompt_type)
             
             # Forward pass
             with accelerator.autocast():
                 outputs = model(
-                    mono_view=mono_view,
-                    sat_view=sat_view,
-                    points=(point_coords, point_labels),
-                    prompt_views=prompt_views,
+                    front_view=front_view,
+                    satellite_view=sat_view,
+                    points=points,
+                    boxes=boxes,
+                    masks=masks,
                 )
             
             # Visualize samples from this batch
+            B = front_view.shape[0]
             batch_size = min(B, num_samples - samples_saved)
             for i in range(batch_size):
-                save_path = output_dir / f'sample_{samples_saved:03d}.png'
-                visualize_batch_sample(batch, outputs, i, img_size, save_path)
+                save_path = output_dir / f'sample_{samples_saved:03d}_{prompt_type}.png'
+                visualize_batch_sample(batch, outputs, i, img_size, save_path, prompt_type=prompt_type)
                 samples_saved += 1
                 
                 if samples_saved >= num_samples:

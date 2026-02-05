@@ -76,6 +76,9 @@ checkpoint:
 # Logging
 logging:
   val_freq: 1  # 每N个epoch验证一次
-  vis_freq: 1  # 每N个epoch可视化一次
-  num_vis_samples: 10  # 可视化样本数量
   use_tensorboard: true
+  
+  # 可视化设置
+  visualize: true  # 是否启用可视化
+  vis_samples: 10  # 可视化样本数量
+  vis_prompt_types: ['point', 'bbox', 'mask']  # 可视化的prompt类型列表

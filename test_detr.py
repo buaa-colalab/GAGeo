@@ -12,13 +12,14 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from models import CrossViewLocalizerPi3
+from models import CrossViewLocalizerPi3, build_cross_view_localizer_pi3
 from data import CrossViewDataset, collate_fn
 from utils import (
     DETRCriterion,
     compute_iou,
     box_cxcywh_to_xyxy,
 )
+from utils.prompt_utils import prepare_single_prompt
 
 
 def parse_args():
@@ -32,6 +33,8 @@ def parse_args():
     parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--output_dir', type=str, default='./output/test_results')
     parser.add_argument('--gpu', type=str, default='0')
+    parser.add_argument('--prompt_type', type=str, default='all', choices=['point', 'bbox', 'mask', 'all'],
+                        help='Prompt type to test (default: all)')
     return parser.parse_args()
 
 
@@ -41,16 +44,16 @@ def load_config(config_path):
 
 
 def load_model(checkpoint_path, cfg, device):
-    """Load model from Accelerate checkpoint."""
-    model = CrossViewLocalizerPi3(
+    """Load model from checkpoint."""
+    model = build_cross_view_localizer_pi3(
+        pretrained_pi3=None,
+        freeze_backbone=False,
         img_size=cfg['data']['img_size'],
-        embed_dim=cfg['model']['embed_dim'],
-        vggt_depth=cfg['model']['vggt_depth'],
+        decoder_size=cfg['model'].get('decoder_size', 'large'),
         num_heads=cfg['model']['num_heads'],
         num_decoder_layers=cfg['model'].get('num_decoder_layers', 6),
         num_object_queries=cfg['model'].get('num_object_queries', 10),
         num_location_queries=cfg['model'].get('num_location_queries', 16),
-        freeze_vggt=False,
     )
     
     ckpt_path = Path(checkpoint_path)
@@ -77,8 +80,8 @@ def load_model(checkpoint_path, cfg, device):
 
 
 @torch.no_grad()
-def evaluate(model, dataloader, criterion, device):
-    """Evaluate model performance."""
+def evaluate(model, dataloader, criterion, device, prompt_type='point'):
+    """Evaluate model performance with specific prompt type."""
     model.eval()
     
     total_losses = {}
@@ -89,19 +92,19 @@ def evaluate(model, dataloader, criterion, device):
     all_yaw_errors = []
     all_bbox_scores = []
     
-    for batch in tqdm(dataloader, desc='Evaluating'):
+    for batch in tqdm(dataloader, desc=f'Evaluating ({prompt_type})'):
         front_view = batch['front_view'].to(device)
         sat_view = batch['satellite_view'].to(device)
-        mono_point = batch['mono_point'].to(device)
         
-        B = front_view.shape[0]
-        point_coords = mono_point.unsqueeze(1)
-        point_labels = torch.ones(B, 1, device=device)
+        # Use specified prompt type
+        points, boxes, masks = prepare_single_prompt(batch, device, prompt_type=prompt_type)
         
         outputs = model(
             front_view=front_view,
             satellite_view=sat_view,
-            points=(point_coords, point_labels),
+            points=points,
+            boxes=boxes,
+            masks=masks,
         )
         
         targets = {
@@ -203,7 +206,7 @@ def main():
         json_path=data_json,
         data_root=cfg['data']['data_root'],
         crop_size=cfg['data']['crop_size'],
-        random_crop=False,
+        crop_sat=False,  # val/test 数据已经是 crop 好的
     )
     dataloader = DataLoader(
         dataset,
@@ -231,21 +234,43 @@ def main():
         img_size=cfg['data']['img_size'],
     )
     
-    # Evaluate
-    avg_losses, metrics = evaluate(model, dataloader, criterion, device)
+    # Evaluate with all three prompt types
+    prompt_types = ['point', 'bbox', 'mask']
+    all_results = {}
     
-    # Print results
-    print('\n' + '='*50)
-    print('Evaluation Results')
+    for prompt_type in prompt_types:
+        print(f'\n{"="*50}')
+        print(f'Evaluating with {prompt_type.upper()} prompt')
+        print('='*50)
+        
+        avg_losses, metrics = evaluate(model, dataloader, criterion, device, prompt_type=prompt_type)
+        
+        print('\nLosses:')
+        for k, v in avg_losses.items():
+            print(f'  {k}: {v:.4f}')
+        
+        print('\nMetrics:')
+        for k, v in metrics.items():
+            print(f'  {k}: {v:.4f}')
+        
+        all_results[prompt_type] = {
+            'losses': avg_losses,
+            'metrics': metrics,
+        }
+    
+    # Print summary comparison
+    print(f'\n{"="*50}')
+    print('Summary Comparison')
     print('='*50)
+    print(f'\n{"Metric":<30} {"Point":<12} {"BBox":<12} {"Mask":<12}')
+    print('-' * 66)
     
-    print('\nLosses:')
-    for k, v in avg_losses.items():
-        print(f'  {k}: {v:.4f}')
-    
-    print('\nMetrics:')
-    for k, v in metrics.items():
-        print(f'  {k}: {v:.4f}')
+    # Compare key metrics
+    key_metrics = ['mean_iou', 'iou@0.5', 'mean_position_error', 'mean_yaw_error_deg']
+    for metric in key_metrics:
+        if metric in all_results['point']['metrics']:
+            values = [all_results[pt]['metrics'].get(metric, 0) for pt in prompt_types]
+            print(f'{metric:<30} {values[0]:<12.4f} {values[1]:<12.4f} {values[2]:<12.4f}')
     
     # Save results
     output_dir = Path(args.output_dir)
@@ -255,8 +280,7 @@ def main():
         'checkpoint': args.checkpoint,
         'data_json': data_json,
         'num_samples': len(dataset),
-        'losses': avg_losses,
-        'metrics': metrics,
+        'results_by_prompt': all_results,
     }
     
     results_path = output_dir / 'results.json'
