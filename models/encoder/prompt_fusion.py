@@ -1,68 +1,151 @@
-# SAM-style Prompt Fusion Module
-# Fuses prompt embeddings with front-view features using SAM's two-way transformer approach
-# Based on SAM2's TwoWayTransformer implementation
+# Stage 1: Intent Formation Module
+# Uses learnable Intent Queries + TransformerDecoder to extract target info from front-view
+# Reuses detr.py's TransformerDecoder for cross-attention
 
-import math
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from typing import Tuple, Optional, Type, List
+from typing import Tuple, Optional
 from torch import Tensor
-from .transformer import TwoWayTransformer
 
+from ..decoder.detr import TransformerDecoder
+from ..decoder.pe_sin import PositionEmbeddingSine
+
+
+class IntentFormation(nn.Module):
+    """
+    Stage 1: Intent Formation
+    
+    Uses learnable Intent Queries to extract target information from front-view features.
+    Reuses TransformerDecoder from detr.py for cross-attention.
+    
+    Flow:
+    1. Concat prompt tokens (sparse + dense) with Intent Queries
+    2. TransformerDecoder: queries attend to front-view features (memory)
+    3. Output: Z_intent [B, num_intent_queries, C]
+    """
+    
+    def __init__(
+        self,
+        embed_dim: int = 2048,
+        num_intent_queries: int = 32,
+        num_heads: int = 8,
+        num_layers: int = 3,
+        dropout: float = 0.1,
+        spatial_size: Tuple[int, int] = (37, 37),
+    ):
+        super().__init__()
+        
+        self.embed_dim = embed_dim
+        self.num_intent_queries = num_intent_queries
+        self.spatial_size = spatial_size
+        
+        # Learnable Intent Queries
+        self.intent_queries = nn.Embedding(num_intent_queries, embed_dim)
+        self.intent_query_pos = nn.Embedding(num_intent_queries, embed_dim)
+        
+        # Memory positional encoding (sinusoidal, for front-view features)
+        self.memory_pos_embed = PositionEmbeddingSine(
+            num_pos_feats=embed_dim // 2,
+            normalize=True,
+        )
+        
+        # TransformerDecoder: Intent Queries cross-attend to front-view features
+        self.decoder = TransformerDecoder(
+            d_model=embed_dim,
+            nhead=num_heads,
+            num_decoder_layers=num_layers,
+            dim_feedforward=embed_dim,
+            dropout=dropout,
+            normalize_before=False,
+            return_intermediate=False,
+        )
+    
+    def forward(
+        self,
+        front_features: Tensor,
+        sparse_embeddings: Optional[Tensor] = None,
+        dense_embeddings: Optional[Tensor] = None,
+    ) -> Tensor:
+        """
+        Args:
+            front_features: [B, P, C] Front-view patch features
+            sparse_embeddings: [B, N_sparse, C] Sparse prompt embeddings (points/boxes)
+            dense_embeddings: [B, C, H, W] Dense prompt embeddings (masks)
+        
+        Returns:
+            intent_features: [B, num_intent_queries, C]
+        """
+        B = front_features.shape[0]
+        device = front_features.device
+        dtype = front_features.dtype
+        
+        # Prepare Intent Queries
+        intent_q = self.intent_queries.weight.unsqueeze(0).expand(B, -1, -1).to(dtype)
+        intent_q_pos = self.intent_query_pos.weight.unsqueeze(0).expand(B, -1, -1).to(dtype)
+        
+        # Build query tokens: Intent Queries + Prompt Tokens
+        query_list = [intent_q]
+        query_pos_list = [intent_q_pos]
+        
+        if sparse_embeddings is not None and sparse_embeddings.shape[1] > 0:
+            query_list.append(sparse_embeddings)
+            # Zero positional encoding for prompt tokens
+            query_pos_list.append(torch.zeros_like(sparse_embeddings))
+        
+        if dense_embeddings is not None:
+            dense_flat = dense_embeddings.flatten(2).transpose(1, 2)  # [B, H*W, C]
+            query_list.append(dense_flat)
+            query_pos_list.append(torch.zeros_like(dense_flat))
+        
+        queries = torch.cat(query_list, dim=1)
+        query_pos = torch.cat(query_pos_list, dim=1)
+        
+        # Memory positional encoding
+        memory_pos = self.memory_pos_embed(self.spatial_size, device=device)
+        memory_pos = memory_pos.flatten(1).permute(1, 0).to(dtype)
+        memory_pos = memory_pos.unsqueeze(0).expand(B, -1, -1)
+        
+        # TransformerDecoder forward
+        out = self.decoder(
+            tgt=queries,
+            memory=front_features,
+            pos=memory_pos,
+            query_pos=query_pos,
+        )
+        
+        if out.dim() == 4:
+            out = out[-1]
+        
+        # Extract only Intent Queries
+        intent_features = out[:, :self.num_intent_queries, :]
+        
+        return intent_features
 
 
 class PromptFusionWithDense(nn.Module):
     """
-    Prompt fusion module following SAM's approach.
-    
-    SAM's logic:
-    1. Sparse prompts: TwoWayTransformer for bidirectional attention with image
-    2. Dense prompts: Direct addition to image features (src = src + dense)
-    
-    Args:
-        embedding_dim: Channel dimension (2048 for VGGT output)
-        num_heads: Number of attention heads
-        depth: Number of transformer layers
-        mlp_dim: MLP hidden dimension
-        image_embedding_size: Spatial size of image features (H, W)
+    Stage 1 wrapper for backward compatibility.
     """
     
     def __init__(
         self,
         embedding_dim: int = 2048,
+        num_intent_queries: int = 32,
         num_heads: int = 8,
-        depth: int = 2,
-        mlp_dim: int = 2048,
+        num_layers: int = 3,
         image_embedding_size: Tuple[int, int] = (37, 37),
-        activation: Type[nn.Module] = nn.ReLU,
-        attention_downsample_rate: int = 2,
-    ) -> None:
+        dropout: float = 0.1,
+        **kwargs,  # Ignore legacy params
+    ):
         super().__init__()
         
-        self.embedding_dim = embedding_dim
-        self.image_embedding_size = image_embedding_size
-        
-        # Two-way transformer for sparse prompt fusion
-        self.transformer = TwoWayTransformer(
-            depth=depth,
-            embedding_dim=embedding_dim,
+        self.intent_formation = IntentFormation(
+            embed_dim=embedding_dim,
+            num_intent_queries=num_intent_queries,
             num_heads=num_heads,
-            mlp_dim=mlp_dim,
-            activation=activation,
-            attention_downsample_rate=attention_downsample_rate,
-        )
-        
-        # Learnable positional encoding for image features
-        H, W = image_embedding_size
-        self.image_pe = nn.Parameter(torch.randn(1, H * W, embedding_dim) * 0.02)
-        
-        # Output projection for target guidance
-        self.target_proj = nn.Sequential(
-            nn.Linear(embedding_dim, embedding_dim),
-            nn.LayerNorm(embedding_dim),
-            nn.GELU(),
-            nn.Linear(embedding_dim, embedding_dim),
+            num_layers=num_layers,
+            dropout=dropout,
+            spatial_size=image_embedding_size,
         )
     
     def forward(
@@ -70,50 +153,16 @@ class PromptFusionWithDense(nn.Module):
         image_features: Tensor,
         sparse_embeddings: Tensor,
         dense_embeddings: Optional[Tensor] = None,
-    ) -> Tuple[Tensor, Tensor, Tensor]:
+    ) -> Tuple[Tensor]:
         """
-        Fuse prompts with image features (SAM-style).
-        
-        Dimensions are guaranteed by upstream:
-        - image_features: [B, 1369, 2048] from VGGT (37x37 patches)
-        - sparse_embeddings: [B, N_sparse, 2048] from PromptEncoder
-        - dense_embeddings: [B, 2048, 37, 37] from PromptEncoder (already 37x37)
-        
         Returns:
-            fused_sparse: [B, N_sparse, C] Target-aware sparse embeddings
-            fused_image: [B, 1369, C] Prompt-guided image features
-            target_guidance: [B, C] Pooled target guidance vector
+            intent_features: [B, num_intent_queries, C]
         """
-        B, P, C = image_features.shape
+        intent_features = self.intent_formation(
+            front_features=image_features,
+            sparse_embeddings=sparse_embeddings,
+            dense_embeddings=dense_embeddings,
+        )
         
-        # SAM Step 1: Add dense embeddings to image features (direct addition)
-        if dense_embeddings is not None:
-            # dense_embeddings: [B, C, 37, 37] -> [B, 1369, C]
-            dense_flat = dense_embeddings.flatten(2).transpose(1, 2)
-            image_features = image_features + dense_flat
         
-        # SAM Step 2: TwoWayTransformer for sparse prompt fusion
-        image_pe = self.image_pe.expand(B, -1, -1)
-        
-        if sparse_embeddings.shape[1] > 0:
-            fused_sparse, fused_image = self.transformer(
-                image_embedding=image_features,
-                image_pe=image_pe,
-                point_embedding=sparse_embeddings,
-            )
-        else:
-            fused_sparse = sparse_embeddings
-            fused_image = image_features
-        
-        # Compute target guidance (attention-weighted pooling)
-        if fused_sparse.shape[1] > 0:
-            attn = torch.bmm(fused_sparse, fused_image.transpose(1, 2))  # [B, N, P]
-            attn = F.softmax(attn / math.sqrt(C), dim=-1)
-            attended = torch.bmm(attn, fused_image)  # [B, N, C]
-            target_guidance = attended.mean(dim=1)
-        else:
-            target_guidance = fused_image.mean(dim=1)
-        
-        target_guidance = self.target_proj(target_guidance)
-        
-        return fused_sparse, fused_image, target_guidance
+        return intent_features

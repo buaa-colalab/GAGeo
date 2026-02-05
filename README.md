@@ -61,3 +61,56 @@ utils/
   "camera_position": [0.5, 0.5]
 }
 ```
+
+Step 1: Pi3 Backbone
+输入: Mono View, Satellite View
+DINOv2 Encoder + Pi3 Decoder (提取patch的3D特征)
+
+输出:
+  F_mono [B, 1369, 2048]
+  F_sat  [B, 1369, 2048]
+  ↓
+
+Step 2: SAM Prompt Encoder                                 
+ Point: 位置编码 + Type Embedding                         
+ BBox: 两个角点的位置编码 + Type Embedding                 
+ Mask: CNN 下采样到 37×37                                 
+ 输出: Sparse [B, N, 2048], Dense [B, 2048, 37, 37]        
+
+ ↓
+Step 3: Intent Formation          
+ Sparse Prompt Tokens
+ Dense Prompt Tokens (flatten → [B, 1369, 2048])
+ Intent Queries [Q_intent, 2048]  (learnable)     
+  T0 = concat(Sparse Prompt Tokens, Dense Prompt Tokens, Intent Queries)
+  Multi-layer Self-Attention (T0)
+  multi-layer cross-attention(query=Q_intent, key/value=F_mono)
+  FFN
+  输出:
+  Z_intent = Intent Queries [B, Q_intent, 2048]
+
+Step 4: View Conditioning  
+
+Inputs: 
+  - Z_intent
+  - Object Queries: 在卫星视图上定位 bbox    (learnable)                 
+  - Location Queries: 在卫星视图上定位 camera position  (learnable)  
+
+T2 = concat(Z_intent, Object Queries, Location Queries)
+Multi-layer Self-Attention (T2)
+Z_obj = Cross-Attention(query = Object Queries,Location Queries,key/value = F_sat)
+FFN
+输出: Object Queries  [B, 50, 2048]                      
+Location Queries [B, 50, 2048]    
+
+Step 5: Task Heads  
+Inputs: 
+  - Z_intent
+  - Object Queries: 在卫星视图上定位 bbox                  
+  - Location Queries: 在卫星视图上定位 camera position                                         
+BBox Head: MLP → [cx, cy, w, h] 归一化坐标               
+Heatmap Head: Dot Product → [H, W] 概率分布              
+Camera Head: MLP → yaw angle (radians)                   
+
+输出: pred_boxes, heatmap, yaw_radians
+```

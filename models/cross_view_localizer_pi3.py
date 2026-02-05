@@ -76,15 +76,14 @@ class CrossViewLocalizerPi3(nn.Module):
             mask_in_chans=16,
         )
         
-        # ============ 3. Prompt Fusion Module (SAM-style) ============
+        # ============ 3. Two-Stage Cross-Attention Prompt Fusion ============
         self.prompt_fusion = PromptFusionWithDense(
             embedding_dim=self.output_dim,
+            num_intent_queries=32,  # Learnable intent queries
             num_heads=num_heads // 2,
-            depth=2,
-            mlp_dim=self.output_dim,
+            num_layers=3,  # Number of self-attn + cross-attn layers
             image_embedding_size=(self.num_patches_per_side, self.num_patches_per_side),
-            activation=nn.ReLU,
-            attention_downsample_rate=2,
+            dropout=0.1,
         )
         
         # ============ 4. Unified Query Decoder ============
@@ -180,18 +179,20 @@ class CrossViewLocalizerPi3(nn.Module):
         )
         sparse_embeddings = sparse_embeddings.to(target_dtype)
         dense_embeddings = dense_embeddings.to(target_dtype)
-        # ============ Step 3: Prompt Fusion ============
+        # ============ Step 3: Two-Stage Cross-Attention Prompt Fusion ============
+        # Stage 1: Intent Formation - extract target intent from front-view
         dense_for_fusion = dense_embeddings if masks is not None else None
-        fused_sparse, fused_front, target_guidance = self.prompt_fusion(
+        intent_features = self.prompt_fusion(
             image_features=front_patch_features,
             sparse_embeddings=sparse_embeddings,
             dense_embeddings=dense_for_fusion,
         )
         
         # ============ Step 4: Unified Query Decoder ============
+        # Stage 2: View Conditioning - queries + intent cross-attend to satellite
         decoder_outputs = self.query_decoder(
             memory=sat_patch_features,
-            target_guidance=target_guidance,
+            intent_features=intent_features,
         )
         obj_features = decoder_outputs['obj_features']
         loc_features = decoder_outputs['loc_features']
@@ -232,8 +233,7 @@ class CrossViewLocalizerPi3(nn.Module):
             'front_features': front_patch_features,
             'sat_features': sat_patch_features,
             'sparse_embeddings': sparse_embeddings,
-            'fused_front_features': fused_front,
-            'target_guidance': target_guidance,
+            'intent_features': intent_features,  # New: intent features from Stage 1
         }
 
 
