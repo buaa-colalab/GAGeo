@@ -243,49 +243,30 @@ class CrossViewDataset(Dataset):
         bbox_x2, bbox_y2 = bx + bw, by + bh
         cx, cy = camera_position[0], camera_position[1]
         
-        if self.random_crop:
-            # 随机crop，确保bbox和camera都在crop区域内
-            # 计算有效的crop范围：必须包含bbox和camera
-            min_x = min(bbox_x1, cx)
-            max_x = max(bbox_x2, cx)
-            min_y = min(bbox_y1, cy)
-            max_y = max(bbox_y2, cy)
-            
-            # left范围：[max(0, max_x - cs), min(W - cs, min_x)]
-            left_min = max(0, int(np.ceil(max_x)) - cs)
-            left_max = min(W - cs, int(np.floor(min_x)))
-            # top范围：[max(0, max_y - cs), min(H - cs, min_y)]
-            top_min = max(0, int(np.ceil(max_y)) - cs)
-            top_max = min(H - cs, int(np.floor(min_y)))
-            
-            # 如果范围有效则随机选择，否则以中心为准
-            if left_min <= left_max:
-                left = random.randint(left_min, left_max)
-            else:
-                left = max(0, min(W - cs, int((min_x + max_x) / 2 - cs / 2)))
-            
-            if top_min <= top_max:
-                top = random.randint(top_min, top_max)
-            else:
-                top = max(0, min(H - cs, int((min_y + max_y) / 2 - cs / 2)))
+        # 计算有效的crop范围：必须包含bbox和camera
+        min_x = min(bbox_x1, cx)
+        max_x = max(bbox_x2, cx)
+        min_y = min(bbox_y1, cy)
+        max_y = max(bbox_y2, cy)
+        
+        # left范围：[max(0, max_x - cs), min(W - cs, min_x)]
+        left_min = max(0, int(np.ceil(max_x)) - cs)
+        left_max = min(W - cs, int(np.floor(min_x)))
+        # top范围：[max(0, max_y - cs), min(H - cs, min_y)]
+        top_min = max(0, int(np.ceil(max_y)) - cs)
+        top_max = min(H - cs, int(np.floor(min_y)))
+        
+        # 如果范围有效则随机选择，否则以中心为准
+        if left_min <= left_max:
+            left = random.randint(left_min, left_max)
         else:
-            # 中心crop：以camera为中心，但确保bbox也在内
-            left = int(cx - cs / 2)
-            top = int(cy - cs / 2)
-            
-            # 调整确保bbox不被裁剪
-            if bbox_x1 < left:
-                left = max(0, int(bbox_x1))
-            if bbox_x2 > left + cs:
-                left = min(W - cs, int(bbox_x2 - cs))
-            if bbox_y1 < top:
-                top = max(0, int(bbox_y1))
-            if bbox_y2 > top + cs:
-                top = min(H - cs, int(bbox_y2 - cs))
-            
-            # 最终clip到有效范围
-            left = np.clip(left, 0, W - cs)
-            top = np.clip(top, 0, H - cs)
+            left = max(0, min(W - cs, int((min_x + max_x) / 2 - cs / 2)))
+        
+        if top_min <= top_max:
+            top = random.randint(top_min, top_max)
+        else:
+            top = max(0, min(H - cs, int((min_y + max_y) / 2 - cs / 2)))
+
         
         # Crop并resize
         cropped = sat_img.crop((left, top, left + cs, top + cs))
