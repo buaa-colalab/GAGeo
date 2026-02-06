@@ -26,8 +26,8 @@ class cuRoPE2D_func (torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_res):
         positions, base, F0 = ctx.saved_tensors[0], ctx.saved_base, ctx.saved_F0
+        grad_res = grad_res.contiguous()
         _kernels.rope_2d( grad_res, positions, base, -F0 )
-        ctx.mark_dirty(grad_res)
         return grad_res, None, None, None
 
 

@@ -32,7 +32,7 @@ fi
 # ============================================
 LOG_DIR="output/logs"
 mkdir -p $LOG_DIR
-LOG_FILE="$LOG_DIR/train.log"
+LOG_FILE="$LOG_DIR/train2.log"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 
 echo "=========================================="
