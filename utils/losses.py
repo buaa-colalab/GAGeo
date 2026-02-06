@@ -24,6 +24,7 @@ class DETRCriterion(nn.Module):
         weight_giou: float = 2.0,
         weight_heatmap: float = 1.0,
         weight_rotation: float = 1.0,
+        weight_contrastive: float = 0.1,
         img_size: int = 518,
     ):
         super().__init__()
@@ -31,6 +32,7 @@ class DETRCriterion(nn.Module):
         self.weight_giou = weight_giou
         self.weight_heatmap = weight_heatmap
         self.weight_rotation = weight_rotation
+        self.weight_contrastive = weight_contrastive
         self.img_size = img_size
     
     def forward(self, outputs, targets):
@@ -113,6 +115,10 @@ class DETRCriterion(nn.Module):
             losses['loss_rotation'] = loss_rotation
             losses['rotation_error_deg'] = rotation_error_deg  # for logging
         
+        # ============ Contrastive Loss (computed in model, passed through outputs) ============
+        if 'contrastive_loss' in outputs:
+            losses['loss_contrastive'] = outputs['contrastive_loss']
+        
         # ============ Total Loss ============
         total_loss = 0.0
         if 'loss_bbox' in losses:
@@ -123,6 +129,8 @@ class DETRCriterion(nn.Module):
             total_loss = total_loss + self.weight_heatmap * losses['loss_heatmap']
         if 'loss_rotation' in losses:
             total_loss = total_loss + self.weight_rotation * losses['loss_rotation']
+        if 'loss_contrastive' in losses:
+            total_loss = total_loss + self.weight_contrastive * losses['loss_contrastive']
         
         losses['loss'] = total_loss
         

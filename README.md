@@ -69,7 +69,7 @@ DINOv2 Encoder + Pi3 Decoder (提取patch的3D特征)
 输出:
   F_mono [B, 1369, 2048]
   F_sat  [B, 1369, 2048]
-  ↓
+
 
 Step 2: SAM Prompt Encoder                                 
  Point: 位置编码 + Type Embedding                         
@@ -113,4 +113,17 @@ Heatmap Head: Dot Product → [H, W] 概率分布
 Camera Head: MLP → yaw angle (radians)                   
 
 输出: pred_boxes, heatmap, yaw_radians
+
+
+Step 6: contrative learning 
+Inputs: 
+  F_mono [B, 1369, 2048]
+  F_sat  [B, 1369, 2048]
+  mono_mask
+  sat_mask                                      
+
+用moco维护队列的方式，经过Average Pooling 和mlp，对齐两者损失
+
+输出: loss
 ```
+ground-sate,drone-sate

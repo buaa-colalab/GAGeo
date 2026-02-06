@@ -91,8 +91,42 @@ def test_model():
     print(f"   pitch: {outputs['pitch']}")
     print(f"   roll: {outputs['roll']}")
     
+    # ============ Test contrastive learning ============
+    print("\n8. Testing contrastive learning...")
+    mono_mask = torch.zeros(B, 1, 518, 518, device=device)
+    mono_mask[:, :, 150:300, 150:300] = 1.0
+    sat_mask = torch.zeros(B, 1, 518, 518, device=device)
+    sat_mask[:, :, 200:350, 200:350] = 1.0
+    
+    with torch.no_grad():
+        outputs_cl = model(
+            front_view=front_view,
+            satellite_view=satellite_view,
+            points=points,
+            mono_mask=mono_mask,
+            sat_mask=sat_mask,
+        )
+    assert 'contrastive_loss' in outputs_cl, "contrastive_loss not in outputs"
+    print(f"   contrastive_loss: {outputs_cl['contrastive_loss'].item():.4f}")
+    print("   ✓ Contrastive learning passed")
+    del outputs_cl
+    torch.cuda.empty_cache()
+    
+    # ============ Test without masks (no contrastive loss) ============
+    print("\n9. Testing without masks (no contrastive loss)...")
+    with torch.no_grad():
+        outputs_no_cl = model(
+            front_view=front_view,
+            satellite_view=satellite_view,
+            points=points,
+        )
+    assert 'contrastive_loss' not in outputs_no_cl, "contrastive_loss should not be in outputs without masks"
+    print("   ✓ No contrastive loss when masks not provided")
+    del outputs_no_cl
+    torch.cuda.empty_cache()
+    
     # ============ Test different prompt combinations ============
-    print("\n8. Testing different prompt combinations...")
+    print("\n10. Testing different prompt combinations...")
     
     # Clear cache before testing combinations
     del outputs
@@ -134,6 +168,14 @@ def test_model():
         outputs_all = model(front_view, satellite_view, points=points, boxes=boxes, masks=masks)
     assert outputs_all['heatmap'].shape == (B, 518, 518)
     print("   ✓ point + bbox + mask passed")
+    
+    # ============ Test contrastive + all prompts ============
+    print("   Testing: point + bbox + mask + contrastive masks...")
+    with torch.no_grad():
+        outputs_full = model(front_view, satellite_view, points=points, boxes=boxes, masks=masks,
+                             mono_mask=mono_mask, sat_mask=sat_mask)
+    assert 'contrastive_loss' in outputs_full
+    print(f"   ✓ Full pipeline with contrastive passed (loss={outputs_full['contrastive_loss'].item():.4f})")
     
     print("\n" + "=" * 50)
     print("✓ All tests passed!")

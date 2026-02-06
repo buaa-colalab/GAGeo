@@ -12,7 +12,7 @@ from typing import Dict, Optional, Tuple
 from .backbone import Pi3Backbone, load_pi3_weights
 from .encoder import GeometryPromptEncoder, PromptFusionWithDense
 from .decoder import UnifiedQueryDecoder
-from .heads import BBoxHead, HeatmapHead, Pi3CameraHead
+from .heads import BBoxHead, HeatmapHead, Pi3CameraHead, CrossViewContrastiveHead
 
 
 class CrossViewLocalizerPi3(nn.Module):
@@ -54,6 +54,11 @@ class CrossViewLocalizerPi3(nn.Module):
         num_decoder_layers: int = 6,
         dropout: float = 0.1,
         freeze_backbone: bool = False,
+        contrastive: bool = True,
+        contrastive_proj_dim: int = 256,
+        contrastive_queue_size: int = 65536,
+        contrastive_momentum: float = 0.999,
+        contrastive_temperature: float = 0.07,
     ):
         super().__init__()
         
@@ -124,6 +129,17 @@ class CrossViewLocalizerPi3(nn.Module):
             patch_size=patch_size,
             rope_freq=100.0,
         )
+        
+        # ============ 7. Cross-View Contrastive Head (MoCo-style) ============
+        self.contrastive_head = None
+        if contrastive:
+            self.contrastive_head = CrossViewContrastiveHead(
+                in_dim=self.output_dim,
+                proj_dim=contrastive_proj_dim,
+                queue_size=contrastive_queue_size,
+                momentum=contrastive_momentum,
+                temperature=contrastive_temperature,
+            )
     
     def _freeze_backbone(self):
         """Freeze Pi3 backbone."""
@@ -142,6 +158,8 @@ class CrossViewLocalizerPi3(nn.Module):
         points: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         boxes: Optional[torch.Tensor] = None,
         masks: Optional[torch.Tensor] = None,
+        mono_mask: Optional[torch.Tensor] = None,
+        sat_mask: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """
         Forward pass.
@@ -151,7 +169,9 @@ class CrossViewLocalizerPi3(nn.Module):
             satellite_view: [B, 3, H, W] Satellite image
             points: Tuple of (coords [B, N, 2], labels [B, N]) - optional
             boxes: [B, M, 4] in (x, y, w, h) format - optional
-            masks: [B, 1, H, W] Binary masks - optional
+            masks: [B, 1, H, W] Binary masks - optional (prompt mask for front-view)
+            mono_mask: [B, 1, H, W] Front-view segmentation mask for contrastive learning
+            sat_mask: [B, 1, H, W] Satellite segmentation mask for contrastive learning
             
             Note: Any combination of points/boxes/masks is supported.
         
@@ -218,8 +238,18 @@ class CrossViewLocalizerPi3(nn.Module):
             img_size=self.img_size,
         )
         
+        # ============ Step 7: Cross-View Contrastive Loss ============
+        contrastive_loss = None
+        if self.contrastive_head is not None and mono_mask is not None and sat_mask is not None:
+            contrastive_loss = self.contrastive_head(
+                mono_features=front_patch_features,
+                sat_features=sat_patch_features,
+                mono_mask=mono_mask,
+                sat_mask=sat_mask,
+            )
+        
         # ============ Combine Outputs ============
-        return {
+        result = {
             # BBox detection
             'pred_boxes': bbox_outputs['pred_boxes'],
             'bbox_scores': bbox_outputs['bbox_scores'],
@@ -241,6 +271,11 @@ class CrossViewLocalizerPi3(nn.Module):
             'sparse_embeddings': sparse_embeddings,
             'intent_features': intent_features,
         }
+        
+        if contrastive_loss is not None:
+            result['contrastive_loss'] = contrastive_loss
+        
+        return result
 
 
 def build_cross_view_localizer_pi3(

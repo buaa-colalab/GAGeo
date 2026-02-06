@@ -5,7 +5,9 @@ import torch
 
 try:
     import curope as _kernels # run `python setup.py install`
-except ModuleNotFoundError:
+    if not hasattr(_kernels, 'rope_2d'):
+        raise ImportError
+except (ModuleNotFoundError, ImportError):
     from . import curope as _kernels # run `python setup.py build_ext --inplace`
 
 
@@ -35,6 +37,9 @@ class cuRoPE2D(torch.nn.Module):
         self.base = freq 
         self.F0 = F0
 
-    def forward(self, tokens, positions): 
-        cuRoPE2D_func.apply( tokens.transpose(1,2), positions, self.base, self.F0 )
+    def forward(self, tokens, positions):
+        # tokens: [B, H, N, D] -> transpose to [B, N, H, D] for kernel
+        t = tokens.transpose(1,2).contiguous()
+        t = cuRoPE2D_func.apply(t, positions, self.base, self.F0)
+        tokens.copy_(t.transpose(1,2))
         return tokens

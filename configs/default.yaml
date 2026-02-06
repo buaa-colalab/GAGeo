@@ -33,6 +33,13 @@ model:
   pi3_weights: "/shared3/data/xhj/location/ckpt/pi3/model.safetensors"
   freeze_dinov2: true  # 冻结DINOv2 encoder部分
   freeze_decoder: false  # Pi3 decoder可训练
+  
+  # 对比学习 (MoCo-style)
+  contrastive: true
+  contrastive_proj_dim: 256
+  contrastive_queue_size: 65536
+  contrastive_momentum: 0.999
+  contrastive_temperature: 0.07
 
 # Training
 training:
@@ -50,6 +57,7 @@ training:
   weight_giou: 2.0
   weight_heatmap: 1.0
   weight_rotation: 1.0  # geodesic distance on SO(3)
+  weight_contrastive: 0.1  # MoCo cross-view contrastive loss
   
   # Optimizer
   optimizer: "adamw"

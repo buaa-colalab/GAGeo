@@ -98,13 +98,14 @@ def train_one_epoch(
         
         # Forward with AMP
         with autocast('cuda', enabled=cfg['training']['use_amp']):
-            #print('use amp')
             outputs = model(
                 front_view=front_view,
                 satellite_view=sat_view,
                 points=points,
                 boxes=boxes,
                 masks=masks,
+                mono_mask=batch['mono_mask'].to(device),
+                sat_mask=batch['sat_mask'].to(device),
             )
             losses = criterion(outputs, targets)
             loss = losses['loss']
@@ -124,12 +125,14 @@ def train_one_epoch(
                 total_losses[k] = 0.0
             total_losses[k] += v.item()
         
-        # Update progress bar
+        # Update progress bar with all losses
         if is_main_process:
-            pbar.set_postfix({
-                'loss': f'{losses["loss"].item():.4f}',
-                'bbox': f'{losses.get("loss_bbox", 0):.4f}' if isinstance(losses.get("loss_bbox", 0), float) else f'{losses.get("loss_bbox", torch.tensor(0)).item():.4f}',
-            })
+            postfix = {}
+            for k, v in losses.items():
+                if k.startswith('loss') or k == 'rotation_error_deg':
+                    val = v.item() if isinstance(v, torch.Tensor) else v
+                    postfix[k.replace('loss_', '')] = f'{val:.4f}'
+            pbar.set_postfix(postfix)
     
     # Average losses
     avg_losses = {k: v / len(dataloader) for k, v in total_losses.items()}
@@ -181,6 +184,8 @@ def validate(
                 points=points,
                 boxes=boxes,
                 masks=masks,
+                mono_mask=batch['mono_mask'].to(device),
+                sat_mask=batch['sat_mask'].to(device),
             )
             losses = criterion(outputs, targets)
         
@@ -362,6 +367,11 @@ def main():
         prompt_fusion_layers=cfg['model'].get('prompt_fusion_layers', 3),
         num_decoder_layers=cfg['model'].get('num_decoder_layers', 6),
         dropout=cfg['model'].get('dropout', 0.1),
+        contrastive=cfg['model'].get('contrastive', True),
+        contrastive_proj_dim=cfg['model'].get('contrastive_proj_dim', 256),
+        contrastive_queue_size=cfg['model'].get('contrastive_queue_size', 65536),
+        contrastive_momentum=cfg['model'].get('contrastive_momentum', 0.999),
+        contrastive_temperature=cfg['model'].get('contrastive_temperature', 0.07),
     ).to(device)
     
     if cfg['model'].get('pi3_weights'):
@@ -397,6 +407,7 @@ def main():
         weight_giou=cfg['training']['weight_giou'],
         weight_heatmap=cfg['training'].get('weight_heatmap', 1.0),
         weight_rotation=cfg['training'].get('weight_rotation', 1.0),
+        weight_contrastive=cfg['training'].get('weight_contrastive', 0.1),
         img_size=cfg['data']['img_size'],
     )
     
