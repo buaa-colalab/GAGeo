@@ -15,7 +15,7 @@ class DETRCriterion(nn.Module):
     Losses:
     1. BBox: L1 + GIoU loss for matched predictions
     2. Heatmap: Cross-entropy loss for camera position
-    3. Yaw: Angular loss for camera orientation
+    3. Rotation: Geodesic distance on SO(3) for relative pose
     """
     
     def __init__(
@@ -23,14 +23,14 @@ class DETRCriterion(nn.Module):
         weight_bbox: float = 5.0,
         weight_giou: float = 2.0,
         weight_heatmap: float = 1.0,
-        weight_yaw: float = 1.0,
+        weight_rotation: float = 1.0,
         img_size: int = 518,
     ):
         super().__init__()
         self.weight_bbox = weight_bbox
         self.weight_giou = weight_giou
         self.weight_heatmap = weight_heatmap
-        self.weight_yaw = weight_yaw
+        self.weight_rotation = weight_rotation
         self.img_size = img_size
     
     def forward(self, outputs, targets):
@@ -39,7 +39,7 @@ class DETRCriterion(nn.Module):
         
         Args:
             outputs: Model outputs dict
-            targets: Target dict with 'sat_bbox', 'camera_position', 'yaw_radians'
+            targets: Target dict with 'sat_bbox', 'camera_position', 'rotation_matrix'
         """
         losses = {}
         
@@ -104,16 +104,14 @@ class DETRCriterion(nn.Module):
             pos_error = (pred_pos - target_pos).norm(dim=-1).mean()
             losses['pos_error'] = pos_error
         
-        # ============ Yaw Loss ============
-        if 'yaw_radians' in outputs and 'yaw_radians' in targets:
-            pred_yaw = outputs['yaw_radians']  # [B]
-            target_yaw = targets['yaw_radians']  # [B]
+        # ============ Rotation Loss (Geodesic Distance on SO(3)) ============
+        if 'rotation_matrix' in outputs and 'rotation_matrix' in targets:
+            pred_R = outputs['rotation_matrix']    # [B, 3, 3]
+            target_R = targets['rotation_matrix']  # [B, 3, 3]
             
-            # Angular difference (handle wraparound)
-            yaw_diff = pred_yaw - target_yaw
-            yaw_diff = torch.atan2(torch.sin(yaw_diff), torch.cos(yaw_diff))
-            loss_yaw = yaw_diff.abs().mean()
-            losses['loss_yaw'] = loss_yaw
+            loss_rotation, rotation_error_deg = self._geodesic_loss(pred_R, target_R)
+            losses['loss_rotation'] = loss_rotation
+            losses['rotation_error_deg'] = rotation_error_deg  # for logging
         
         # ============ Total Loss ============
         total_loss = 0.0
@@ -123,9 +121,43 @@ class DETRCriterion(nn.Module):
             total_loss = total_loss + self.weight_giou * losses['loss_giou']
         if 'loss_heatmap' in losses:
             total_loss = total_loss + self.weight_heatmap * losses['loss_heatmap']
-        if 'loss_yaw' in losses:
-            total_loss = total_loss + self.weight_yaw * losses['loss_yaw']
+        if 'loss_rotation' in losses:
+            total_loss = total_loss + self.weight_rotation * losses['loss_rotation']
         
         losses['loss'] = total_loss
         
         return losses
+    
+    @staticmethod
+    def _geodesic_loss(
+        pred_R: torch.Tensor, target_R: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Geodesic distance between two rotation matrices on SO(3).
+        
+        d(R1, R2) = arccos( (tr(R1^T @ R2) - 1) / 2 )
+        
+        Args:
+            pred_R: [B, 3, 3] predicted rotation
+            target_R: [B, 3, 3] target rotation
+        
+        Returns:
+            loss: scalar, mean geodesic angle (radians)
+            error_deg: scalar, mean angle error in degrees (for logging)
+        """
+        # R_diff = R_pred^T @ R_target
+        R_diff = pred_R.transpose(-2, -1) @ target_R  # [B, 3, 3]
+        
+        # trace of R_diff
+        trace = R_diff[:, 0, 0] + R_diff[:, 1, 1] + R_diff[:, 2, 2]  # [B]
+        
+        # clamp for numerical stability: (trace - 1) / 2 in [-1, 1]
+        cos_angle = (trace - 1.0) / 2.0
+        cos_angle = torch.clamp(cos_angle, -1.0 + 1e-7, 1.0 - 1e-7)
+        
+        angle = torch.acos(cos_angle)  # [B], geodesic angle in radians
+        
+        loss = angle.mean()
+        error_deg = torch.rad2deg(angle).mean().detach()
+        
+        return loss, error_deg

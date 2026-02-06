@@ -75,7 +75,10 @@ def test_model():
     assert outputs['bbox_scores'].shape == (B, 10), f"bbox_scores shape mismatch: {outputs['bbox_scores'].shape}"
     assert outputs['heatmap'].shape == (B, 518, 518), f"heatmap shape mismatch: {outputs['heatmap'].shape}"
     assert outputs['position'].shape == (B, 2), f"position shape mismatch: {outputs['position'].shape}"
-    assert outputs['yaw_radians'].shape == (B,), f"yaw_radians shape mismatch: {outputs['yaw_radians'].shape}"
+    assert outputs['rotation_matrix'].shape == (B, 3, 3), f"rotation_matrix shape mismatch: {outputs['rotation_matrix'].shape}"
+    assert outputs['yaw'].shape == (B,), f"yaw shape mismatch: {outputs['yaw'].shape}"
+    assert outputs['pitch'].shape == (B,), f"pitch shape mismatch: {outputs['pitch'].shape}"
+    assert outputs['roll'].shape == (B,), f"roll shape mismatch: {outputs['roll'].shape}"
     print("   ✓ All output shapes correct!")
     
     # Check value ranges
@@ -84,7 +87,9 @@ def test_model():
     print(f"   bbox_scores: min={outputs['bbox_scores'].min():.4f}, max={outputs['bbox_scores'].max():.4f} (expected [0,1])")
     print(f"   heatmap sum: {outputs['heatmap'].sum(dim=[1,2])} (expected ~1.0 per sample)")
     print(f"   position: {outputs['position']} (expected [0,1])")
-    print(f"   yaw_radians: {outputs['yaw_radians']} (expected [-π, π])")
+    print(f"   yaw: {outputs['yaw']} (expected [-π, π])")
+    print(f"   pitch: {outputs['pitch']}")
+    print(f"   roll: {outputs['roll']}")
     
     # ============ Test different prompt combinations ============
     print("\n8. Testing different prompt combinations...")

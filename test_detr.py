@@ -89,7 +89,7 @@ def evaluate(model, dataloader, criterion, device, prompt_type='point'):
     all_target_boxes = []
     all_pred_positions = []
     all_target_positions = []
-    all_yaw_errors = []
+    all_rotation_errors = []
     all_bbox_scores = []
     
     for batch in tqdm(dataloader, desc=f'Evaluating ({prompt_type})'):
@@ -109,7 +109,7 @@ def evaluate(model, dataloader, criterion, device, prompt_type='point'):
         
         targets = {
             'sat_bbox': batch['sat_bbox'].to(device),
-            'yaw_radians': batch['yaw_radians'].to(device),
+            'rotation_matrix': batch['rotation_matrix'].to(device),
             'camera_position': batch['camera_position'].to(device),
         }
         
@@ -137,14 +137,8 @@ def evaluate(model, dataloader, criterion, device, prompt_type='point'):
             all_pred_positions.append(outputs['position'].cpu())
             all_target_positions.append(batch['camera_position'])
         
-        if 'yaw_radians' in outputs:
-            pred_yaw = outputs['yaw_radians'].cpu()
-            target_yaw = batch['yaw_radians']
-            yaw_diff = torch.atan2(
-                torch.sin(pred_yaw - target_yaw),
-                torch.cos(pred_yaw - target_yaw)
-            )
-            all_yaw_errors.append(torch.abs(yaw_diff))
+        if 'rotation_error_deg' in losses:
+            all_rotation_errors.append(torch.tensor([losses['rotation_error_deg']]))
     
     num_batches = len(dataloader)
     avg_losses = {k: v / num_batches for k, v in total_losses.items()}
@@ -181,11 +175,9 @@ def evaluate(model, dataloader, criterion, device, prompt_type='point'):
         metrics['position_error_std'] = dist_error.std().item()
         metrics['position_error_pixels'] = dist_error.mean().item() * 518  # Assuming 518 img_size
     
-    # Yaw metrics
-    if all_yaw_errors:
-        yaw_errors = torch.cat(all_yaw_errors, dim=0)
-        metrics['mean_yaw_error_rad'] = yaw_errors.mean().item()
-        metrics['mean_yaw_error_deg'] = torch.rad2deg(yaw_errors).mean().item()
+    # Rotation metrics
+    if all_rotation_errors:
+        metrics['mean_rotation_error_deg'] = torch.cat(all_rotation_errors).mean().item()
     
     return avg_losses, metrics
 
@@ -230,7 +222,7 @@ def main():
         weight_bbox=cfg['training'].get('weight_bbox', 5.0),
         weight_giou=cfg['training'].get('weight_giou', 2.0),
         weight_heatmap=cfg['training'].get('weight_heatmap', 1.0),
-        weight_yaw=cfg['training'].get('weight_yaw', 1.0),
+        weight_rotation=cfg['training'].get('weight_rotation', 1.0),
         img_size=cfg['data']['img_size'],
     )
     
@@ -266,7 +258,7 @@ def main():
     print('-' * 66)
     
     # Compare key metrics
-    key_metrics = ['mean_iou', 'iou@0.5', 'mean_position_error', 'mean_yaw_error_deg']
+    key_metrics = ['mean_iou', 'iou@0.5', 'mean_position_error', 'mean_rotation_error_deg']
     for metric in key_metrics:
         if metric in all_results['point']['metrics']:
             values = [all_results[pt]['metrics'].get(metric, 0) for pt in prompt_types]

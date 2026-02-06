@@ -138,13 +138,13 @@ def visualize_sample(model, sample, device, img_size, output_path, show, show_he
     pred_bbox = pred_boxes[best_idx]
     pred_score = bbox_scores[best_idx]
     
-    pred_yaw = outputs['yaw_radians'][0].cpu().item() if 'yaw_radians' in outputs else None
+    pred_yaw = outputs['yaw'][0].cpu().item() if 'yaw' in outputs else None
     pred_position = outputs['position'][0].cpu().numpy() if 'position' in outputs else None
     heatmap = outputs['heatmap'][0].cpu().numpy() if 'heatmap' in outputs else None
     
     # Ground truth
     gt_bbox = sample['sat_bbox'].numpy()
-    gt_yaw = sample['yaw_radians'].item()
+    gt_yaw = sample['yaw'].item()
     gt_position = sample['camera_position'].numpy()
     
     # Create figure

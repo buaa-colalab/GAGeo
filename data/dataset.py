@@ -32,7 +32,7 @@ class CrossViewDataset(Dataset):
         "sat_filename": "...",
         "sate_bbox": [x, y, w, h],
         "sate_segmentation": [...],
-        "rotation": yaw_degrees,
+        "relative_yaw": yaw_degrees,
         "camera_position": [x, y]  # 相机在卫星图中的位置
     }
     """
@@ -103,10 +103,14 @@ class CrossViewDataset(Dataset):
             # 验证/测试模式: mask已经是crop好的518x518
             sat_mask = self._decode_segmentation(item.get('sate_segmentation'), self.crop_size)
         
-        # 相机位置和yaw
+        # 相机位置和角度 (all in radians)
         camera_position = np.array(item.get('camera_position', [self.sat_size/2, self.sat_size/2]), dtype=np.float32)
-        yaw_degrees = float(item['rotation'])
-        yaw_radians = np.deg2rad(yaw_degrees)
+        yaw = np.deg2rad(float(item['relative_yaw']))
+        pitch = np.deg2rad(float(item.get('relative_pitch', 90.0)))  # 默认地面-卫星=90°
+        roll = np.deg2rad(float(item.get('relative_roll', 0.0)))
+        
+        # 构造target rotation matrix (ZYX convention)
+        rotation_matrix = self._euler_to_rotation_matrix(yaw, pitch, roll)
         
         # Resize mono图像和mask到目标尺寸
         mono_img, mono_point, mono_bbox, mono_mask = self._resize_mono(
@@ -149,13 +153,29 @@ class CrossViewDataset(Dataset):
             'sat_mask': sat_mask_tensor,
             'sat_bbox': torch.from_numpy(sat_bbox_norm),
             'camera_position': torch.from_numpy(camera_position_norm),
-            'yaw_radians': torch.tensor(yaw_radians, dtype=torch.float32),
-            'yaw_degrees': torch.tensor(yaw_degrees, dtype=torch.float32),
+            'rotation_matrix': torch.from_numpy(rotation_matrix),
+            'yaw': torch.tensor(yaw, dtype=torch.float32),
+            'pitch': torch.tensor(pitch, dtype=torch.float32),
+            'roll': torch.tensor(roll, dtype=torch.float32),
             'city': item['city'],
             'mono_filename': item['mono_filename'],
             'sat_filename': item['sat_filename'],
             'crop_offset': torch.from_numpy(crop_offset),
         }
+    
+    @staticmethod
+    def _euler_to_rotation_matrix(yaw: float, pitch: float, roll: float) -> np.ndarray:
+        """ZYX convention: R = Rz(yaw) @ Ry(pitch) @ Rx(roll)"""
+        cy, sy = np.cos(yaw), np.sin(yaw)
+        cp, sp = np.cos(pitch), np.sin(pitch)
+        cr, sr = np.cos(roll), np.sin(roll)
+        
+        R = np.array([
+            [cy*cp,  cy*sp*sr - sy*cr,  cy*sp*cr + sy*sr],
+            [sy*cp,  sy*sp*sr + cy*cr,  sy*sp*cr - cy*sr],
+            [  -sp,           cp*sr,           cp*cr    ],
+        ], dtype=np.float32)
+        return R
     
     def _load_image(self, city: str, view_type: str, filename: str) -> Image.Image:
         """加载图像"""
@@ -316,8 +336,10 @@ def collate_fn(batch: List[Dict]) -> Dict:
     sat_masks = torch.stack([item['sat_mask'] for item in batch])
     sat_bboxes = torch.stack([item['sat_bbox'] for item in batch])
     camera_positions = torch.stack([item['camera_position'] for item in batch])
-    yaw_radians = torch.stack([item['yaw_radians'] for item in batch])
-    yaw_degrees = torch.stack([item['yaw_degrees'] for item in batch])
+    rotation_matrices = torch.stack([item['rotation_matrix'] for item in batch])
+    yaws = torch.stack([item['yaw'] for item in batch])
+    pitches = torch.stack([item['pitch'] for item in batch])
+    rolls = torch.stack([item['roll'] for item in batch])
     crop_offsets = torch.stack([item['crop_offset'] for item in batch])
     
     return {
@@ -329,8 +351,10 @@ def collate_fn(batch: List[Dict]) -> Dict:
         'sat_mask': sat_masks,
         'sat_bbox': sat_bboxes,
         'camera_position': camera_positions,
-        'yaw_radians': yaw_radians,
-        'yaw_degrees': yaw_degrees,
+        'rotation_matrix': rotation_matrices,
+        'yaw': yaws,
+        'pitch': pitches,
+        'roll': rolls,
         'crop_offset': crop_offsets,
         'cities': [item['city'] for item in batch],
         'mono_filenames': [item['mono_filename'] for item in batch],
@@ -355,7 +379,7 @@ if __name__ == '__main__':
     print(f"  Mono bbox: {sample['mono_bbox']}")
     print(f"  Sat bbox: {sample['sat_bbox']}")
     print(f"  Camera position: {sample['camera_position']}")
-    print(f"  Yaw (degrees): {sample['yaw_degrees']:.1f}")
+    print(f"  Yaw (radians): {sample['yaw']:.4f}")
     print(f"  Crop offset: {sample['crop_offset']}")
     
     # 测试DataLoader
@@ -374,4 +398,4 @@ if __name__ == '__main__':
     print(f"  Front views: {batch['front_view'].shape}")
     print(f"  Satellite views: {batch['satellite_view'].shape}")
     print(f"  Camera positions: {batch['camera_position'].shape}")
-    print(f"  Yaw radians: {batch['yaw_radians'].shape}")
+    print(f"  Rotation matrix: {batch['rotation_matrix'].shape}")

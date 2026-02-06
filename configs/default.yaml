@@ -48,8 +48,8 @@ training:
   # Loss权重
   weight_bbox: 5.0
   weight_giou: 2.0
-  weight_yaw: 1.0
   weight_heatmap: 1.0
+  weight_rotation: 1.0  # geodesic distance on SO(3)
   
   # Optimizer
   optimizer: "adamw"

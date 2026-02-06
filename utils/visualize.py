@@ -54,7 +54,7 @@ def visualize_batch_sample(batch, outputs, idx, img_size, save_path, prompt_type
     sat_img = to_numpy_img(batch['satellite_view'][idx])
     
     gt_bbox = batch['sat_bbox'][idx].cpu().numpy()
-    gt_yaw = batch['yaw_radians'][idx].cpu().item()
+    gt_yaw = batch['yaw'][idx].cpu().item()
     gt_position = batch['camera_position'][idx].cpu().numpy()
     
     # Get direction info
@@ -70,7 +70,7 @@ def visualize_batch_sample(batch, outputs, idx, img_size, save_path, prompt_type
     else:
         pred_bbox = None
         pred_score = None
-    pred_yaw = outputs['yaw_radians'][idx].detach().float().cpu().item() if 'yaw_radians' in outputs else None
+    pred_yaw = outputs['yaw'][idx].detach().float().cpu().item() if 'yaw' in outputs else None
     pred_position = outputs['position'][idx].detach().float().cpu().numpy() if 'position' in outputs else None
     
     # Create figure

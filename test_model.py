@@ -35,7 +35,7 @@ def test_dataset():
     print(f"  Mono mask: {sample['mono_mask'].shape}")
     print(f"  Sat bbox: {sample['sat_bbox']}")
     print(f"  Camera position: {sample['camera_position']}")
-    print(f"  Yaw degrees: {sample['yaw_degrees']:.1f}")
+    print(f"  Yaw (radians): {sample['yaw']:.4f}")
     
     print("\n✓ Dataset test passed!")
     return dataset
@@ -91,8 +91,10 @@ def test_model():
     print(f"  bbox_scores: {outputs['bbox_scores'].shape}")
     print(f"  heatmap: {outputs['heatmap'].shape}")
     print(f"  position: {outputs['position'].shape}")
-    print(f"  yaw_radians: {outputs['yaw_radians'].shape}")
-    print(f"  yaw_degrees: {outputs['yaw_degrees'].shape}")
+    print(f"  rotation_matrix: {outputs['rotation_matrix'].shape}")
+    print(f"  yaw: {outputs['yaw'].shape}")
+    print(f"  pitch: {outputs['pitch'].shape}")
+    print(f"  roll: {outputs['roll'].shape}")
     
     print("\n✓ Model test passed!")
     return model
@@ -163,7 +165,7 @@ def test_full_pipeline():
     print(f"  pred_boxes: {outputs['pred_boxes'].shape}")
     print(f"  heatmap: {outputs['heatmap'].shape}")
     print(f"  position: {outputs['position']}")
-    print(f"  yaw_degrees: {outputs['yaw_degrees']}")
+    print(f"  yaw: {outputs['yaw']}")
     
     print("\n✓ Full pipeline test passed!")
 

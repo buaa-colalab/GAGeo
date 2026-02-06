@@ -69,7 +69,7 @@ def train_one_epoch(
             # Prepare targets
             targets = {
                 'sat_bbox': batch['sat_bbox'],
-                'yaw_radians': batch['yaw_radians'],
+                'rotation_matrix': batch['rotation_matrix'],
                 'camera_position': batch['camera_position'],
             }
             
@@ -134,7 +134,7 @@ def validate(
     
     total_losses = {}
     all_pos_errors = []
-    all_yaw_errors = []
+    all_rotation_errors = []
     
     for batch in tqdm(dataloader, desc='Validation', disable=not accelerator.is_main_process):
         front_view = batch['front_view']
@@ -142,7 +142,7 @@ def validate(
         
         targets = {
             'sat_bbox': batch['sat_bbox'],
-            'yaw_radians': batch['yaw_radians'],
+            'rotation_matrix': batch['rotation_matrix'],
             'camera_position': batch['camera_position'],
         }
         
@@ -173,10 +173,8 @@ def validate(
             pos_error = (outputs['position'] - targets['camera_position']).norm(dim=-1)
             all_pos_errors.append(pos_error)
         
-        if 'yaw_radians' in outputs:
-            yaw_diff = outputs['yaw_radians'] - targets['yaw_radians']
-            yaw_diff = torch.atan2(torch.sin(yaw_diff), torch.cos(yaw_diff))
-            all_yaw_errors.append(yaw_diff.abs())
+        if 'rotation_error_deg' in losses:
+            all_rotation_errors.append(torch.tensor([losses['rotation_error_deg']]))
     
     # Average losses
     avg_losses = {k: v / len(dataloader) for k, v in total_losses.items()}
@@ -187,10 +185,8 @@ def validate(
         avg_losses['pos_mae'] = all_pos_errors.mean().item()
         avg_losses['pos_mae_pixels'] = avg_losses['pos_mae'] * cfg['data']['img_size']
     
-    if all_yaw_errors:
-        all_yaw_errors = accelerator.gather_for_metrics(torch.cat(all_yaw_errors))
-        avg_losses['yaw_mae'] = all_yaw_errors.mean().item()
-        avg_losses['yaw_mae_deg'] = math.degrees(avg_losses['yaw_mae'])
+    if all_rotation_errors:
+        avg_losses['rotation_mae_deg'] = torch.cat(all_rotation_errors).mean().item()
     
     # Log
     accelerator.log({f"val/{k}": v for k, v in avg_losses.items()}, step=epoch)
@@ -314,7 +310,7 @@ def main():
         weight_bbox=cfg['training']['weight_bbox'],
         weight_giou=cfg['training']['weight_giou'],
         weight_heatmap=cfg['training']['weight_heatmap'],
-        weight_yaw=cfg['training']['weight_yaw'],
+        weight_rotation=cfg['training'].get('weight_rotation', 1.0),
         img_size=cfg['data']['img_size'],
     )
     

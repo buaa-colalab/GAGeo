@@ -87,7 +87,7 @@ def train_one_epoch(
         # 准备targets
         targets = {
             'sat_bbox': batch['sat_bbox'].to(device),
-            'yaw_radians': batch['yaw_radians'].to(device),
+            'rotation_matrix': batch['rotation_matrix'].to(device),
             'camera_position': batch['camera_position'].to(device),
         }
         
@@ -159,7 +159,7 @@ def validate(
     
     total_losses = {}
     all_pos_errors = []
-    all_yaw_errors = []
+    all_rotation_errors = []
     
     for batch in tqdm(dataloader, desc='Validation', disable=not is_main_process):
         front_view = batch['front_view'].to(device)
@@ -167,7 +167,7 @@ def validate(
         
         targets = {
             'sat_bbox': batch['sat_bbox'].to(device),
-            'yaw_radians': batch['yaw_radians'].to(device),
+            'rotation_matrix': batch['rotation_matrix'].to(device),
             'camera_position': batch['camera_position'].to(device),
         }
         
@@ -195,10 +195,8 @@ def validate(
             pos_error = (outputs['position'] - targets['camera_position']).norm(dim=-1)
             all_pos_errors.append(pos_error)
         
-        if 'yaw_radians' in outputs:
-            yaw_diff = outputs['yaw_radians'] - targets['yaw_radians']
-            yaw_diff = torch.atan2(torch.sin(yaw_diff), torch.cos(yaw_diff))
-            all_yaw_errors.append(yaw_diff.abs())
+        if 'rotation_error_deg' in losses:
+            all_rotation_errors.append(torch.tensor([losses['rotation_error_deg']]))
     
     avg_losses = {k: v / len(dataloader) for k, v in total_losses.items()}
     
@@ -213,15 +211,8 @@ def validate(
         avg_losses['pos_mae'] = all_pos_errors.mean().item()
         avg_losses['pos_mae_pixels'] = avg_losses['pos_mae'] * cfg['data']['img_size']
     
-    if all_yaw_errors:
-        all_yaw_errors = torch.cat(all_yaw_errors)
-        # Gather from all processes if distributed
-        if dist.is_initialized():
-            gathered_errors = [torch.zeros_like(all_yaw_errors) for _ in range(dist.get_world_size())]
-            dist.all_gather(gathered_errors, all_yaw_errors)
-            all_yaw_errors = torch.cat(gathered_errors)
-        avg_losses['yaw_mae'] = all_yaw_errors.mean().item()
-        avg_losses['yaw_mae_deg'] = math.degrees(avg_losses['yaw_mae'])
+    if all_rotation_errors:
+        avg_losses['rotation_mae_deg'] = torch.cat(all_rotation_errors).mean().item()
     
     # Log to TensorBoard
     if tb_writer and is_main_process:
@@ -405,7 +396,7 @@ def main():
         weight_bbox=cfg['training']['weight_bbox'],
         weight_giou=cfg['training']['weight_giou'],
         weight_heatmap=cfg['training'].get('weight_heatmap', 1.0),
-        weight_yaw=cfg['training']['weight_yaw'],
+        weight_rotation=cfg['training'].get('weight_rotation', 1.0),
         img_size=cfg['data']['img_size'],
     )
     

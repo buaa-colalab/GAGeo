@@ -89,11 +89,10 @@ class Pi3CameraHead(nn.Module):
         
         Returns:
             Dict containing:
-                - front_pose: [B, 4, 4] Front view absolute pose
-                - sat_pose: [B, 4, 4] Satellite view absolute pose
-                - relative_pose: [B, 4, 4] Relative pose (front to sat)
-                - yaw_radians: [B] Yaw angle in radians
-                - yaw_degrees: [B] Yaw angle in degrees
+                - rotation_matrix: [B, 3, 3] Relative rotation matrix
+                - yaw: [B] Yaw in radians
+                - pitch: [B] Pitch in radians
+                - roll: [B] Roll in radians
         """
         B = front_patch_features.shape[0]
         patch_h = patch_w = img_size // self.patch_size
@@ -114,18 +113,14 @@ class Pi3CameraHead(nn.Module):
         # Compute relative pose: T_front_to_sat = T_sat^{-1} @ T_front
         relative_pose = self._compute_relative_pose(front_pose, sat_pose)
         
-        # Extract yaw from relative rotation
-        yaw_radians = self._extract_yaw_from_rotation(relative_pose[:, :3, :3])
-        yaw_degrees = torch.rad2deg(yaw_radians)
+        R = relative_pose[:, :3, :3]
+        yaw, pitch, roll = self._rotation_to_euler(R)
         
         return {
-            'front_pose': front_pose,
-            'sat_pose': sat_pose,
-            'relative_pose': relative_pose,
-            'pose_enc': relative_pose.reshape(B, -1)[:, :9],  # For compatibility
-            'quaternion': self._rotation_to_quaternion(relative_pose[:, :3, :3]),
-            'yaw_radians': yaw_radians,
-            'yaw_degrees': yaw_degrees,
+            'rotation_matrix': R,
+            'yaw': yaw,
+            'pitch': pitch,
+            'roll': roll,
         }
     
     def _compute_relative_pose(self, T1: torch.Tensor, T2: torch.Tensor) -> torch.Tensor:
@@ -144,39 +139,20 @@ class Pi3CameraHead(nn.Module):
         # Relative pose
         return T2_inv @ T1
     
-    def _extract_yaw_from_rotation(self, R: torch.Tensor) -> torch.Tensor:
+    def _rotation_to_euler(self, R: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Extract yaw angle from rotation matrix.
-        Assumes rotation is primarily around Z-axis (bird's eye view).
+        Extract Euler angles (yaw, pitch, roll) from rotation matrix.
+        Uses ZYX convention (yaw-pitch-roll).
         
-        yaw = atan2(R[1,0], R[0,0])
+        yaw   = atan2(R[1,0], R[0,0])   -- rotation around Z
+        pitch = -asin(R[2,0])            -- rotation around Y
+        roll  = atan2(R[2,1], R[2,2])    -- rotation around X
+        
+        Returns:
+            yaw, pitch, roll: each [B] in radians
         """
-        return torch.atan2(R[:, 1, 0], R[:, 0, 0])
+        yaw = torch.atan2(R[:, 1, 0], R[:, 0, 0])
+        pitch = -torch.asin(torch.clamp(R[:, 2, 0], -1.0, 1.0))
+        roll = torch.atan2(R[:, 2, 1], R[:, 2, 2])
+        return yaw, pitch, roll
     
-    def _rotation_to_quaternion(self, R: torch.Tensor) -> torch.Tensor:
-        """Convert rotation matrix to quaternion (w, x, y, z)"""
-        B = R.shape[0]
-        
-        # Ensure proper rotation matrix
-        trace = R[:, 0, 0] + R[:, 1, 1] + R[:, 2, 2]
-        
-        q = torch.zeros(B, 4, device=R.device, dtype=R.dtype)
-        
-        # Case: trace > 0
-        mask = trace > 0
-        if mask.any():
-            s = torch.sqrt(trace[mask] + 1.0) * 2
-            q[mask, 0] = 0.25 * s
-            q[mask, 1] = (R[mask, 2, 1] - R[mask, 1, 2]) / s
-            q[mask, 2] = (R[mask, 0, 2] - R[mask, 2, 0]) / s
-            q[mask, 3] = (R[mask, 1, 0] - R[mask, 0, 1]) / s
-        
-        # Other cases (simplified)
-        mask = ~mask
-        if mask.any():
-            # Fallback: use simple approximation
-            q[mask, 0] = 1.0
-        
-        # Normalize
-        q = F.normalize(q, dim=-1)
-        return q

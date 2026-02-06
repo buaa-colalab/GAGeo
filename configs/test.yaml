@@ -40,8 +40,8 @@ training:
   
   weight_bbox: 5.0
   weight_giou: 2.0
-  weight_yaw: 1.0
   weight_heatmap: 1.0
+  weight_rotation: 1.0
   
   optimizer: "adamw"
   scheduler: "cosine"

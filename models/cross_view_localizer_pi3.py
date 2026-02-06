@@ -229,17 +229,17 @@ class CrossViewLocalizerPi3(nn.Module):
             'position': heatmap_outputs['position'],
             'heatmap_logits': heatmap_outputs['heatmap_logits'],
             
-            # Camera angle
-            'yaw_radians': camera_output['yaw_radians'],
-            'yaw_degrees': camera_output['yaw_degrees'],
-            'quaternion': camera_output['quaternion'],
-            'pose_enc': camera_output['pose_enc'],
+            # Camera rotation (relative pose)
+            'rotation_matrix': camera_output['rotation_matrix'],
+            'yaw': camera_output['yaw'],
+            'pitch': camera_output['pitch'],
+            'roll': camera_output['roll'],
             
             # Features for visualization/debugging
             'front_features': front_patch_features,
             'sat_features': sat_patch_features,
             'sparse_embeddings': sparse_embeddings,
-            'intent_features': intent_features,  # New: intent features from Stage 1
+            'intent_features': intent_features,
         }
 
 
