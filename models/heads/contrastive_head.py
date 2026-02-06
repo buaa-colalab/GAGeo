@@ -25,7 +25,7 @@ class CrossViewContrastiveHead(nn.Module):
     Args:
         in_dim: Input feature dimension (e.g. 2048)
         proj_dim: Projection output dimension (default 256)
-        queue_size: MoCo queue size (default 65536)
+        queue_size: MoCo queue size (default 16384)
         momentum: EMA momentum for key encoder (default 0.999)
         temperature: InfoNCE temperature (default 0.07)
     """
@@ -34,7 +34,7 @@ class CrossViewContrastiveHead(nn.Module):
         self,
         in_dim: int = 2048,
         proj_dim: int = 256,
-        queue_size: int = 65536,
+        queue_size: int = 16384,
         momentum: float = 0.999,
         temperature: float = 0.07,
     ):
@@ -99,8 +99,8 @@ class CrossViewContrastiveHead(nn.Module):
         B, N, D = features.shape
         H_p = W_p = int(N ** 0.5)  # 37
         
-        patch_mask = F.adaptive_avg_pool2d(mask, (H_p, W_p))  # [B, 1, H_p, W_p]
-        patch_mask = (patch_mask > 0.5).float().reshape(B, -1)  # [B, N]
+        patch_mask = F.adaptive_avg_pool2d(mask.float(), (H_p, W_p))  # [B, 1, H_p, W_p]
+        patch_mask = (patch_mask > 0.5).to(dtype=features.dtype).reshape(B, -1)  # [B, N]
         
         # Fallback: if mask is all-zero, use uniform weights
         mask_sum = patch_mask.sum(dim=1, keepdim=True).clamp(min=1.0)
@@ -131,10 +131,15 @@ class CrossViewContrastiveHead(nn.Module):
         sat_pooled = self._masked_avg_pool(sat_features, sat_mask)    # [B, D]
         mono_pooled = self._masked_avg_pool(mono_features, mono_mask)  # [B, D]
         
-        # 2. Query: satellite through encoder_q (gradient flows)
+        # 2. Ensure dtype matches encoder weights (handles DeepSpeed bf16)
+        target_dtype = next(self.encoder_q.parameters()).dtype
+        sat_pooled = sat_pooled.to(target_dtype)
+        mono_pooled = mono_pooled.to(target_dtype)
+        
+        # 3. Query: satellite through encoder_q (gradient flows)
         q = F.normalize(self.encoder_q(sat_pooled), dim=-1)  # [B, proj_dim]
         
-        # 3. Key: mono through encoder_k (no gradient, momentum-updated)
+        # 4. Key: mono through encoder_k (no gradient, momentum-updated)
         with torch.no_grad():
             self._momentum_update_key_encoder()
             k = F.normalize(self.encoder_k(mono_pooled), dim=-1)  # [B, proj_dim]

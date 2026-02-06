@@ -56,7 +56,7 @@ class CrossViewLocalizerPi3(nn.Module):
         freeze_backbone: bool = False,
         contrastive: bool = True,
         contrastive_proj_dim: int = 256,
-        contrastive_queue_size: int = 65536,
+        contrastive_queue_size: int = 16384,
         contrastive_momentum: float = 0.999,
         contrastive_temperature: float = 0.07,
     ):

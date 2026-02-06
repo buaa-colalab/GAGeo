@@ -292,7 +292,7 @@ def main():
         dropout=cfg['model'].get('dropout', 0.1),
         contrastive=cfg['model'].get('contrastive', True),
         contrastive_proj_dim=cfg['model'].get('contrastive_proj_dim', 256),
-        contrastive_queue_size=cfg['model'].get('contrastive_queue_size', 65536),
+        contrastive_queue_size=cfg['model'].get('contrastive_queue_size', 16384),
         contrastive_momentum=cfg['model'].get('contrastive_momentum', 0.999),
         contrastive_temperature=cfg['model'].get('contrastive_temperature', 0.07),
     )

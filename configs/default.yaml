@@ -37,7 +37,7 @@ model:
   # 对比学习 (MoCo-style)
   contrastive: true
   contrastive_proj_dim: 256
-  contrastive_queue_size: 65536
+  contrastive_queue_size: 16384
   contrastive_momentum: 0.999
   contrastive_temperature: 0.07
 
