@@ -141,7 +141,7 @@ class Pi3Backbone(nn.Module):
         hidden = hidden.reshape(B * N, hw, -1)
         
         # Add register tokens
-        register_token = self.register_token.repeat(B, N, 1, 1).reshape(B * N, *self.register_token.shape[-2:])
+        register_token = self.register_token.to(hidden.device).repeat(B, N, 1, 1).reshape(B * N, *self.register_token.shape[-2:])
         hidden = torch.cat([register_token, hidden], dim=1)
         hw = hidden.shape[1]
         
@@ -196,7 +196,7 @@ class Pi3Backbone(nn.Module):
         images_flat = images.reshape(B * N, 3, H, W)
         
         # 确保输入类型与模型权重一致（解决 bf16 混合精度问题）
-        target_dtype = next(self.encoder.parameters()).dtype
+        target_dtype = self.image_mean.dtype
         if images_flat.dtype != target_dtype:
             images_flat = images_flat.to(target_dtype)
         

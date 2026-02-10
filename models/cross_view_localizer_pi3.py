@@ -181,7 +181,7 @@ class CrossViewLocalizerPi3(nn.Module):
         B = front_view.shape[0]
         
         # 确保输入类型与模型权重一致（解决 bf16 混合精度问题）
-        target_dtype = next(self.parameters()).dtype
+        target_dtype = self.backbone.image_mean.dtype
         if front_view.dtype != target_dtype:
             front_view = front_view.to(target_dtype)
             satellite_view = satellite_view.to(target_dtype)

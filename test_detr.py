@@ -9,6 +9,7 @@ import yaml
 from pathlib import Path
 
 import torch
+import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -20,6 +21,7 @@ from utils import (
     box_cxcywh_to_xyxy,
 )
 from utils.prompt_utils import prepare_single_prompt
+from utils.visualize import visualize_batch_sample
 
 
 def parse_args():
@@ -30,11 +32,13 @@ def parse_args():
                         help='Path to model checkpoint directory (Accelerate format)')
     parser.add_argument('--data_json', type=str, default=None,
                         help='Override test data json path')
-    parser.add_argument('--batch_size', type=int, default=1)
+    parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--output_dir', type=str, default='./output/test_results')
-    parser.add_argument('--gpu', type=str, default='0')
+    parser.add_argument('--gpu', type=str, default='0,1,2,3')
     parser.add_argument('--prompt_type', type=str, default='all', choices=['point', 'bbox', 'mask', 'all'],
                         help='Prompt type to test (default: all)')
+    parser.add_argument('--vis_samples', type=int, default=20,
+                        help='Number of samples to visualize per prompt type (0 to disable)')
     return parser.parse_args()
 
 
@@ -54,25 +58,55 @@ def load_model(checkpoint_path, cfg, device):
         num_decoder_layers=cfg['model'].get('num_decoder_layers', 6),
         num_object_queries=cfg['model'].get('num_object_queries', 10),
         num_location_queries=cfg['model'].get('num_location_queries', 16),
+        num_intent_queries=cfg['model'].get('num_intent_queries', 32),
+        prompt_fusion_layers=cfg['model'].get('prompt_fusion_layers', 3),
+        dropout=cfg['model'].get('dropout', 0.1),
+        contrastive=cfg['model'].get('contrastive', False),
+        contrastive_proj_dim=cfg['model'].get('contrastive_proj_dim', 256),
+        contrastive_queue_size=cfg['model'].get('contrastive_queue_size', 16384),
+        contrastive_momentum=cfg['model'].get('contrastive_momentum', 0.999),
+        contrastive_temperature=cfg['model'].get('contrastive_temperature', 0.07),
     )
     
     ckpt_path = Path(checkpoint_path)
     
-    # Try Accelerate format first
-    model_file = ckpt_path / 'pytorch_model.bin'
-    if not model_file.exists():
-        model_file = ckpt_path / 'model.safetensors'
-    if not model_file.exists():
-        # Try direct checkpoint file
-        model_file = ckpt_path
+    # Search for checkpoint file in multiple locations
+    candidates = [
+        ckpt_path / 'converted_fp32' / 'pytorch_model.bin',  # DeepSpeed converted
+        ckpt_path / 'pytorch_model.bin',                      # Accelerate format
+        ckpt_path / 'model.safetensors',                      # safetensors format
+        ckpt_path,                                             # direct file path
+    ]
     
-    if model_file.exists() and model_file.is_file():
-        state_dict = torch.load(model_file, map_location=device)
-        if 'model' in state_dict:
-            state_dict = state_dict['model']
-        model.load_state_dict(state_dict, strict=False)
-    else:
+    model_file = None
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            model_file = candidate
+            break
+    
+    if model_file is None:
         raise FileNotFoundError(f"Cannot find model checkpoint at {checkpoint_path}")
+    
+    print(f'Loading weights from {model_file}')
+    state_dict = torch.load(model_file, map_location=device, weights_only=False)
+    if 'model' in state_dict:
+        state_dict = state_dict['model']
+    
+    # Strip 'module.' prefix (from Accelerate/DeepSpeed wrapping)
+    cleaned_state_dict = {}
+    for k, v in state_dict.items():
+        new_key = k.replace('module.', '', 1) if k.startswith('module.') else k
+        cleaned_state_dict[new_key] = v
+    
+    missing, unexpected = model.load_state_dict(cleaned_state_dict, strict=False)
+    if missing:
+        print(f'  Missing keys ({len(missing)}):')
+        for k in missing:
+            print(f'    - {k}')
+    if unexpected:
+        print(f'  Unexpected keys ({len(unexpected)}):')
+        for k in unexpected:
+            print(f'    - {k}')
     
     model = model.to(device)
     model.eval()
@@ -80,7 +114,8 @@ def load_model(checkpoint_path, cfg, device):
 
 
 @torch.no_grad()
-def evaluate(model, dataloader, criterion, device, prompt_type='point'):
+def evaluate(model, dataloader, criterion, device, prompt_type='point',
+            vis_dir=None, vis_samples=0, img_size=518):
     """Evaluate model performance with specific prompt type."""
     model.eval()
     
@@ -91,6 +126,7 @@ def evaluate(model, dataloader, criterion, device, prompt_type='point'):
     all_target_positions = []
     all_rotation_errors = []
     all_bbox_scores = []
+    vis_count = 0
     
     for batch in tqdm(dataloader, desc=f'Evaluating ({prompt_type})'):
         front_view = batch['front_view'].to(device)
@@ -126,6 +162,7 @@ def evaluate(model, dataloader, criterion, device, prompt_type='point'):
             bbox_scores = outputs['bbox_scores']  # [B, N]
             
             # Select best box by score
+            B = pred_boxes.shape[0]
             best_idx = bbox_scores.argmax(dim=1)  # [B]
             best_boxes = pred_boxes[torch.arange(B, device=device), best_idx]  # [B, 4]
             
@@ -139,6 +176,16 @@ def evaluate(model, dataloader, criterion, device, prompt_type='point'):
         
         if 'rotation_error_deg' in losses:
             all_rotation_errors.append(torch.tensor([losses['rotation_error_deg']]))
+        
+        # Visualize samples
+        if vis_dir is not None and vis_count < vis_samples:
+            B = front_view.shape[0]
+            for i in range(B):
+                if vis_count >= vis_samples:
+                    break
+                save_path = vis_dir / f'{prompt_type}_{vis_count:04d}.png'
+                visualize_batch_sample(batch, outputs, i, img_size, save_path, prompt_type=prompt_type)
+                vis_count += 1
     
     num_batches = len(dataloader)
     avg_losses = {k: v / num_batches for k, v in total_losses.items()}
@@ -158,8 +205,8 @@ def evaluate(model, dataloader, criterion, device, prompt_type='point'):
         diag_iou = torch.diag(iou_matrix)
         
         metrics['mean_iou'] = diag_iou.mean().item()
+        metrics['iou@0.25'] = (diag_iou >= 0.25).float().mean().item()
         metrics['iou@0.5'] = (diag_iou >= 0.5).float().mean().item()
-        metrics['iou@0.75'] = (diag_iou >= 0.75).float().mean().item()
         
         # BBox L1 error
         bbox_l1 = (pred_boxes - target_boxes).abs().mean().item()
@@ -189,8 +236,9 @@ def main():
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
     
     cfg = load_config(args.config)
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f'Using device: {device}')
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    num_gpus = torch.cuda.device_count()
+    print(f'Using {num_gpus} GPU(s): {args.gpu}')
     
     # Data
     data_json = args.data_json or cfg['data']['val_json']
@@ -217,12 +265,18 @@ def main():
     total_params = sum(p.numel() for p in model.parameters())
     print(f'Model parameters: {total_params/1e6:.1f}M')
     
+    # Multi-GPU DataParallel
+    if num_gpus > 1:
+        model = nn.DataParallel(model)
+        print(f'Using DataParallel on {num_gpus} GPUs')
+    
     # Criterion
     criterion = DETRCriterion(
         weight_bbox=cfg['training'].get('weight_bbox', 5.0),
         weight_giou=cfg['training'].get('weight_giou', 2.0),
         weight_heatmap=cfg['training'].get('weight_heatmap', 1.0),
         weight_rotation=cfg['training'].get('weight_rotation', 1.0),
+        weight_contrastive=cfg['training'].get('weight_contrastive', 0.1),
         img_size=cfg['data']['img_size'],
     )
     
@@ -235,7 +289,16 @@ def main():
         print(f'Evaluating with {prompt_type.upper()} prompt')
         print('='*50)
         
-        avg_losses, metrics = evaluate(model, dataloader, criterion, device, prompt_type=prompt_type)
+        # Setup visualization directory
+        vis_dir = None
+        if args.vis_samples > 0:
+            vis_dir = Path(args.output_dir) / 'vis' / prompt_type
+            vis_dir.mkdir(parents=True, exist_ok=True)
+        
+        avg_losses, metrics = evaluate(
+            model, dataloader, criterion, device, prompt_type=prompt_type,
+            vis_dir=vis_dir, vis_samples=args.vis_samples, img_size=cfg['data']['img_size'],
+        )
         
         print('\nLosses:')
         for k, v in avg_losses.items():
@@ -258,7 +321,7 @@ def main():
     print('-' * 66)
     
     # Compare key metrics
-    key_metrics = ['mean_iou', 'iou@0.5', 'mean_position_error', 'mean_rotation_error_deg']
+    key_metrics = ['mean_iou', 'iou@0.25', 'iou@0.5', 'mean_position_error', 'mean_rotation_error_deg']
     for metric in key_metrics:
         if metric in all_results['point']['metrics']:
             values = [all_results[pt]['metrics'].get(metric, 0) for pt in prompt_types]

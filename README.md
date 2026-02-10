@@ -110,9 +110,9 @@ Inputs:
   - Location Queries: 在卫星视图上定位 camera position                                         
 BBox Head: MLP → [cx, cy, w, h] 归一化坐标               
 Heatmap Head: Dot Product → [H, W] 概率分布              
-Camera Head: MLP → yaw angle (radians)                   
+Camera Head: MLP → pose (radians)                   
 
-输出: pred_boxes, heatmap, yaw_radians
+输出: pred_boxes, heatmap, pose
 
 
 Step 6: contrative learning 
