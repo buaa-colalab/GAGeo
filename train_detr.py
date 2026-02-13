@@ -54,11 +54,19 @@ def train_one_epoch(
     accelerator: Accelerator,
     epoch: int,
     cfg: dict,
+    global_step: int = 0,
 ):
-    """Train for one epoch."""
+    """Train for one epoch with step-level TensorBoard logging."""
     model.train()
     
     total_losses = {}
+    log_freq = cfg['logging'].get('log_freq', 50)
+    img_size = cfg['data']['img_size']
+    
+    # Running window for step-level TensorBoard logging
+    running_losses = {}
+    running_count = 0
+    
     pbar = tqdm(dataloader, desc=f'Epoch {epoch}', disable=not accelerator.is_main_process)
     
     for batch_idx, batch in enumerate(pbar):
@@ -97,20 +105,52 @@ def train_one_epoch(
                 accelerator.clip_grad_norm_(model.parameters(), cfg['training']['grad_clip'])
             
             optimizer.step()
-            scheduler.step()
             optimizer.zero_grad()
         
-        # Accumulate losses
+        # FIX: scheduler.step() must be called ONLY after actual optimizer updates,
+        # not on every micro-batch. accelerator.accumulate() skips optimizer.step()
+        # and zero_grad() on non-sync steps, but does NOT skip scheduler.step().
+        if accelerator.sync_gradients:
+            scheduler.step()
+            global_step += 1
+        
+        # Accumulate losses for epoch-level average
         for k, v in losses.items():
             if k not in total_losses:
                 total_losses[k] = 0.0
             total_losses[k] += v.item() if isinstance(v, torch.Tensor) else v
         
+        # --- Step-level TensorBoard logging ---
+        running_count += 1
+        for k, v in losses.items():
+            val = v.item() if isinstance(v, torch.Tensor) else v
+            running_losses[k] = running_losses.get(k, 0.0) + val
+        
+        # Derived metrics: position error in pixels
+        if 'pos_error' in losses:
+            pe = losses['pos_error']
+            pe_val = pe.item() if isinstance(pe, torch.Tensor) else pe
+            running_losses['pos_error_px'] = running_losses.get('pos_error_px', 0.0) + pe_val * img_size
+        
+        # Log to TensorBoard every log_freq optimizer steps
+        if accelerator.sync_gradients and global_step % log_freq == 0 and global_step > 0:
+            log_dict = {}
+            for k, v in running_losses.items():
+                log_dict[f"train_step/{k}"] = v / max(running_count, 1)
+            # Learning rates
+            log_dict["train_step/lr_backbone"] = optimizer.param_groups[0]['lr']
+            if len(optimizer.param_groups) > 1:
+                log_dict["train_step/lr_heads"] = optimizer.param_groups[-1]['lr']
+            log_dict["train_step/epoch"] = epoch
+            accelerator.log(log_dict, step=global_step)
+            running_losses = {}
+            running_count = 0
+        
         # Update progress bar with all losses
         if accelerator.is_main_process:
             postfix = {}
             for k, v in losses.items():
-                if k.startswith('loss') or k == 'rotation_error_deg':
+                if k.startswith('loss') or k in ('rotation_error_deg', 'bbox_iou', 'pos_error'):
                     val = v.item() if isinstance(v, torch.Tensor) else v
                     postfix[k.replace('loss_', '')] = f'{val:.4f}'
             pbar.set_postfix(postfix)
@@ -118,10 +158,10 @@ def train_one_epoch(
     # Average losses
     avg_losses = {k: v / len(dataloader) for k, v in total_losses.items()}
     
-    # Log
+    # Log epoch-level summary
     accelerator.log({f"train/{k}": v for k, v in avg_losses.items()}, step=epoch)
     
-    return avg_losses
+    return avg_losses, global_step
 
 
 @torch.no_grad()
@@ -281,6 +321,9 @@ def main():
     model = build_cross_view_localizer_pi3(
         pretrained_pi3=cfg['model'].get('pi3_weights'),
         freeze_backbone=False,  # We'll freeze selectively below
+        freeze_prompt_encoder=cfg['model'].get('freeze_prompt_encoder', True),
+        load_camera_head_weights=cfg['model'].get('load_camera_head_weights', True),
+        sam_weights=cfg['model'].get('sam_weights'),
         img_size=cfg['data']['img_size'],
         decoder_size=cfg['model'].get('decoder_size', 'large'),
         num_intent_queries=cfg['model'].get('num_intent_queries', 32),
@@ -295,6 +338,7 @@ def main():
         contrastive_queue_size=cfg['model'].get('contrastive_queue_size', 16384),
         contrastive_momentum=cfg['model'].get('contrastive_momentum', 0.999),
         contrastive_temperature=cfg['model'].get('contrastive_temperature', 0.07),
+        sam_embed_dim=cfg['model'].get('sam_embed_dim'),
     )
     
     if cfg['model'].get('pi3_weights'):
@@ -305,6 +349,10 @@ def main():
         for param in model.backbone.encoder.parameters():
             param.requires_grad = False
         accelerator.print('Froze DINOv2 encoder')
+    
+    # Log prompt encoder freeze status
+    if cfg['model'].get('freeze_prompt_encoder', True) and accelerator.is_main_process:
+        print('Froze SAM Prompt Encoder')
     
     # Optionally freeze Pi3 decoder
     if cfg['model'].get('freeze_decoder', False):
@@ -322,8 +370,15 @@ def main():
         weight_giou=cfg['training']['weight_giou'],
         weight_heatmap=cfg['training']['weight_heatmap'],
         weight_rotation=cfg['training'].get('weight_rotation', 1.0),
-        weight_contrastive=cfg['training'].get('weight_contrastive', 0.1),
+        weight_contrastive=cfg['training'].get('weight_contrastive', 0.05),
         img_size=cfg['data']['img_size'],
+        matcher_cost_class=cfg['training'].get('matcher_cost_class', 1.0),
+        matcher_cost_bbox=cfg['training'].get('matcher_cost_bbox', 5.0),
+        matcher_cost_giou=cfg['training'].get('matcher_cost_giou', 2.0),
+        heatmap_sigma=cfg['training'].get('heatmap_sigma', 0.05),
+        heatmap_label_smooth=cfg['training'].get('heatmap_label_smooth', 0.01),
+        weight_class=cfg['training'].get('weight_class', 2.0),
+        smooth_rotation=cfg['training'].get('smooth_rotation', True),
     )
     
     # Create optimizer
@@ -334,6 +389,14 @@ def main():
         weight_decay=cfg['training']['weight_decay'],
     )
     optimizer = AdamW(param_groups)
+
+    if accelerator.is_main_process:
+        accelerator.print(f"Optimizer param groups (before prepare): {len(optimizer.param_groups)}")
+        for i, pg in enumerate(optimizer.param_groups):
+            accelerator.print(
+                f"  group[{i}] lr={pg['lr']:.2e}, weight_decay={pg.get('weight_decay', 0.0):.2e}, "
+                f"num_tensors={len(pg['params'])}"
+            )
     
     # Prepare with Accelerator
     model, optimizer, train_loader, val_loader = accelerator.prepare(
@@ -343,8 +406,16 @@ def main():
     # Create scheduler
     num_epochs = cfg['training']['num_epochs']
     warmup_epochs = cfg['training']['warmup_epochs']
-    num_training_steps = len(train_loader) * num_epochs
-    num_warmup_steps = len(train_loader) * warmup_epochs
+    grad_accum_steps = cfg['training'].get('gradient_accumulation_steps', 1)
+    
+    # FIX: scheduler steps = actual optimizer steps, not micro-batch steps
+    # With gradient accumulation, optimizer updates once every grad_accum_steps batches
+    steps_per_epoch = len(train_loader) // grad_accum_steps
+    num_training_steps = steps_per_epoch * num_epochs
+    num_warmup_steps = steps_per_epoch * warmup_epochs
+    
+    accelerator.print(f'Scheduler: {num_training_steps} total steps, {num_warmup_steps} warmup steps '
+                       f'({steps_per_epoch} steps/epoch, accumulation={grad_accum_steps})')
     
     scheduler = get_scheduler(
         name="cosine",
@@ -352,11 +423,17 @@ def main():
         num_warmup_steps=num_warmup_steps,
         num_training_steps=num_training_steps,
     )
-    scheduler = accelerator.prepare(scheduler)
-    
+    # Note: HF warmup scheduler sets lr to 0 at step=0, then ramps to initial_lr.
+    if accelerator.is_main_process:
+        accelerator.print(f"Optimizer param groups (after scheduler init): {len(optimizer.param_groups)}")
+        for i, pg in enumerate(optimizer.param_groups):
+            accelerator.print(
+                f"  group[{i}] lr={pg['lr']:.2e}, initial_lr={pg.get('initial_lr', pg['lr']):.2e}"
+            )
     # Resume
     start_epoch = 0
     best_loss = float('inf')
+    resume_global_step = 0
     if cfg['checkpoint'].get('resume'):
         accelerator.print(f'Resuming from {cfg["checkpoint"]["resume"]}')
         accelerator.load_state(cfg['checkpoint']['resume'])
@@ -365,16 +442,24 @@ def main():
             training_state = torch.load(ckpt_path / 'training_state.pt', map_location='cpu')
             start_epoch = training_state.get('epoch', 0) + 1
             best_loss = training_state.get('best_loss', float('inf'))
-        accelerator.print(f'Resumed from epoch {start_epoch}')
+            resume_global_step = training_state.get('global_step', 0)
+        accelerator.print(f'Resumed from epoch {start_epoch}, global_step {resume_global_step}')
     
     # Training loop
+    global_step = resume_global_step
     for epoch in range(start_epoch, num_epochs):
         accelerator.print(f'\n{"="*50}')
         accelerator.print(f'Epoch {epoch}/{num_epochs}, LR: {optimizer.param_groups[0]["lr"]:.2e}')
         
+        # Log current LR for all param groups
+        if accelerator.is_main_process:
+            for i, pg in enumerate(optimizer.param_groups):
+                accelerator.print(f'  param_group[{i}] lr={pg["lr"]:.2e}')
+        
         # Train
-        train_losses = train_one_epoch(
-            model, train_loader, criterion, optimizer, scheduler, accelerator, epoch, cfg
+        train_losses, global_step = train_one_epoch(
+            model, train_loader, criterion, optimizer, scheduler, accelerator, epoch, cfg,
+            global_step=global_step,
         )
         accelerator.print(f'Train - ' + ', '.join([f'{k}: {v:.4f}' for k, v in train_losses.items()]))
         
@@ -400,6 +485,7 @@ def main():
                         'epoch': epoch,
                         'best_loss': best_loss,
                         'val_losses': val_losses,
+                        'global_step': global_step,
                     }, output_dir / 'best' / 'training_state.pt')
                     accelerator.print(f'Saved best model (loss: {best_loss:.4f})')
         
@@ -411,6 +497,7 @@ def main():
                 torch.save({
                     'epoch': epoch,
                     'best_loss': best_loss,
+                    'global_step': global_step,
                 }, save_dir / 'training_state.pt')
     
     accelerator.end_training()

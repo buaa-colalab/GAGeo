@@ -27,6 +27,12 @@ model:
   pi3_weights: "/shared3/data/xhj/location/ckpt/pi3/model.safetensors"
   freeze_dinov2: true
   freeze_decoder: false
+  freeze_prompt_encoder: true
+  load_camera_head_weights: true
+  
+  # SAM2 预训练权重
+  sam_weights: "/data/home/scxi704/run/sam2/checkpoints/sam2.1_hiera_large.pt"
+  sam_embed_dim: 256
 
 training:
   batch_size: 1
@@ -42,6 +48,14 @@ training:
   weight_giou: 2.0
   weight_heatmap: 1.0
   weight_rotation: 1.0
+  weight_contrastive: 0.05
+  weight_class: 2.0
+  smooth_rotation: true
+  heatmap_sigma: 0.05
+  heatmap_label_smooth: 0.01
+  matcher_cost_class: 1.0
+  matcher_cost_bbox: 5.0
+  matcher_cost_giou: 2.0
   
   optimizer: "adamw"
   scheduler: "cosine"
@@ -60,6 +74,7 @@ checkpoint:
   resume: null
 
 logging:
+  log_freq: 10  # 过拟合测试用更高频率
   val_freq: 1
   use_tensorboard: true
   

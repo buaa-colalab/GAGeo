@@ -166,17 +166,24 @@ def get_param_groups(
         if not param.requires_grad:
             continue
         
-        if name.startswith('vggt.'):
+        # Pi3 model uses `backbone.*`; keep `vggt.*` for backward compatibility
+        if name.startswith('backbone.') or name.startswith('vggt.'):
             backbone_params.append(param)
         else:
             head_params.append(param)
-    
-    param_groups = [
-        {'params': backbone_params, 'lr': lr_backbone, 'weight_decay': weight_decay},
-        {'params': head_params, 'lr': lr_heads, 'weight_decay': weight_decay},
-    ]
-    
-    logger.info(f"Param groups: backbone ({len(backbone_params)} params, lr={lr_backbone}), "
-                f"heads ({len(head_params)} params, lr={lr_heads})")
+
+    # Avoid empty param groups (some optimizers/engines may collapse groups)
+    param_groups = []
+    if len(backbone_params) > 0:
+        param_groups.append({'params': backbone_params, 'lr': lr_backbone, 'weight_decay': weight_decay})
+    if len(head_params) > 0:
+        param_groups.append({'params': head_params, 'lr': lr_heads, 'weight_decay': weight_decay})
+
+    num_backbone = sum(p.numel() for p in backbone_params)
+    num_heads = sum(p.numel() for p in head_params)
+    logger.info(
+        f"Param groups: backbone ({num_backbone/1e6:.2f}M params, lr={lr_backbone}), "
+        f"heads ({num_heads/1e6:.2f}M params, lr={lr_heads}), groups={len(param_groups)}"
+    )
     
     return param_groups

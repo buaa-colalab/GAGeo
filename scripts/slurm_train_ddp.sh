@@ -48,7 +48,7 @@ mkdir -p logs
 # Run training with torchrun
 torchrun \
     --nproc_per_node=$NUM_GPUS \
-    train.py \
+    train_ddp.py \
     --config $CONFIG
 
 echo "Training completed!"

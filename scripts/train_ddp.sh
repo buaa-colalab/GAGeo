@@ -5,6 +5,10 @@
 
 set -e
 
+# Activate conda filtre environment
+source ~/run/miniconda3/bin/activate
+conda activate filtre
+
 CONFIG=${1:-"configs/test.yaml"}
 GPU_IDS=${2:-"5,6,7"}
 
@@ -27,6 +31,6 @@ export OMP_NUM_THREADS=4
 MASTER_PORT=$((29500 + RANDOM % 1000))
 echo "Using master port: $MASTER_PORT"
 
-torchrun --nproc_per_node=$NUM_GPUS --master_port=$MASTER_PORT train.py --config $CONFIG
+torchrun --nproc_per_node=$NUM_GPUS --master_port=$MASTER_PORT train_ddp.py --config $CONFIG
 
 echo "Training completed!"

@@ -4,6 +4,10 @@
 
 set -e
 
+# Activate conda filtre environment
+source ~/run/miniconda3/bin/activate
+conda activate filtre
+
 CONFIG=${1:-"configs/test.yaml"}
 GPU_ID=${2:-"5,6,7"}
 NUM_GPUS=$(echo $GPU_ID | tr ',' '\n' | wc -l)
@@ -25,10 +29,10 @@ MASTER_PORT=$((29500 + RANDOM % 1000))
 
 if [ $NUM_GPUS -eq 1 ]; then
     # Single GPU training
-    python train.py --config $CONFIG
+    python train_ddp.py --config $CONFIG
 else
     # Multi-GPU DDP training
-    torchrun --nproc_per_node=$NUM_GPUS --master_port=$MASTER_PORT train.py --config $CONFIG
+    torchrun --nproc_per_node=$NUM_GPUS --master_port=$MASTER_PORT train_ddp.py --config $CONFIG
 fi
 
 echo "Training completed!"

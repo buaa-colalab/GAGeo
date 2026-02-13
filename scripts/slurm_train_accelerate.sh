@@ -34,7 +34,8 @@ module load cuda
 export HF_HOME="/data/run01/scxi704/xhj/.cache/huggingface"
 export TORCH_HOME="/data/run01/scxi704/xhj/.cache/torch"
 export TMPDIR="/data/run01/scxi704/xhj/.cache/tmp"
-mkdir -p $HF_HOME $TORCH_HOME $TMPDIR
+export TRITON_CACHE_DIR="/data/run01/scxi704/xhj/.cache/triton"
+mkdir -p $HF_HOME $TORCH_HOME $TMPDIR $TRITON_CACHE_DIR
 
 # Configuration
 TRAINING_CONFIG=${1:-"configs/default.yaml"}

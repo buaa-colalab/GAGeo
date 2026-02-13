@@ -32,7 +32,7 @@ class CrossViewDataset(Dataset):
         "sat_filename": "...",
         "sate_bbox": [x, y, w, h],
         "sate_segmentation": [...],
-        "relative_yaw": yaw_degrees,
+        "rotation": yaw_degrees,
         "camera_position": [x, y]  # 相机在卫星图中的位置
     }
     """
@@ -105,9 +105,13 @@ class CrossViewDataset(Dataset):
         
         # 相机位置和角度 (all in radians)
         camera_position = np.array(item.get('camera_position', [self.sat_size/2, self.sat_size/2]), dtype=np.float32)
-        yaw = np.deg2rad(float(item['relative_yaw']))
-        pitch = np.deg2rad(float(item.get('relative_pitch', 90.0)))  # 默认地面-卫星=90°
-        roll = np.deg2rad(float(item.get('relative_roll', 0.0)))
+        yaw = np.deg2rad(float(item['rotation']))
+        if 'drone' in item['mono_filename']:
+            pitch = np.deg2rad(float(item.get('relative_pitch', 45.0)))  # 默认地面-卫星=90°
+            roll = np.deg2rad(float(item.get('relative_roll', 0.0)))
+        else:
+            pitch = np.deg2rad(float(item.get('relative_pitch', 90.0)))
+            roll = np.deg2rad(float(item.get('relative_roll', 0.0)))
         
         # 构造target rotation matrix (ZYX convention)
         rotation_matrix = self._euler_to_rotation_matrix(yaw, pitch, roll)

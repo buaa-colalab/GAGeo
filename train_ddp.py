@@ -358,6 +358,8 @@ def main():
     model = build_cross_view_localizer_pi3(
         pretrained_pi3=cfg['model'].get('pi3_weights'),
         freeze_backbone=False,  # We'll freeze selectively below
+        freeze_prompt_encoder=cfg['model'].get('freeze_prompt_encoder', True),
+        load_camera_head_weights=cfg['model'].get('load_camera_head_weights', True),
         img_size=cfg['data']['img_size'],
         decoder_size=cfg['model'].get('decoder_size', 'large'),
         num_intent_queries=cfg['model'].get('num_intent_queries', 32),
@@ -392,6 +394,10 @@ def main():
         if is_main_process:
             print('Froze Pi3 decoder')
     
+    # Log prompt encoder freeze status
+    if cfg['model'].get('freeze_prompt_encoder', True) and is_main_process:
+        print('Froze SAM Prompt Encoder')
+    
     # Wrap with DDP
     if is_distributed:
         model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
@@ -409,6 +415,9 @@ def main():
         weight_rotation=cfg['training'].get('weight_rotation', 1.0),
         weight_contrastive=cfg['training'].get('weight_contrastive', 0.1),
         img_size=cfg['data']['img_size'],
+        matcher_cost_class=cfg['training'].get('matcher_cost_class', 1.0),
+        matcher_cost_bbox=cfg['training'].get('matcher_cost_bbox', 5.0),
+        matcher_cost_giou=cfg['training'].get('matcher_cost_giou', 2.0),
     )
     
     # Create optimizer with different LR for backbone and heads

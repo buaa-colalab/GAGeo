@@ -10,7 +10,7 @@ import torch.nn as nn
 from typing import Dict, Optional, Tuple
 
 from .backbone import Pi3Backbone, load_pi3_weights
-from .encoder import GeometryPromptEncoder, PromptFusionWithDense
+from .encoder import GeometryPromptEncoder, PromptFusionWithDense, SAMStylePromptFusion
 from .decoder import UnifiedQueryDecoder
 from .heads import BBoxHead, HeatmapHead, Pi3CameraHead, CrossViewContrastiveHead
 
@@ -59,6 +59,7 @@ class CrossViewLocalizerPi3(nn.Module):
         contrastive_queue_size: int = 16384,
         contrastive_momentum: float = 0.999,
         contrastive_temperature: float = 0.07,
+        sam_embed_dim: int = None,
     ):
         super().__init__()
         
@@ -85,15 +86,17 @@ class CrossViewLocalizerPi3(nn.Module):
             image_embedding_size=(self.num_patches_per_side, self.num_patches_per_side),
             input_image_size=(img_size, img_size),
             mask_in_chans=16,
+            sam_embed_dim=sam_embed_dim,
         )
         
-        # ============ 3. Two-Stage Cross-Attention Prompt Fusion ============
-        self.prompt_fusion = PromptFusionWithDense(
+        # ============ 3. SAM-style Prompt Fusion (bidirectional cross-attention) ============
+        self.prompt_fusion = SAMStylePromptFusion(
             embedding_dim=self.output_dim,
-            num_intent_queries=num_intent_queries,
             num_heads=num_heads,
-            num_layers=prompt_fusion_layers,
+            depth=prompt_fusion_layers,
+            mlp_dim=self.output_dim,
             image_embedding_size=(self.num_patches_per_side, self.num_patches_per_side),
+            attention_downsample_rate=2,
             dropout=dropout,
         )
         
@@ -144,6 +147,13 @@ class CrossViewLocalizerPi3(nn.Module):
     def _freeze_backbone(self):
         """Freeze Pi3 backbone."""
         for param in self.backbone.parameters():
+            param.requires_grad = False
+    
+    def _freeze_prompt_encoder(self):
+        """Freeze SAM prompt encoder (keep projection layers trainable if they exist)."""
+        for name, param in self.prompt_encoder.named_parameters():
+            if 'sparse_proj' in name or 'dense_proj' in name:
+                continue  # Keep projection layers trainable
             param.requires_grad = False
     
     def unfreeze_backbone(self):
@@ -205,8 +215,9 @@ class CrossViewLocalizerPi3(nn.Module):
         )
         sparse_embeddings = sparse_embeddings.to(target_dtype)
         dense_embeddings = dense_embeddings.to(target_dtype)
-        # ============ Step 3: Two-Stage Cross-Attention Prompt Fusion ============
-        # Stage 1: Intent Formation - extract target intent from front-view
+        # ============ Step 3: SAM-style Prompt Fusion ============
+        # Bidirectional cross-attention: prompt tokens <-> front-view features
+        # Output: prompt-conditioned front-view features (replaces intent_features)
         dense_for_fusion = dense_embeddings if masks is not None else None
         intent_features = self.prompt_fusion(
             image_features=front_patch_features,
@@ -215,7 +226,7 @@ class CrossViewLocalizerPi3(nn.Module):
         )
         
         # ============ Step 4: Unified Query Decoder ============
-        # Stage 2: View Conditioning - queries + intent cross-attend to satellite
+        # Queries + prompt-conditioned front features cross-attend to satellite
         decoder_outputs = self.query_decoder(
             memory=sat_patch_features,
             intent_features=intent_features,
@@ -250,9 +261,10 @@ class CrossViewLocalizerPi3(nn.Module):
         
         # ============ Combine Outputs ============
         result = {
-            # BBox detection
+            # BBox detection (include class_logits for Hungarian matching)
             'pred_boxes': bbox_outputs['pred_boxes'],
             'bbox_scores': bbox_outputs['bbox_scores'],
+            'class_logits': bbox_outputs['class_logits'],
             
             # Camera position
             'heatmap': heatmap_outputs['heatmap'],
@@ -281,6 +293,9 @@ class CrossViewLocalizerPi3(nn.Module):
 def build_cross_view_localizer_pi3(
     pretrained_pi3: Optional[str] = None,
     freeze_backbone: bool = True,
+    freeze_prompt_encoder: bool = True,
+    load_camera_head_weights: bool = True,
+    sam_weights: Optional[str] = None,
     **kwargs
 ) -> CrossViewLocalizerPi3:
     """
@@ -289,6 +304,9 @@ def build_cross_view_localizer_pi3(
     Args:
         pretrained_pi3: Path to pretrained Pi3 checkpoint
         freeze_backbone: Whether to freeze Pi3 backbone
+        freeze_prompt_encoder: Whether to freeze SAM prompt encoder
+        load_camera_head_weights: Whether to load camera head weights from Pi3 checkpoint
+        sam_weights: Path to SAM2 checkpoint for prompt encoder weights
         **kwargs: Additional arguments for CrossViewLocalizerPi3
     
     Returns:
@@ -298,6 +316,61 @@ def build_cross_view_localizer_pi3(
     
     if pretrained_pi3 is not None:
         load_pi3_weights(model.backbone, pretrained_pi3, strict=False)
+        
+        # Load camera head weights from Pi3 checkpoint
+        if load_camera_head_weights:
+            _load_camera_head_from_pi3(model.camera_head, pretrained_pi3)
+    
+    # Load SAM2 pretrained weights into prompt encoder
+    if sam_weights is not None:
+        from .encoder.prompt_encoder import load_sam_prompt_encoder_weights
+        load_sam_prompt_encoder_weights(model.prompt_encoder, sam_weights)
+    
+    if freeze_prompt_encoder:
+        model._freeze_prompt_encoder()
     
     return model
+
+
+def _load_camera_head_from_pi3(camera_head, checkpoint_path: str):
+    """
+    Load camera_decoder and camera_head weights from Pi3 checkpoint.
+    
+    Pi3 checkpoint keys:
+        camera_decoder.* -> maps to Pi3CameraHead.camera_decoder.*
+        camera_head.*    -> maps to Pi3CameraHead.camera_head.*
+    
+    Args:
+        camera_head: Pi3CameraHead module
+        checkpoint_path: Path to Pi3 checkpoint (.safetensors or .pt)
+    """
+    if checkpoint_path.endswith('.safetensors'):
+        from safetensors.torch import load_file
+        state_dict = load_file(checkpoint_path)
+    else:
+        import torch as _torch
+        state_dict = _torch.load(checkpoint_path, map_location='cpu')
+        if 'model' in state_dict:
+            state_dict = state_dict['model']
+        elif 'state_dict' in state_dict:
+            state_dict = state_dict['state_dict']
+    
+    # Filter keys: camera_decoder.* and camera_head.*
+    camera_state_dict = {}
+    for k, v in state_dict.items():
+        if k.startswith('camera_decoder.') or k.startswith('camera_head.'):
+            camera_state_dict[k] = v
+    
+    if not camera_state_dict:
+        print(f"  WARNING: No camera_decoder/camera_head keys found in {checkpoint_path}")
+        return
+    
+    missing, unexpected = camera_head.load_state_dict(camera_state_dict, strict=False)
+    
+    print(f"Loaded Pi3 camera head weights from {checkpoint_path}")
+    print(f"  Loaded keys: {len(camera_state_dict)}")
+    if missing:
+        print(f"  Missing keys: {len(missing)} - {missing[:5]}...")
+    if unexpected:
+        print(f"  Unexpected keys: {len(unexpected)}")
 

@@ -3,15 +3,15 @@
 # Data
 data:
   #train_json: "/data/xhj/location/data/single.json"
-  train_json: "/shared3/data/xhj/location/data/train_all.json"
+  train_json: "/data/home/scxi704/run/xhj/location/data/train_all.json"
   #val_json: "/data/xhj/location/data/single.json"
-  val_json: "/shared3/data/xhj/location/data/val_all.json"
-  data_root: "/shared3/data/xhj/data/"
+  val_json: "/data/home/scxi704/run/xhj/location/data/val_all.json"
+  data_root: "/data/home/scxi704/run/xhj/data/"
   img_size: 518
   crop_size: 518
-  num_workers: 1  # Reduced from 4 to prevent thread exhaustion with 8 GPUs
-  train_direction: 'both'  # 'mono_to_sat', 'sat_to_mono', 'both' for bidirectional training
-  val_direction: 'both'  # 'mono_to_sat', 'sat_to_mono', 'both' for bidirectional training
+  num_workers: 24  # Reduced from 4 to prevent thread exhaustion with 8 GPUs
+  train_direction: 'mono_to_sat'  # 'mono_to_sat', 'sat_to_mono', 'both' for bidirectional training
+  val_direction: 'mono_to_sat'  # 'mono_to_sat', 'sat_to_mono', 'both' for bidirectional training
 
 # Model
 model:
@@ -30,9 +30,15 @@ model:
   dropout: 0.1  # Dropout rate
   
   # Pi3 预训练权重
-  pi3_weights: "/shared3/data/xhj/location/ckpt/pi3/model.safetensors"
+  pi3_weights: "/data/home/scxi704/run/xhj/location/ckpt/pi3/model.safetensors"
   freeze_dinov2: true  # 冻结DINOv2 encoder部分
   freeze_decoder: false  # Pi3 decoder可训练
+  freeze_prompt_encoder: true  # 冻结SAM Prompt Encoder (projection层保持可训练)
+  load_camera_head_weights: true  # 从Pi3 checkpoint加载camera head权重
+  
+  # SAM2 预训练权重 (Prompt Encoder)
+  sam_weights: "/data/home/scxi704/run/sam2/checkpoints/sam2.1_hiera_large.pt"
+  sam_embed_dim: 256  # SAM native dimension, 内部256-dim + projection到2048
   
   # 对比学习 (MoCo-style)
   contrastive: true
@@ -55,9 +61,22 @@ training:
   # Loss权重
   weight_bbox: 5.0
   weight_giou: 2.0
-  weight_heatmap: 1.0
-  weight_rotation: 1.0  # geodesic distance on SO(3)
-  weight_contrastive: 0.1  # MoCo cross-view contrastive loss
+  weight_heatmap: 0.05
+  weight_rotation: 0.05  # geodesic distance on SO(3)
+  weight_contrastive: 0.05  # MoCo cross-view contrastive loss (降低以减少epoch边界跳变)
+  weight_class: 2.0  # Focal loss for object vs no-object classification
+  
+  # Heatmap Loss 参数
+  heatmap_sigma: 0.05  # Gaussian sigma (0.05 = ~77px on 518, 比0.02更稳定)
+  heatmap_label_smooth: 0.01  # Label smoothing 防止KL散度爆炸
+  
+  # Rotation Loss
+  smooth_rotation: true  # 使用1-cos(angle)替代arccos, 避免梯度爆炸
+  
+  # Hungarian Matcher 代价权重
+  matcher_cost_class: 1.0
+  matcher_cost_bbox: 5.0
+  matcher_cost_giou: 2.0
   
   # Optimizer
   optimizer: "adamw"
@@ -73,16 +92,17 @@ training:
   # 混合精度训练 (推荐bf16用于RTX 4090)
   use_amp: true
   mixed_precision: bf16  # "bf16" or "fp16"
-  gpu: "0,1,2,3"
+  gpu: "0,1,2,3,4,5,6,7"  # 使用所有8张GPU
 
 # Checkpointing
 checkpoint:
-  output_dir: "/shared3/data/xhj/location/output"  # 绝对路径，避免写到有配额限制的home目录
+  output_dir: "/data/home/scxi704/run/xhj/location/output"  # 绝对路径，避免写到有配额限制的home目录
   save_freq: 5
   resume: null
 
 # Logging
 logging:
+  log_freq: 50  # 每N个optimizer step记录一次TensorBoard (step-level曲线)
   val_freq: 1  # 每N个epoch验证一次
   use_tensorboard: true
   
