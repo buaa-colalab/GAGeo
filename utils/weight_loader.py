@@ -155,35 +155,60 @@ def get_param_groups(
     lr_backbone: float = 1e-5,
     lr_heads: float = 1e-4,
     weight_decay: float = 0.01,
+    lr_new_tokens: float = None,
 ) -> list:
     """
     Get parameter groups with different learning rates.
+    
+    V2 (3-group strategy):
+    - backbone: Pi3 encoder + decoder (pretrained, low LR)
+    - new_tokens: learnable queries, intermediate projections, prompt encoder projections (mid LR)
+    - heads: task heads, intermediate supervision heads (high LR)
+    
+    Falls back to 2-group (backbone + heads) if lr_new_tokens is None.
     """
+    # Patterns for "new token" parameters in V2 backbone
+    NEW_TOKEN_PATTERNS = (
+        'backbone.learnable_queries',
+        'backbone.intermediate_projs.',
+        'backbone.prompt_proj.',
+        'prompt_encoder.sparse_proj',
+        'prompt_encoder.dense_proj',
+    )
+    
     backbone_params = []
+    new_token_params = []
     head_params = []
     
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
         
-        # Pi3 model uses `backbone.*`; keep `vggt.*` for backward compatibility
-        if name.startswith('backbone.') or name.startswith('vggt.'):
+        # Check new-token patterns first (they live inside backbone.*)
+        if lr_new_tokens is not None and any(name.startswith(pat) or ('.' + pat) in name for pat in NEW_TOKEN_PATTERNS):
+            new_token_params.append(param)
+        elif name.startswith('backbone.') or name.startswith('vggt.'):
             backbone_params.append(param)
         else:
             head_params.append(param)
 
-    # Avoid empty param groups (some optimizers/engines may collapse groups)
+    # Build param groups (skip empty groups)
     param_groups = []
     if len(backbone_params) > 0:
         param_groups.append({'params': backbone_params, 'lr': lr_backbone, 'weight_decay': weight_decay})
+    if len(new_token_params) > 0 and lr_new_tokens is not None:
+        param_groups.append({'params': new_token_params, 'lr': lr_new_tokens, 'weight_decay': weight_decay})
     if len(head_params) > 0:
         param_groups.append({'params': head_params, 'lr': lr_heads, 'weight_decay': weight_decay})
 
     num_backbone = sum(p.numel() for p in backbone_params)
+    num_new_tokens = sum(p.numel() for p in new_token_params)
     num_heads = sum(p.numel() for p in head_params)
-    logger.info(
-        f"Param groups: backbone ({num_backbone/1e6:.2f}M params, lr={lr_backbone}), "
-        f"heads ({num_heads/1e6:.2f}M params, lr={lr_heads}), groups={len(param_groups)}"
-    )
+    
+    log_parts = [f"backbone ({num_backbone/1e6:.2f}M params, lr={lr_backbone})"]
+    if lr_new_tokens is not None:
+        log_parts.append(f"new_tokens ({num_new_tokens/1e6:.2f}M params, lr={lr_new_tokens})")
+    log_parts.append(f"heads ({num_heads/1e6:.2f}M params, lr={lr_heads})")
+    logger.info(f"Param groups: {', '.join(log_parts)}, groups={len(param_groups)}")
     
     return param_groups

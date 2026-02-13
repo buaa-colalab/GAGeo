@@ -1,0 +1,506 @@
+"""
+Cross-View Localization V2 Training Script
+Unified backbone architecture with token injection, attention masks, deep supervision.
+"""
+
+import argparse
+import math
+import yaml
+from pathlib import Path
+import os
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+from torch.optim import AdamW
+from tqdm import tqdm
+from accelerate import Accelerator
+from accelerate.utils import set_seed
+from transformers import get_scheduler
+
+from models import CrossViewLocalizerV2, build_cross_view_localizer_v2
+from data import CrossViewDataset, collate_fn
+from utils.prompt_utils import prepare_random_prompt, prepare_single_prompt
+from utils import (
+    get_param_groups,
+    visualize_validation_samples,
+    box_cxcywh_to_xyxy,
+    generalized_box_iou,
+    DETRCriterionV2,
+)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='Train Cross-View Localizer V2')
+    parser.add_argument('--config', type=str, required=True,
+                        help='Path to training config file (YAML)')
+    parser.add_argument('--resume', type=str, default=None,
+                        help='Resume from checkpoint path')
+    return parser.parse_args()
+
+
+def load_config(config_path: str) -> dict:
+    with open(config_path, 'r') as f:
+        return yaml.safe_load(f)
+
+
+def train_one_epoch(
+    model: nn.Module,
+    dataloader: DataLoader,
+    criterion: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler,
+    accelerator: Accelerator,
+    epoch: int,
+    cfg: dict,
+    global_step: int = 0,
+):
+    """Train for one epoch with step-level TensorBoard logging."""
+    model.train()
+
+    total_losses = {}
+    log_freq = cfg['logging'].get('log_freq', 50)
+    img_size = cfg['data']['img_size']
+
+    running_losses = {}
+    running_count = 0
+
+    pbar = tqdm(dataloader, desc=f'Epoch {epoch}', disable=not accelerator.is_main_process)
+
+    for batch_idx, batch in enumerate(pbar):
+        with accelerator.accumulate(model):
+            front_view = batch['front_view']
+            sat_view = batch['satellite_view']
+
+            targets = {
+                'sat_bbox': batch['sat_bbox'],
+                'rotation_matrix': batch['rotation_matrix'],
+                'camera_position': batch['camera_position'],
+            }
+            # V2: Pass sat_mask as target for mask loss
+            if 'sat_mask' in batch:
+                targets['sat_mask'] = batch['sat_mask']
+
+            # Random prompt selection
+            points, boxes, masks = prepare_random_prompt(batch, accelerator.device)
+
+            # Forward
+            with accelerator.autocast():
+                outputs = model(
+                    front_view=front_view,
+                    satellite_view=sat_view,
+                    points=points,
+                    boxes=boxes,
+                    masks=masks,
+                    mono_mask=batch.get('mono_mask'),
+                    sat_mask=batch.get('sat_mask'),
+                )
+                losses = criterion(outputs, targets)
+                loss = losses['loss']
+
+            # Backward
+            accelerator.backward(loss)
+
+            if accelerator.sync_gradients:
+                accelerator.clip_grad_norm_(model.parameters(), cfg['training']['grad_clip'])
+
+            optimizer.step()
+            optimizer.zero_grad()
+
+        if accelerator.sync_gradients:
+            scheduler.step()
+            global_step += 1
+
+        # Accumulate losses
+        for k, v in losses.items():
+            if k not in total_losses:
+                total_losses[k] = 0.0
+            total_losses[k] += v.item() if isinstance(v, torch.Tensor) else v
+
+        # Running window
+        running_count += 1
+        for k, v in losses.items():
+            val = v.item() if isinstance(v, torch.Tensor) else v
+            running_losses[k] = running_losses.get(k, 0.0) + val
+
+        if 'pos_error' in losses:
+            pe = losses['pos_error']
+            pe_val = pe.item() if isinstance(pe, torch.Tensor) else pe
+            running_losses['pos_error_px'] = running_losses.get('pos_error_px', 0.0) + pe_val * img_size
+
+        # Log to TensorBoard
+        if accelerator.sync_gradients and global_step % log_freq == 0 and global_step > 0:
+            log_dict = {}
+            for k, v in running_losses.items():
+                log_dict[f"train_step/{k}"] = v / max(running_count, 1)
+            log_dict["train_step/lr_backbone"] = optimizer.param_groups[0]['lr']
+            if len(optimizer.param_groups) > 1:
+                log_dict["train_step/lr_new_tokens"] = optimizer.param_groups[1]['lr']
+            if len(optimizer.param_groups) > 2:
+                log_dict["train_step/lr_heads"] = optimizer.param_groups[2]['lr']
+            log_dict["train_step/epoch"] = epoch
+            accelerator.log(log_dict, step=global_step)
+            running_losses = {}
+            running_count = 0
+
+        # Progress bar
+        if accelerator.is_main_process:
+            postfix = {}
+            for k, v in losses.items():
+                if k.startswith('loss') or k in ('rotation_error_deg', 'bbox_iou', 'pos_error', 'mask_iou'):
+                    val = v.item() if isinstance(v, torch.Tensor) else v
+                    postfix[k.replace('loss_', '')] = f'{val:.4f}'
+            pbar.set_postfix(postfix)
+
+    avg_losses = {k: v / len(dataloader) for k, v in total_losses.items()}
+    accelerator.log({f"train/{k}": v for k, v in avg_losses.items()}, step=epoch)
+
+    return avg_losses, global_step
+
+
+@torch.no_grad()
+def validate(
+    model: nn.Module,
+    dataloader: DataLoader,
+    criterion: nn.Module,
+    accelerator: Accelerator,
+    cfg: dict,
+    epoch: int = 0,
+):
+    """Validate the model."""
+    model.eval()
+
+    total_losses = {}
+    all_pos_errors = []
+    all_rotation_errors = []
+    all_mask_ious = []
+
+    for batch in tqdm(dataloader, desc='Validation', disable=not accelerator.is_main_process):
+        front_view = batch['front_view']
+        sat_view = batch['satellite_view']
+
+        targets = {
+            'sat_bbox': batch['sat_bbox'],
+            'rotation_matrix': batch['rotation_matrix'],
+            'camera_position': batch['camera_position'],
+        }
+        if 'sat_mask' in batch:
+            targets['sat_mask'] = batch['sat_mask']
+
+        B = front_view.shape[0]
+        mono_point = batch['mono_point']
+        point_coords = mono_point.unsqueeze(1)
+        point_labels = torch.ones(B, 1, device=front_view.device)
+
+        with accelerator.autocast():
+            outputs = model(
+                front_view=front_view,
+                satellite_view=sat_view,
+                points=(point_coords, point_labels),
+                boxes=None,
+                masks=None,
+                mono_mask=batch.get('mono_mask'),
+                sat_mask=batch.get('sat_mask'),
+            )
+            losses = criterion(outputs, targets)
+
+        for k, v in losses.items():
+            if k not in total_losses:
+                total_losses[k] = 0.0
+            total_losses[k] += v.item() if isinstance(v, torch.Tensor) else v
+
+        if 'position' in outputs:
+            pos_error = (outputs['position'] - targets['camera_position']).norm(dim=-1)
+            all_pos_errors.append(pos_error)
+
+        if 'rotation_error_deg' in losses:
+            all_rotation_errors.append(torch.tensor([losses['rotation_error_deg']]))
+
+        if 'mask_iou' in losses:
+            all_mask_ious.append(torch.tensor([losses['mask_iou']]))
+
+    avg_losses = {k: v / len(dataloader) for k, v in total_losses.items()}
+
+    if all_pos_errors:
+        all_pos_errors = accelerator.gather_for_metrics(torch.cat(all_pos_errors))
+        avg_losses['pos_mae'] = all_pos_errors.mean().item()
+        avg_losses['pos_mae_pixels'] = avg_losses['pos_mae'] * cfg['data']['img_size']
+
+    if all_rotation_errors:
+        avg_losses['rotation_mae_deg'] = torch.cat(all_rotation_errors).mean().item()
+
+    if all_mask_ious:
+        avg_losses['mask_iou_avg'] = torch.cat(all_mask_ious).mean().item()
+
+    accelerator.log({f"val/{k}": v for k, v in avg_losses.items()}, step=epoch)
+
+    return avg_losses
+
+
+def main():
+    args = parse_args()
+    cfg = load_config(args.config)
+
+    if args.resume:
+        cfg['checkpoint']['resume'] = args.resume
+
+    gradient_accumulation_steps = cfg['training'].get('gradient_accumulation_steps', 1)
+    mixed_precision = cfg['training'].get('mixed_precision', 'bf16') if cfg['training'].get('use_amp', True) else "no"
+
+    output_dir = Path(cfg['checkpoint']['output_dir'])
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    accelerator = Accelerator(
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        mixed_precision=mixed_precision,
+        log_with="tensorboard" if cfg['logging'].get('use_tensorboard', True) else None,
+        project_dir=str(output_dir),
+    )
+
+    set_seed(42)
+
+    if accelerator.is_main_process:
+        with open(output_dir / 'config.yaml', 'w') as f:
+            yaml.dump(cfg, f)
+        accelerator.print(f"Output directory: {output_dir}")
+
+    if accelerator.is_main_process and cfg['logging'].get('use_tensorboard', True):
+        accelerator.init_trackers(
+            project_name="cross_view_v2",
+            config={
+                "batch_size": cfg['training']['batch_size'],
+                "num_epochs": cfg['training']['num_epochs'],
+                "lr_backbone": cfg['training']['lr_backbone'],
+                "lr_new_tokens": cfg['training'].get('lr_new_tokens', 5e-4),
+                "lr_heads": cfg['training']['lr_heads'],
+            },
+        )
+
+    # Create datasets
+    train_dataset = CrossViewDataset(
+        json_path=cfg['data']['train_json'],
+        data_root=cfg['data']['data_root'],
+        crop_size=cfg['data']['crop_size'],
+        crop_sat=True,
+    )
+
+    val_dataset = CrossViewDataset(
+        json_path=cfg['data']['val_json'],
+        data_root=cfg['data']['data_root'],
+        crop_size=cfg['data']['crop_size'],
+        crop_sat=False,
+    )
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=cfg['training']['batch_size'],
+        shuffle=True,
+        num_workers=cfg['data']['num_workers'],
+        collate_fn=collate_fn,
+        pin_memory=True,
+        drop_last=True,
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=cfg['training']['batch_size'],
+        shuffle=False,
+        num_workers=cfg['data']['num_workers'],
+        collate_fn=collate_fn,
+        pin_memory=True,
+    )
+
+    accelerator.print(f'Train: {len(train_dataset)} samples, Val: {len(val_dataset)} samples')
+
+    # ============ Create V2 Model ============
+    model = build_cross_view_localizer_v2(
+        pretrained_pi3=cfg['model'].get('pi3_weights'),
+        freeze_backbone=False,  # Freeze selectively below
+        freeze_prompt_encoder=cfg['model'].get('freeze_prompt_encoder', True),
+        load_camera_head_weights=cfg['model'].get('load_camera_head_weights', True),
+        sam_weights=cfg['model'].get('sam_weights'),
+        img_size=cfg['data']['img_size'],
+        decoder_size=cfg['model'].get('decoder_size', 'large'),
+        num_learnable_tokens=cfg['model'].get('num_learnable_tokens', 2),
+        supervision_layers=cfg['model'].get('supervision_layers', [3, 10, 16]),
+        supervision_weights=cfg['model'].get('supervision_weights', [0.1, 0.3, 0.6]),
+        dropout=cfg['model'].get('dropout', 0.1),
+        contrastive=cfg['model'].get('contrastive', True),
+        contrastive_proj_dim=cfg['model'].get('contrastive_proj_dim', 256),
+        contrastive_queue_size=cfg['model'].get('contrastive_queue_size', 16384),
+        contrastive_momentum=cfg['model'].get('contrastive_momentum', 0.999),
+        contrastive_temperature=cfg['model'].get('contrastive_temperature', 0.07),
+        sam_embed_dim=cfg['model'].get('sam_embed_dim'),
+        num_mask_tokens=cfg['model'].get('num_mask_tokens', 1),
+    )
+
+    if cfg['model'].get('pi3_weights'):
+        accelerator.print(f'Loaded Pi3 weights from {cfg["model"]["pi3_weights"]}')
+
+    # Freeze DINOv2 encoder
+    if cfg['model'].get('freeze_dinov2', True):
+        for param in model.backbone.encoder.parameters():
+            param.requires_grad = False
+        accelerator.print('Froze DINOv2 encoder')
+
+    # Freeze prompt encoder (keep projection layers)
+    if cfg['model'].get('freeze_prompt_encoder', True):
+        model._freeze_prompt_encoder()
+        accelerator.print('Froze SAM Prompt Encoder (projections trainable)')
+
+    # Freeze SAM mask downscaling conv layers
+    if cfg['model'].get('freeze_mask_conv', True):
+        for name, param in model.prompt_encoder.named_parameters():
+            if 'mask_downscaling' in name:
+                param.requires_grad = False
+        accelerator.print('Froze SAM mask downscaling conv layers')
+
+    # Optionally freeze Pi3 decoder
+    if cfg['model'].get('freeze_decoder', False):
+        for param in model.backbone.decoder.parameters():
+            param.requires_grad = False
+        accelerator.print('Froze Pi3 decoder')
+
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total = sum(p.numel() for p in model.parameters())
+    accelerator.print(f'Parameters: {total/1e6:.1f}M total, {trainable/1e6:.1f}M trainable')
+
+    # ============ Create V2 Criterion ============
+    criterion = DETRCriterionV2(
+        weight_bbox=cfg['training']['weight_bbox'],
+        weight_giou=cfg['training']['weight_giou'],
+        weight_mask_bce=cfg['training'].get('weight_mask_bce', 2.0),
+        weight_mask_dice=cfg['training'].get('weight_mask_dice', 5.0),
+        weight_heatmap=cfg['training']['weight_heatmap'],
+        weight_rotation=cfg['training'].get('weight_rotation', 0.05),
+        weight_contrastive=cfg['training'].get('weight_contrastive', 0.05),
+        weight_class=cfg['training'].get('weight_class', 2.0),
+        img_size=cfg['data']['img_size'],
+        matcher_cost_class=cfg['training'].get('matcher_cost_class', 1.0),
+        matcher_cost_bbox=cfg['training'].get('matcher_cost_bbox', 5.0),
+        matcher_cost_giou=cfg['training'].get('matcher_cost_giou', 2.0),
+        smooth_rotation=cfg['training'].get('smooth_rotation', True),
+        supervision_layers=cfg['model'].get('supervision_layers', [3, 10, 16]),
+        supervision_weights=cfg['model'].get('supervision_weights', [0.1, 0.3, 0.6]),
+    )
+
+    # ============ Create Optimizer with 3-Group LR ============
+    param_groups = get_param_groups(
+        model,
+        lr_backbone=cfg['training']['lr_backbone'],
+        lr_heads=cfg['training']['lr_heads'],
+        weight_decay=cfg['training']['weight_decay'],
+        lr_new_tokens=cfg['training'].get('lr_new_tokens'),
+    )
+    optimizer = AdamW(param_groups)
+
+    if accelerator.is_main_process:
+        accelerator.print(f"Optimizer param groups (before prepare): {len(optimizer.param_groups)}")
+        for i, pg in enumerate(optimizer.param_groups):
+            accelerator.print(
+                f"  group[{i}] lr={pg['lr']:.2e}, weight_decay={pg.get('weight_decay', 0.0):.2e}, "
+                f"num_tensors={len(pg['params'])}"
+            )
+
+    # Prepare with Accelerator
+    model, optimizer, train_loader, val_loader = accelerator.prepare(
+        model, optimizer, train_loader, val_loader
+    )
+
+    # Scheduler
+    num_epochs = cfg['training']['num_epochs']
+    warmup_epochs = cfg['training']['warmup_epochs']
+    grad_accum_steps = cfg['training'].get('gradient_accumulation_steps', 1)
+
+    steps_per_epoch = len(train_loader) // grad_accum_steps
+    num_training_steps = steps_per_epoch * num_epochs
+    num_warmup_steps = steps_per_epoch * warmup_epochs
+
+    accelerator.print(f'Scheduler: {num_training_steps} total steps, {num_warmup_steps} warmup steps '
+                       f'({steps_per_epoch} steps/epoch, accumulation={grad_accum_steps})')
+
+    scheduler = get_scheduler(
+        name="cosine",
+        optimizer=optimizer,
+        num_warmup_steps=num_warmup_steps,
+        num_training_steps=num_training_steps,
+    )
+
+    if accelerator.is_main_process:
+        accelerator.print(f"Optimizer param groups (after scheduler init): {len(optimizer.param_groups)}")
+        for i, pg in enumerate(optimizer.param_groups):
+            accelerator.print(
+                f"  group[{i}] lr={pg['lr']:.2e}, initial_lr={pg.get('initial_lr', pg['lr']):.2e}"
+            )
+
+    # Resume
+    start_epoch = 0
+    best_loss = float('inf')
+    resume_global_step = 0
+    if cfg['checkpoint'].get('resume'):
+        accelerator.print(f'Resuming from {cfg["checkpoint"]["resume"]}')
+        accelerator.load_state(cfg['checkpoint']['resume'])
+        ckpt_path = Path(cfg['checkpoint']['resume'])
+        if (ckpt_path / 'training_state.pt').exists():
+            training_state = torch.load(ckpt_path / 'training_state.pt', map_location='cpu')
+            start_epoch = training_state.get('epoch', 0) + 1
+            best_loss = training_state.get('best_loss', float('inf'))
+            resume_global_step = training_state.get('global_step', 0)
+        accelerator.print(f'Resumed from epoch {start_epoch}, global_step {resume_global_step}')
+
+    # ============ Training Loop ============
+    global_step = resume_global_step
+    for epoch in range(start_epoch, num_epochs):
+        accelerator.print(f'\n{"="*50}')
+        accelerator.print(f'Epoch {epoch}/{num_epochs}')
+
+        if accelerator.is_main_process:
+            for i, pg in enumerate(optimizer.param_groups):
+                group_name = ['backbone', 'new_tokens', 'heads'][i] if i < 3 else f'group_{i}'
+                accelerator.print(f'  {group_name} lr={pg["lr"]:.2e}')
+
+        train_losses, global_step = train_one_epoch(
+            model, train_loader, criterion, optimizer, scheduler, accelerator, epoch, cfg,
+            global_step=global_step,
+        )
+        accelerator.print(f'Train - ' + ', '.join([f'{k}: {v:.4f}' for k, v in train_losses.items()]))
+
+        if (epoch + 1) % cfg['logging']['val_freq'] == 0:
+            val_losses = validate(model, val_loader, criterion, accelerator, cfg, epoch)
+            accelerator.print(f'Val   - ' + ', '.join([f'{k}: {v:.4f}' for k, v in val_losses.items()]))
+
+            if cfg['logging'].get('visualize', True):
+                vis_prompt_types = cfg['logging'].get('vis_prompt_types', ['point'])
+                num_vis = cfg['logging'].get('vis_samples', 10)
+                for prompt_type in vis_prompt_types:
+                    visualize_validation_samples(model, val_loader, accelerator, cfg, epoch,
+                                                num_samples=num_vis, prompt_type=prompt_type)
+
+            if val_losses['loss'] < best_loss:
+                best_loss = val_losses['loss']
+                accelerator.save_state(output_dir / 'best')
+                if accelerator.is_main_process:
+                    torch.save({
+                        'epoch': epoch,
+                        'best_loss': best_loss,
+                        'val_losses': val_losses,
+                        'global_step': global_step,
+                    }, output_dir / 'best' / 'training_state.pt')
+                    accelerator.print(f'Saved best model (loss: {best_loss:.4f})')
+
+        if (epoch + 1) % cfg['checkpoint']['save_freq'] == 0:
+            save_dir = output_dir / f'epoch_{epoch}'
+            accelerator.save_state(save_dir)
+            if accelerator.is_main_process:
+                torch.save({
+                    'epoch': epoch,
+                    'best_loss': best_loss,
+                    'global_step': global_step,
+                }, save_dir / 'training_state.pt')
+
+    accelerator.end_training()
+    accelerator.print(f'\nTraining completed! Best loss: {best_loss:.4f}')
+
+
+if __name__ == '__main__':
+    main()

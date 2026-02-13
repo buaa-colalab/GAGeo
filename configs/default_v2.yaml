@@ -1,0 +1,115 @@
+# Cross-View Localization V2 Configuration
+# Unified backbone architecture with token injection + attention masks
+
+# Data
+data:
+  train_json: "/data/home/scxi704/run/xhj/location/data/train_all.json"
+  val_json: "/data/home/scxi704/run/xhj/location/data/val_all.json"
+  data_root: "/data/home/scxi704/run/xhj/data/"
+  img_size: 518
+  crop_size: 518
+  num_workers: 24
+  train_direction: 'mono_to_sat'
+  val_direction: 'mono_to_sat'
+
+# Model
+model:
+  # Version flag
+  version: 'v2'
+  
+  # Pi3 backbone settings
+  decoder_size: 'large'  # 'small', 'base', 'large'
+  
+  # V2 Token injection settings
+  num_learnable_tokens: 2  # Learnable query 0=bbox/mask, 1=heatmap
+  
+  # Deep supervision (0-indexed decoder layers)
+  supervision_layers: [3, 10, 16]  # Early, Mid, Late
+  supervision_weights: [0.1, 0.3, 0.6]  # Increasing weights
+  
+  # Mask head
+  num_mask_tokens: 1  # Number of mask output tokens
+  
+  # Pi3 pretrained weights
+  pi3_weights: "/data/home/scxi704/run/xhj/location/ckpt/pi3/model.safetensors"
+  freeze_dinov2: true  # Freeze DINOv2 encoder
+  freeze_decoder: false  # Pi3 decoder trainable (with low LR)
+  freeze_prompt_encoder: true  # Freeze SAM prompt encoder (keep projections trainable)
+  freeze_mask_conv: true  # Freeze SAM mask downscaling conv layers
+  load_camera_head_weights: true  # Load Pi3 camera head pretrained weights
+  
+  # SAM2 pretrained weights
+  sam_weights: "/data/home/scxi704/run/sam2/checkpoints/sam2.1_hiera_large.pt"
+  sam_embed_dim: 256  # SAM internal dimension
+
+  # Contrastive (MoCo-style)
+  contrastive: true
+  contrastive_proj_dim: 256
+  contrastive_queue_size: 16384
+  contrastive_momentum: 0.999
+  contrastive_temperature: 0.07
+
+  # Dropout
+  dropout: 0.1
+
+# Training
+training:
+  batch_size: 2
+  gradient_accumulation_steps: 4
+  num_epochs: 20
+  
+  # 3-group learning rate strategy
+  lr_backbone: 1.0e-5     # Low LR: Pi3 encoder + decoder (pretrained)
+  lr_new_tokens: 5.0e-4   # Mid LR: Learnable queries, intermediate projections, prompt projections
+  lr_heads: 1.0e-4        # High LR: Task heads + intermediate supervision heads
+  weight_decay: 1.0e-4
+  
+  # Loss weights (final predictions)
+  weight_bbox: 5.0
+  weight_giou: 2.0
+  weight_mask_bce: 2.0    # SAM-style mask BCE loss
+  weight_mask_dice: 5.0   # SAM-style mask Dice loss
+  weight_heatmap: 0.05    # MSE position loss
+  weight_rotation: 0.05
+  weight_contrastive: 0.05
+  weight_class: 2.0
+  
+  # Rotation Loss
+  smooth_rotation: true
+  
+  # Hungarian Matcher
+  matcher_cost_class: 1.0
+  matcher_cost_bbox: 5.0
+  matcher_cost_giou: 2.0
+  
+  # Optimizer
+  optimizer: "adamw"
+  
+  # Scheduler
+  scheduler: "cosine"
+  warmup_epochs: 5
+  min_lr: 1.0e-6
+  
+  # Gradient clipping
+  grad_clip: 1.0
+  
+  # Mixed precision (bf16 for RTX 5090)
+  use_amp: true
+  mixed_precision: bf16
+  gpu: "0,1,2,3,4,5,6,7"
+
+# Checkpointing
+checkpoint:
+  output_dir: "/data/home/scxi704/run/xhj/location/output_v2"
+  save_freq: 5
+  resume: null
+
+# Logging
+logging:
+  log_freq: 50
+  val_freq: 1
+  use_tensorboard: true
+  
+  visualize: true
+  vis_samples: 10
+  vis_prompt_types: ['point', 'bbox', 'mask']

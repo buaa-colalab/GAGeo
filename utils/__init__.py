@@ -1,4 +1,5 @@
 from .losses import DETRCriterion, HungarianMatcher
+from .losses_v2 import DETRCriterionV2
 from .metrics import compute_iou, compute_ap, compute_localization_accuracy, compute_distance_error
 from .box_ops import box_cxcywh_to_xyxy, box_xyxy_to_cxcywh, generalized_box_iou
 from .weight_loader import (
@@ -10,6 +11,7 @@ from .prompt_utils import prepare_random_prompt
 from .visualize import visualize_validation_samples
 __all__ = [
     'DETRCriterion',
+    'DETRCriterionV2',
     'compute_iou',
     'compute_ap',
     'compute_localization_accuracy',
