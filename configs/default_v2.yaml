@@ -23,8 +23,8 @@ model:
   # V2 Token injection settings
   num_learnable_tokens: 2  # Learnable query 0=bbox/mask, 1=heatmap
   
-  # Deep supervision (0-indexed decoder layers)
-  supervision_layers: [3, 10, 16]  # Early, Mid, Late
+  # Deep supervision (0-indexed pair-layers: one local+global = one layer)
+  supervision_layers: [4, 11, 17]  # Early, Mid, Late
   supervision_weights: [0.1, 0.3, 0.6]  # Increasing weights
   
   # Mask head

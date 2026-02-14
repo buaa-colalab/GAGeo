@@ -17,8 +17,13 @@ from ..dinov2.hub.backbones import dinov2_vitl14_reg
 class MaskedFlashAttentionRope(nn.Module):
     """
     FlashAttentionRope wrapper that supports attention masks.
-    Uses PyTorch SDPA with attn_mask when mask is provided,
-    falls back to pure Flash Attention when no mask is needed.
+    
+    Backend policy:
+    - no mask: prefer FLASH_ATTENTION
+    - with mask: prefer FLASH_ATTENTION, then EFFICIENT_ATTENTION, then MATH fallback
+    
+    Note: mask is expected as SDPA bool mask (True=keep, False=block),
+    but additive float masks are also accepted for backward compatibility.
     """
     
     def __init__(self, base_attn: FlashAttentionRope):
@@ -69,9 +74,20 @@ class MaskedFlashAttentionRope(nn.Module):
             k = self.rope(k, xpos)
         
         if attn_mask is not None:
-            # When mask is provided, use MATH/EFFICIENT backend (supports attn_mask)
-            with nn.attention.sdpa_kernel([SDPBackend.MATH, SDPBackend.EFFICIENT_ATTENTION]):
-                x = scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+            # Prefer bool keep-mask for best backend compatibility in SDPA.
+            sdpa_mask = attn_mask
+            if torch.is_floating_point(attn_mask):
+                # Backward compatibility: additive mask (0 for keep, -inf for block)
+                sdpa_mask = torch.isfinite(attn_mask) & (attn_mask >= 0)
+
+            # Try Flash first (newer PyTorch may support masked Flash SDPA),
+            # then Efficient Attention, then Math fallback.
+            with nn.attention.sdpa_kernel([
+                SDPBackend.FLASH_ATTENTION,
+                SDPBackend.EFFICIENT_ATTENTION,
+                SDPBackend.MATH,
+            ]):
+                x = scaled_dot_product_attention(q, k, v, attn_mask=sdpa_mask)
         else:
             # No mask: use Flash Attention for maximum speed
             if q.dtype == torch.bfloat16:
@@ -132,7 +148,9 @@ class Pi3BackboneV2(nn.Module):
         img_size: Input image size (default 518)
         patch_size: Patch size (default 14)
         num_learnable_tokens: Number of learnable query tokens (default 2)
-        supervision_layers: Decoder layer indices for deep supervision (0-indexed)
+        supervision_layers: Pair-layer indices for deep supervision (0-indexed),
+            where one layer = (local block + global block).
+            For decoder depth 36, valid pair-layer indices are [0..17].
     """
     
     def __init__(
@@ -151,7 +169,7 @@ class Pi3BackboneV2(nn.Module):
         self.num_patches_per_side = img_size // patch_size  # 37
         self.num_patches = self.num_patches_per_side ** 2   # 1369
         self.num_learnable_tokens = num_learnable_tokens
-        self.supervision_layers = supervision_layers or [3, 10, 16]  # layers 4, 11, 17 (0-indexed)
+        self.supervision_layers = supervision_layers or [4, 11, 17]
         
         # ----------------------
         #        Encoder
@@ -199,6 +217,17 @@ class Pi3BackboneV2(nn.Module):
         self.dec_embed_dim = dec_embed_dim
         self.dec_depth = dec_depth
         self.output_dim = 2 * dec_embed_dim  # Concatenate last two layers
+        self.num_stage_layers = self.dec_depth // 2  # one stage = local+global
+
+        # Validate supervision layers are stage indices (0-based pair layers)
+        for l in self.supervision_layers:
+            if l < 0 or l >= self.num_stage_layers:
+                raise ValueError(
+                    f"supervision layer {l} out of range [0, {self.num_stage_layers - 1}] "
+                    f"for decoder_size={decoder_size} (dec_depth={self.dec_depth})"
+                )
+        # Map stage index -> decoder block index (after global block)
+        self.supervision_block_indices = {2 * l + 1: l for l in self.supervision_layers}
         
         self.decoder = nn.ModuleList([
             BlockRope(
@@ -242,11 +271,14 @@ class Pi3BackboneV2(nn.Module):
         # (will be set externally if sam_embed_dim != dec_embed_dim)
         self.prompt_proj = None
         
-        # Projection for intermediate supervision
-        # Each supervised layer's single-layer features → output_dim
+        # Projection for intermediate supervision (stage-indexed)
+        # Each supervised stage's single-layer features -> output_dim
         self.intermediate_projs = nn.ModuleDict()
-        for layer_idx in self.supervision_layers:
-            self.intermediate_projs[str(layer_idx)] = nn.Linear(dec_embed_dim, self.output_dim)
+        for stage_idx in self.supervision_layers:
+            self.intermediate_projs[str(stage_idx)] = nn.Linear(dec_embed_dim, self.output_dim)
+
+        # Final token projection (always available)
+        self.final_proj = nn.Linear(dec_embed_dim, self.output_dim)
         
         # For ImageNet Normalize
         image_mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
@@ -271,8 +303,8 @@ class Pi3BackboneV2(nn.Module):
         
         Returns:
             sate_mask: None (no constraints)
-            front_mask: [1, 1, N_front_total, N_front_total] bool mask for SDPA
-                        (True = masked/blocked, used as additive -inf)
+            front_mask: [1, 1, N_front_total, N_front_total] bool keep mask for SDPA
+                        (True = keep/allow, False = block)
         """
         # Sate view has no extra constraints
         sate_mask = None
@@ -283,16 +315,15 @@ class Pi3BackboneV2(nn.Module):
         if N_prompt == 0:
             return sate_mask, None
         
-        # Start with all-allowed mask (0 = allowed)
-        # SDPA attn_mask: additive, -inf = masked
-        front_mask = torch.zeros(1, 1, N_front_total, N_front_total, device=device, dtype=dtype)
+        # Start with all-allowed keep mask
+        front_mask = torch.ones(1, 1, N_front_total, N_front_total, device=device, dtype=torch.bool)
         
         # Prompt tokens cannot attend to each other
         prompt_start = N_front + N_learn
-        front_mask[:, :, prompt_start:, prompt_start:] = float('-inf')
+        front_mask[:, :, prompt_start:, prompt_start:] = False
         # But each prompt can attend to itself
         for i in range(N_prompt):
-            front_mask[:, :, prompt_start + i, prompt_start + i] = 0.0
+            front_mask[:, :, prompt_start + i, prompt_start + i] = True
         
         return sate_mask, front_mask
     
@@ -316,13 +347,13 @@ class Pi3BackboneV2(nn.Module):
         - Everything else is allowed
         
         Returns:
-            mask: [1, 1, N_total, N_total] additive mask for SDPA
+            mask: [1, 1, N_total, N_total] bool keep mask for SDPA
         """
         if N_prompt == 0:
             return None
         
         N_total = N_sate + N_front + N_learn + N_prompt
-        mask = torch.zeros(1, 1, N_total, N_total, device=device, dtype=dtype)
+        mask = torch.ones(1, 1, N_total, N_total, device=device, dtype=torch.bool)
         
         sate_end = N_sate
         front_end = N_sate + N_front
@@ -330,14 +361,14 @@ class Pi3BackboneV2(nn.Module):
         prompt_start = learn_end
         
         # Prompt <-> Sate: mutual block
-        mask[:, :, prompt_start:, :sate_end] = float('-inf')  # prompt cannot see sate
-        mask[:, :, :sate_end, prompt_start:] = float('-inf')  # sate cannot see prompt
+        mask[:, :, prompt_start:, :sate_end] = False  # prompt cannot see sate
+        mask[:, :, :sate_end, prompt_start:] = False  # sate cannot see prompt
         
         # Prompt <-> Prompt: mutual block
-        mask[:, :, prompt_start:, prompt_start:] = float('-inf')
+        mask[:, :, prompt_start:, prompt_start:] = False
         # Each prompt can see itself
         for i in range(N_prompt):
-            mask[:, :, prompt_start + i, prompt_start + i] = 0.0
+            mask[:, :, prompt_start + i, prompt_start + i] = True
         
         return mask
     
@@ -506,16 +537,19 @@ class Pi3BackboneV2(nn.Module):
                 front_hidden = global_hidden[:, N_sate:]
             
             # Collect intermediate outputs for deep supervision
-            if i in self.supervision_layers:
-                # Extract learnable query outputs from this layer
+            # One supervision layer = (local + global), so collect after global block.
+            if i in self.supervision_block_indices:
+                stage_idx = self.supervision_block_indices[i]
+
+                # Extract learnable query outputs from this stage
                 learn_start = N_front_base
                 learn_end = N_front_base + N_learn
                 inter_learn = front_hidden[:, learn_start:learn_end]  # [B, 2, C]
                 inter_sate = sate_hidden[:, self.patch_start_idx:]   # [B, 1369, C]
                 
                 # Project from single-layer C to output_dim (2*C)
-                proj = self.intermediate_projs[str(i)]
-                intermediate_outputs[i] = {
+                proj = self.intermediate_projs[str(stage_idx)]
+                intermediate_outputs[stage_idx] = {
                     'learnable': proj(inter_learn),  # [B, 2, 2*C]
                     'sate_patches': proj(inter_sate),  # [B, 1369, 2*C]
                 }
@@ -532,22 +566,10 @@ class Pi3BackboneV2(nn.Module):
         # Concatenate last two layers: [B, 2, tokens, 2*C]
         features = torch.cat([final_output[0], final_output[1]], dim=-1)
         
-        # Extract final learnable query outputs (from last layer, concat last two layers)
+        # Extract final learnable query outputs
         learn_start = N_front_base
         learn_end = N_front_base + N_learn
-        learn_last2 = []
-        for fo in final_output:
-            learn_last2.append(front_hidden[:, learn_start:learn_end])
-        # Use last layer features projected to output_dim for learnable tokens
-        learnable_final = self.intermediate_projs[str(self.supervision_layers[-1])](
-            front_hidden[:, learn_start:learn_end]
-        ) if str(self.supervision_layers[-1]) in self.intermediate_projs else \
-            front_hidden[:, learn_start:learn_end]
-        
-        # Actually use the concatenated last two layers approach for learnable tokens too
-        # We need to store per-layer learnable features before the cat
-        # Simpler: just project the final layer's learnable features
-        # Since output_dim = 2*C, we use the same projection as intermediate
+        learnable_final = self.final_proj(front_hidden[:, learn_start:learn_end])
         
         return {
             'features': features,           # [B, 2, 1374, 2*C]
@@ -555,9 +577,7 @@ class Pi3BackboneV2(nn.Module):
             'front_features': features[:, 1, self.patch_start_idx:, :],  # [B, 1369, 2*C]
             'sate_camera_token': features[:, 0, 0, :],  # [B, 2*C]
             'front_camera_token': features[:, 1, 0, :],  # [B, 2*C]
-            'learnable_out': self.intermediate_projs[str(self.supervision_layers[-1])](
-                front_hidden[:, learn_start:learn_end]
-            ),  # [B, 2, 2*C]
+            'learnable_out': learnable_final,  # [B, 2, 2*C]
             'intermediate': intermediate_outputs,
         }
     

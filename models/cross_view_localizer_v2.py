@@ -4,7 +4,7 @@
 # - Prompt tokens and learnable queries are injected directly into Pi3 Backbone
 # - Custom attention masks control token interactions (see docs/ARCHITECTURE_V2.md)
 # - Mask head (SAM-style) added alongside BBox head
-# - Deep supervision at decoder layers 4, 11, 17
+# - Deep supervision at pair-layers 4, 11, 17 (one pair = local+global)
 # - No separate PromptFusion / QueryDecoder stages; Pi3 backbone handles everything
 # - Mask prompt fused via element-wise addition to front view tokens
 
@@ -30,7 +30,7 @@ class CrossViewLocalizerV2(nn.Module):
        - Sate + Front patches as two views
        - Learnable queries + prompt tokens appended to front view
        - Dense mask embedding added to front view tokens
-       - Deep supervision at layers 4, 11, 17
+    - Deep supervision at pair-layers 4, 11, 17
     4. Task Heads: BBox, Mask, Heatmap, Camera from backbone outputs
     
     Args:
@@ -38,7 +38,7 @@ class CrossViewLocalizerV2(nn.Module):
         patch_size: Patch size (default 14)
         decoder_size: Pi3 decoder size ('small', 'base', 'large')
         num_learnable_tokens: Number of learnable query tokens (default 2)
-        supervision_layers: Layers for deep supervision (default [3, 10, 16])
+        supervision_layers: Pair-layers for deep supervision (default [4, 11, 17])
         supervision_weights: Weights for deep supervision (default [0.1, 0.3, 0.6])
         dropout: Dropout rate
         freeze_backbone: Freeze Pi3 backbone
@@ -68,7 +68,7 @@ class CrossViewLocalizerV2(nn.Module):
         self.img_size = img_size
         self.patch_size = patch_size
         self.num_patches_per_side = img_size // patch_size  # 37
-        self.supervision_layers = supervision_layers or [3, 10, 16]
+        self.supervision_layers = supervision_layers or [4, 11, 17]
         self.supervision_weights = supervision_weights or [0.1, 0.3, 0.6]
         
         # ============ 1. Pi3 Backbone V2 ============

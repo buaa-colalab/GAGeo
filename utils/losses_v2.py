@@ -161,7 +161,7 @@ class DETRCriterionV2(nn.Module):
         self.smooth_rotation = smooth_rotation
         self.img_size = img_size
         
-        self.supervision_layers = supervision_layers or [3, 10, 16]
+        self.supervision_layers = supervision_layers or [4, 11, 17]
         self.supervision_weights = supervision_weights or [0.1, 0.3, 0.6]
         
         self.matcher = HungarianMatcher(

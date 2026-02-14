@@ -61,6 +61,12 @@ def train_one_epoch(
     total_losses = {}
     log_freq = cfg['logging'].get('log_freq', 50)
     img_size = cfg['data']['img_size']
+    supervision_layers = cfg.get('model', {}).get('supervision_layers', [4, 11, 17])
+    decoder_size = cfg.get('model', {}).get('decoder_size', 'large')
+    num_stage_layers = 18 if decoder_size == 'large' else 12
+    final_stage_idx = num_stage_layers - 1
+    skip_final_inter_curve = final_stage_idx in supervision_layers
+    supervision_layers_set = set(supervision_layers)
 
     running_losses = {}
     running_count = 0
@@ -121,6 +127,22 @@ def train_one_epoch(
         running_count += 1
         for k, v in losses.items():
             val = v.item() if isinstance(v, torch.Tensor) else v
+
+            # Only keep valid intermediate keys in running window
+            if k.startswith('inter_'):
+                parts = k.split('_', 2)  # inter_{idx}_{metric}
+                if len(parts) != 3:
+                    continue
+                try:
+                    layer_idx = int(parts[1])
+                except ValueError:
+                    continue
+                # Ignore unexpected layers and optionally skip final stage curve
+                if layer_idx not in supervision_layers_set:
+                    continue
+                if skip_final_inter_curve and layer_idx == final_stage_idx:
+                    continue
+
             running_losses[k] = running_losses.get(k, 0.0) + val
 
         if 'pos_error' in losses:
@@ -132,7 +154,28 @@ def train_one_epoch(
         if accelerator.sync_gradients and global_step % log_freq == 0 and global_step > 0:
             log_dict = {}
             for k, v in running_losses.items():
+                # Intermediate supervision curves are logged under trian_step_idx/*
+                # (and final stage is skipped if it is already represented by train_step/*)
+                if k.startswith('inter_'):
+                    continue
                 log_dict[f"train_step/{k}"] = v / max(running_count, 1)
+
+            # Per-layer intermediate curves (requested name: trian_step_idx)
+            for k, v in running_losses.items():
+                if not k.startswith('inter_'):
+                    continue
+                parts = k.split('_', 2)  # inter_{idx}_{metric}
+                if len(parts) != 3:
+                    continue
+                try:
+                    layer_idx = int(parts[1])
+                except ValueError:
+                    continue
+                if skip_final_inter_curve and layer_idx == final_stage_idx:
+                    continue
+                metric_name = parts[2]
+                log_dict[f"trian_step_{layer_idx}/{metric_name}"] = v / max(running_count, 1)
+
             log_dict["train_step/lr_backbone"] = optimizer.param_groups[0]['lr']
             if len(optimizer.param_groups) > 1:
                 log_dict["train_step/lr_new_tokens"] = optimizer.param_groups[1]['lr']
@@ -322,7 +365,7 @@ def main():
         img_size=cfg['data']['img_size'],
         decoder_size=cfg['model'].get('decoder_size', 'large'),
         num_learnable_tokens=cfg['model'].get('num_learnable_tokens', 2),
-        supervision_layers=cfg['model'].get('supervision_layers', [3, 10, 16]),
+        supervision_layers=cfg['model'].get('supervision_layers', [4, 11, 17]),
         supervision_weights=cfg['model'].get('supervision_weights', [0.1, 0.3, 0.6]),
         dropout=cfg['model'].get('dropout', 0.1),
         contrastive=cfg['model'].get('contrastive', True),
@@ -336,6 +379,17 @@ def main():
 
     if cfg['model'].get('pi3_weights'):
         accelerator.print(f'Loaded Pi3 weights from {cfg["model"]["pi3_weights"]}')
+
+    # Verify pair-layer indexing logic: one stage = local+global
+    if accelerator.is_main_process:
+        num_stage_layers = model.backbone.num_stage_layers
+        final_stage_idx = num_stage_layers - 1
+        supervision_layers = cfg['model'].get('supervision_layers', [4, 11, 17])
+        accelerator.print(
+            f"Supervision stage indexing (0-based, local+global as one layer): "
+            f"num_stage_layers={num_stage_layers}, final_stage_idx={final_stage_idx}, "
+            f"configured={supervision_layers}, includes_final={final_stage_idx in supervision_layers}"
+        )
 
     # Freeze DINOv2 encoder
     if cfg['model'].get('freeze_dinov2', True):
@@ -380,7 +434,7 @@ def main():
         matcher_cost_bbox=cfg['training'].get('matcher_cost_bbox', 5.0),
         matcher_cost_giou=cfg['training'].get('matcher_cost_giou', 2.0),
         smooth_rotation=cfg['training'].get('smooth_rotation', True),
-        supervision_layers=cfg['model'].get('supervision_layers', [3, 10, 16]),
+        supervision_layers=cfg['model'].get('supervision_layers', [4, 11, 17]),
         supervision_weights=cfg['model'].get('supervision_weights', [0.1, 0.3, 0.6]),
     )
 
