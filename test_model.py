@@ -7,7 +7,7 @@ import sys
 import os
 
 ROOT_DIR = os.environ.get("ROOT_DIR", "/data/home/scxi704/run/xhj")
-WORKSPACE_NAME = os.environ.get("WORKSPACE_NAME", "location_all_components")
+WORKSPACE_NAME = os.environ.get("WORKSPACE_NAME", "location_v3")
 WORKSPACE_DIR = f"{ROOT_DIR}/{WORKSPACE_NAME}"
 
 sys.path.insert(0, WORKSPACE_DIR)

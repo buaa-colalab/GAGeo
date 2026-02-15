@@ -7,7 +7,7 @@ set -e
 
 # Workspace path config
 ROOT_DIR="${ROOT_DIR:-/data/home/scxi704/run/xhj}"
-WORKSPACE_NAME="${WORKSPACE_NAME:-location_all_components}"
+WORKSPACE_NAME="${WORKSPACE_NAME:-location_v3}"
 WORKSPACE_DIR="${ROOT_DIR}/${WORKSPACE_NAME}"
 
 # Activate conda filtre environment
