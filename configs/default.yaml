@@ -2,11 +2,11 @@
 
 # Data
 data:
-  #train_json: "/data/xhj/location/data/single.json"
-  train_json: "/data/home/scxi704/run/xhj/location/data/train_all.json"
-  #val_json: "/data/xhj/location/data/single.json"
-  val_json: "/data/home/scxi704/run/xhj/location/data/val_all.json"
-  data_root: "/data/home/scxi704/run/xhj/data/"
+  #train_json: "${ROOT_DIR}/${WORKSPACE_NAME}/data/single.json"
+  train_json: "${ROOT_DIR}/${WORKSPACE_NAME}/data/train_all.json"
+  #val_json: "${ROOT_DIR}/${WORKSPACE_NAME}/data/single.json"
+  val_json: "${ROOT_DIR}/${WORKSPACE_NAME}/data/val_all.json"
+  data_root: "${ROOT_DIR}/data"
   img_size: 518
   crop_size: 518
   num_workers: 24  # Reduced from 4 to prevent thread exhaustion with 8 GPUs
@@ -30,14 +30,14 @@ model:
   dropout: 0.1  # Dropout rate
   
   # Pi3 预训练权重
-  pi3_weights: "/data/home/scxi704/run/xhj/location/ckpt/pi3/model.safetensors"
+  pi3_weights: "${ROOT_DIR}/${WORKSPACE_NAME}/ckpt/pi3/model.safetensors"
   freeze_dinov2: true  # 冻结DINOv2 encoder部分
   freeze_decoder: false  # Pi3 decoder可训练
   freeze_prompt_encoder: true  # 冻结SAM Prompt Encoder (projection层保持可训练)
   load_camera_head_weights: true  # 从Pi3 checkpoint加载camera head权重
   
   # SAM2 预训练权重 (Prompt Encoder)
-  sam_weights: "/data/home/scxi704/run/sam2/checkpoints/sam2.1_hiera_large.pt"
+  sam_weights: "${ROOT_DIR}/../sam2/checkpoints/sam2.1_hiera_large.pt"
   sam_embed_dim: 256  # SAM native dimension, 内部256-dim + projection到2048
   
   # 对比学习 (MoCo-style)
@@ -96,7 +96,7 @@ training:
 
 # Checkpointing
 checkpoint:
-  output_dir: "/data/home/scxi704/run/xhj/location/output"  # 绝对路径，避免写到有配额限制的home目录
+  output_dir: "${ROOT_DIR}/${WORKSPACE_NAME}/output"
   save_freq: 5
   resume: null
 

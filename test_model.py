@@ -4,7 +4,13 @@
 
 import torch
 import sys
-sys.path.insert(0, '/data/xhj/location')
+import os
+
+ROOT_DIR = os.environ.get("ROOT_DIR", "/data/home/scxi704/run/xhj")
+WORKSPACE_NAME = os.environ.get("WORKSPACE_NAME", "location_all_components")
+WORKSPACE_DIR = f"{ROOT_DIR}/{WORKSPACE_NAME}"
+
+sys.path.insert(0, WORKSPACE_DIR)
 
 from data import CrossViewDataset, collate_fn
 from models import build_cross_view_localizer_pi3
@@ -17,7 +23,7 @@ def test_dataset():
     print("=" * 50)
     
     dataset = CrossViewDataset(
-        json_path='/data/xhj/location/data/single.json',
+        json_path=f'{WORKSPACE_DIR}/data/single.json',
         data_root='/data/GoogleEarth',
         crop_sat=True,
         random_crop=False,
@@ -110,7 +116,7 @@ def test_full_pipeline():
     
     # 创建数据集
     dataset = CrossViewDataset(
-        json_path='/data/xhj/location/data/single.json',
+        json_path=f'{WORKSPACE_DIR}/data/single.json',
         data_root='/data/GoogleEarth',
         crop_sat=True,
         random_crop=False,

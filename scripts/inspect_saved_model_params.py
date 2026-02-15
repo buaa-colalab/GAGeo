@@ -8,7 +8,7 @@
 
 示例：
   python scripts/inspect_saved_model_params.py \
-    --checkpoint /data/home/scxi704/run/xhj/location/output_v2/best
+        --checkpoint ${ROOT_DIR}/${WORKSPACE_NAME}/output_v2/best
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ import torch
 
 
 ROOT_DIR = os.environ.get("ROOT_DIR", "/data/home/scxi704/run/xhj")
-WORKSPACE_NAME = os.environ.get("WORKSPACE_NAME", "location")
+WORKSPACE_NAME = os.environ.get("WORKSPACE_NAME", "location_all_components")
 WORKSPACE_DIR = Path(ROOT_DIR) / WORKSPACE_NAME
 
 

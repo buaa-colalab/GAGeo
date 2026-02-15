@@ -349,8 +349,12 @@ def collate_fn(batch: List[Dict]) -> Dict:
 
 if __name__ == '__main__':
     # 测试
+    import os
+    _root_dir = os.environ.get("ROOT_DIR", "/data/home/scxi704/run/xhj")
+    _workspace_name = os.environ.get("WORKSPACE_NAME", "location_all_components")
+    _workspace_dir = f"{_root_dir}/{_workspace_name}"
     dataset = CrossViewDataset(
-        json_path='/data/xhj/location/data/test_samples.json',
+        json_path=f'{_workspace_dir}/data/test_samples.json',
         crop_sat=True,
     )
     

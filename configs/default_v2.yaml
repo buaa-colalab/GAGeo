@@ -3,9 +3,9 @@
 
 # Data
 data:
-  train_json: "/data/home/scxi704/run/xhj/location/data/train_all.json"
-  val_json: "/data/home/scxi704/run/xhj/location/data/val_all.json"
-  data_root: "/data/home/scxi704/run/xhj/data/"
+  train_json: "${ROOT_DIR}/${WORKSPACE_NAME}/data/train_all.json"
+  val_json: "${ROOT_DIR}/${WORKSPACE_NAME}/data/val_all.json"
+  data_root: "${ROOT_DIR}/data"
   img_size: 518
   crop_size: 518
   num_workers: 24
@@ -31,7 +31,7 @@ model:
   num_mask_tokens: 1  # Number of mask output tokens
   
   # Pi3 pretrained weights
-  pi3_weights: "/data/home/scxi704/run/xhj/location/ckpt/pi3/model.safetensors"
+  pi3_weights: "${ROOT_DIR}/${WORKSPACE_NAME}/ckpt/pi3/model.safetensors"
   freeze_dinov2: true  # Freeze DINOv2 encoder
   freeze_decoder: false  # Pi3 decoder trainable (with low LR)
   freeze_prompt_encoder: true  # Freeze SAM prompt encoder (keep projections trainable)
@@ -39,7 +39,7 @@ model:
   load_camera_head_weights: true  # Load Pi3 camera head pretrained weights
   
   # SAM2 pretrained weights
-  sam_weights: "/data/home/scxi704/run/sam2/checkpoints/sam2.1_hiera_large.pt"
+  sam_weights: "${ROOT_DIR}/../sam2/checkpoints/sam2.1_hiera_large.pt"
   sam_embed_dim: 256  # SAM internal dimension
 
   # Contrastive (MoCo-style)
@@ -54,7 +54,7 @@ model:
 
 # Training
 training:
-  batch_size: 2
+  batch_size: 3
   gradient_accumulation_steps: 4
   num_epochs: 20
   
@@ -100,7 +100,7 @@ training:
 
 # Checkpointing
 checkpoint:
-  output_dir: "/data/home/scxi704/run/xhj/location/output_v2"
+  output_dir: "${ROOT_DIR}/${WORKSPACE_NAME}/output_v2"
   save_freq: 5
   resume: null
 

@@ -2,6 +2,10 @@
 
 echo "=== Installing Cross-View Localization Dependencies ==="
 
+ROOT_DIR="${ROOT_DIR:-/data/home/scxi704/run/xhj}"
+WORKSPACE_NAME="${WORKSPACE_NAME:-location_all_components}"
+WORKSPACE_DIR="${ROOT_DIR}/${WORKSPACE_NAME}"
+
 # 检测 CUDA 版本
 CUDA_VERSION=$(nvcc --version | grep "release" | awk '{print $6}' | cut -c2-)
 
@@ -53,13 +57,13 @@ pip install tensorboard
 
 # 编译 curope (RoPE2D CUDA extension)
 echo "=== Compiling curope (RoPE2D CUDA extension) ==="
-if [ -d "/data/xhj/location/curope" ]; then
-    cd /data/xhj/location/curope
+if [ -d "${WORKSPACE_DIR}/curope" ]; then
+    cd "${WORKSPACE_DIR}/curope"
     python setup.py build_ext --inplace
-    cd /data/xhj/location
+    cd "$WORKSPACE_DIR"
     echo "curope compilation completed!"
 else
-    echo "Warning: /data/xhj/location/curope directory not found. Skipping curope compilation."
+    echo "Warning: ${WORKSPACE_DIR}/curope directory not found. Skipping curope compilation."
     echo "Please ensure the curope source code is available and compile it manually."
 fi
 

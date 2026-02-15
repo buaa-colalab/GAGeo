@@ -41,8 +41,29 @@ def parse_args():
 
 
 def load_config(config_path: str) -> dict:
+    defaults = {
+        "ROOT_DIR": os.environ.get("ROOT_DIR", "/data/home/scxi704/run/xhj"),
+        "WORKSPACE_NAME": os.environ.get("WORKSPACE_NAME", "location_all_components"),
+    }
+    defaults["WORKSPACE_DIR"] = f"{defaults['ROOT_DIR']}/{defaults['WORKSPACE_NAME']}"
+
+    def _expand_str(s: str) -> str:
+        s = os.path.expandvars(s)
+        for k, v in defaults.items():
+            s = s.replace(f"${{{k}}}", v)
+        return s
+
+    def _expand_env(obj):
+        if isinstance(obj, dict):
+            return {k: _expand_env(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_expand_env(v) for v in obj]
+        if isinstance(obj, str):
+            return _expand_str(obj)
+        return obj
+
     with open(config_path, 'r') as f:
-        return yaml.safe_load(f)
+        return _expand_env(yaml.safe_load(f))
 
 
 def train_one_epoch(

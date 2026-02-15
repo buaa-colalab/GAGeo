@@ -105,7 +105,10 @@ def interpolate_pos_embed(model, checkpoint_model):
 
 try:
     import sys
-    sys.path.insert(0, '/shared3/data/xhj/location/')
+    import os
+    _root_dir = os.environ.get("ROOT_DIR", "/data/home/scxi704/run/xhj")
+    _workspace_name = os.environ.get("WORKSPACE_NAME", "location_all_components")
+    sys.path.insert(0, f"{_root_dir}/{_workspace_name}")
     from curope import cuRoPE2D
     RoPE2D = cuRoPE2D
 except ImportError:

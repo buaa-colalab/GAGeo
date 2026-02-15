@@ -1,9 +1,9 @@
 # Overfit Test Configuration - 在单样本上过拟合测试模型
 
 data:
-  train_json: "/data/xhj/location/data/single.json"
-  val_json: "/data/xhj/location/data/single.json"
-  data_root: "/data/GoogleEarth"
+  train_json: "${ROOT_DIR}/${WORKSPACE_NAME}/data/single.json"
+  val_json: "${ROOT_DIR}/${WORKSPACE_NAME}/data/single.json"
+  data_root: "${ROOT_DIR}/data"
   img_size: 518
   crop_size: 518
   num_workers: 2
@@ -24,14 +24,14 @@ model:
   dropout: 0.1
   
   # Pi3 预训练权重
-  pi3_weights: "/shared3/data/xhj/location/ckpt/pi3/model.safetensors"
+  pi3_weights: "${ROOT_DIR}/${WORKSPACE_NAME}/ckpt/pi3/model.safetensors"
   freeze_dinov2: true
   freeze_decoder: false
   freeze_prompt_encoder: true
   load_camera_head_weights: true
   
   # SAM2 预训练权重
-  sam_weights: "/data/home/scxi704/run/sam2/checkpoints/sam2.1_hiera_large.pt"
+  sam_weights: "${ROOT_DIR}/../sam2/checkpoints/sam2.1_hiera_large.pt"
   sam_embed_dim: 256
 
 training:
@@ -69,7 +69,7 @@ training:
   gpu: "5,6"
 
 checkpoint:
-  output_dir: "./output/overfit_test"
+  output_dir: "${ROOT_DIR}/${WORKSPACE_NAME}/output/overfit_test"
   save_freq: 20
   resume: null
 

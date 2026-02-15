@@ -21,6 +21,7 @@ set -e
 ROOT_DIR="${ROOT_DIR:-/data/home/scxi704/run/xhj}"
 WORKSPACE_NAME="${WORKSPACE_NAME:-location_all_components}"
 WORKSPACE_DIR="${ROOT_DIR}/${WORKSPACE_NAME}"
+export ROOT_DIR WORKSPACE_NAME WORKSPACE_DIR
 
 # Conda env: filtre
 source /data/home/scxi704/run/miniconda3/bin/activate

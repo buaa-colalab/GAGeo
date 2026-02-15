@@ -39,7 +39,7 @@ from models import build_cross_view_localizer_v2
 
 # Workspace path config
 ROOT_DIR = os.environ.get("ROOT_DIR", "/data/home/scxi704/run/xhj")
-WORKSPACE_NAME = os.environ.get("WORKSPACE_NAME", "location")
+WORKSPACE_NAME = os.environ.get("WORKSPACE_NAME", "location_all_components")
 WORKSPACE_DIR = Path(ROOT_DIR) / WORKSPACE_NAME
 
 
@@ -569,8 +569,30 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device} | GPU: {args.gpu}")
 
+    defaults = {
+        "ROOT_DIR": ROOT_DIR,
+        "WORKSPACE_NAME": WORKSPACE_NAME,
+        "WORKSPACE_DIR": str(WORKSPACE_DIR),
+    }
+
+    def _expand_str(s: str) -> str:
+        s = os.path.expandvars(s)
+        for k, v in defaults.items():
+            s = s.replace(f"${{{k}}}", v)
+        return s
+
+    def _expand_env(obj):
+        if isinstance(obj, dict):
+            return {k: _expand_env(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_expand_env(v) for v in obj]
+        if isinstance(obj, str):
+            return _expand_str(obj)
+        return obj
+
     with open(args.config, "r", encoding="utf-8") as f:
-        cfg = json.load(f) if args.config.endswith(".json") else __import__("yaml").safe_load(f)
+        cfg_raw = json.load(f) if args.config.endswith(".json") else __import__("yaml").safe_load(f)
+    cfg = _expand_env(cfg_raw)
 
     data_root = cfg["data"]["data_root"]
     image_root = args.image_root or data_root
