@@ -10,9 +10,9 @@
 #SBATCH --partition=vip_gpu_5090_scxi704
 
 # ============================================
-# SLURM Accelerate Training Script for Cross-View Localization V2
-# Usage: sbatch scripts/slurm_train_accelerate_v2.sh [config_file]
-# Example: sbatch scripts/slurm_train_accelerate_v2.sh configs/default_v2.yaml
+# SLURM Accelerate Training Script for Cross-View Localization V3
+# Usage: sbatch scripts/slurm_train_accelerate_v3.sh [config_file]
+# Example: sbatch scripts/slurm_train_accelerate_v3.sh configs/default_v3.yaml
 # ============================================
 
 set -e
@@ -38,12 +38,12 @@ export TRITON_CACHE_DIR="${ROOT_DIR}/.cache/triton"
 mkdir -p "$HF_HOME" "$TORCH_HOME" "$TMPDIR" "$TRITON_CACHE_DIR"
 
 # Configuration
-TRAINING_CONFIG=${1:-"${WORKSPACE_DIR}/configs/default_v2.yaml"}
+TRAINING_CONFIG=${1:-"${WORKSPACE_DIR}/configs/default_v3.yaml"}
 ACCELERATE_CONFIG="${WORKSPACE_DIR}/configs/accelerate_deepspeed_zero2.yaml"
 NUM_GPUS=${SLURM_GPUS_ON_NODE:-1}
 
 echo "=========================================="
-echo "SLURM Accelerate Training (V2)"
+echo "SLURM Accelerate Training (V3)"
 echo "=========================================="
 echo "Job ID: $SLURM_JOB_ID"
 echo "Node: $SLURM_NODELIST"
