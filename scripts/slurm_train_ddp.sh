@@ -21,14 +21,19 @@
 
 set -e
 
+# Workspace path config
+ROOT_DIR="${ROOT_DIR:-/data/home/scxi704/run/xhj}"
+WORKSPACE_NAME="${WORKSPACE_NAME:-location_all_components}"
+WORKSPACE_DIR="${ROOT_DIR}/${WORKSPACE_NAME}"
+
 # Load your conda environment
-source ~/run/miniconda3/bin/activate
+source /data/home/scxi704/run/miniconda3/bin/activate
 
 # Activate your environment
 conda activate filtre
 
 # Configuration
-CONFIG=${1:-"configs/default.yaml"}
+CONFIG=${1:-"${WORKSPACE_DIR}/configs/default.yaml"}
 
 # Get GPU count from SLURM
 NUM_GPUS=${SLURM_GPUS_ON_NODE:-1}
@@ -42,13 +47,15 @@ echo "Config: $CONFIG"
 echo "GPUs: $NUM_GPUS"
 echo "=========================================="
 
+cd "$WORKSPACE_DIR"
+
 # Create logs directory if it doesn't exist
 mkdir -p logs
 
 # Run training with torchrun
 torchrun \
     --nproc_per_node=$NUM_GPUS \
-    train_ddp.py \
-    --config $CONFIG
+    "${WORKSPACE_DIR}/train_ddp.py" \
+    --config "$CONFIG"
 
 echo "Training completed!"

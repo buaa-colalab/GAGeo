@@ -21,8 +21,13 @@
 
 set -e
 
+# Workspace path config
+ROOT_DIR="${ROOT_DIR:-/data/home/scxi704/run/xhj}"
+WORKSPACE_NAME="${WORKSPACE_NAME:-location_all_components}"
+WORKSPACE_DIR="${ROOT_DIR}/${WORKSPACE_NAME}"
+
 # Load your conda environment
-source ~/run/miniconda3/bin/activate
+source /data/home/scxi704/run/miniconda3/bin/activate
 
 # Activate your environment
 conda activate filtre
@@ -31,15 +36,15 @@ conda activate filtre
 module load cuda
 
 # 设置缓存目录到大硬盘，避免写满 /data/home/scxi704
-export HF_HOME="/data/run01/scxi704/xhj/.cache/huggingface"
-export TORCH_HOME="/data/run01/scxi704/xhj/.cache/torch"
-export TMPDIR="/data/run01/scxi704/xhj/.cache/tmp"
-export TRITON_CACHE_DIR="/data/run01/scxi704/xhj/.cache/triton"
+export HF_HOME="${ROOT_DIR}/.cache/huggingface"
+export TORCH_HOME="${ROOT_DIR}/.cache/torch"
+export TMPDIR="${ROOT_DIR}/.cache/tmp"
+export TRITON_CACHE_DIR="${ROOT_DIR}/.cache/triton"
 mkdir -p $HF_HOME $TORCH_HOME $TMPDIR $TRITON_CACHE_DIR
 
 # Configuration
-TRAINING_CONFIG=${1:-"configs/default.yaml"}
-ACCELERATE_CONFIG="configs/accelerate_deepspeed_zero2.yaml"
+TRAINING_CONFIG=${1:-"${WORKSPACE_DIR}/configs/default.yaml"}
+ACCELERATE_CONFIG="${WORKSPACE_DIR}/configs/accelerate_deepspeed_zero2.yaml"
 
 # Get GPU count from SLURM
 NUM_GPUS=${SLURM_GPUS_ON_NODE:-1}
@@ -55,7 +60,7 @@ echo "Accelerate Config: $ACCELERATE_CONFIG"
 echo "=========================================="
 
 # Change to project directory
-cd $SLURM_SUBMIT_DIR
+cd "$WORKSPACE_DIR"
 
 # Create logs directory if it doesn't exist
 mkdir -p logs
@@ -63,8 +68,8 @@ mkdir -p logs
 
 # Run with accelerate
 srun accelerate launch \
-    --config_file $ACCELERATE_CONFIG \
-    train_detr.py \
-    --config $TRAINING_CONFIG
+    --config_file "$ACCELERATE_CONFIG" \
+    "${WORKSPACE_DIR}/train_detr.py" \
+    --config "$TRAINING_CONFIG"
 
 echo "Training completed!"

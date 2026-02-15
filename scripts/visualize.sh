@@ -4,8 +4,13 @@
 
 set -e
 
-CHECKPOINT=${1:-"./output/test/best.pth"}
-CONFIG=${2:-"configs/test.yaml"}
+# Workspace path config
+ROOT_DIR="${ROOT_DIR:-/data/home/scxi704/run/xhj}"
+WORKSPACE_NAME="${WORKSPACE_NAME:-location_all_components}"
+WORKSPACE_DIR="${ROOT_DIR}/${WORKSPACE_NAME}"
+
+CHECKPOINT=${1:-"${WORKSPACE_DIR}/output/test/best.pth"}
+CONFIG=${2:-"${WORKSPACE_DIR}/configs/test.yaml"}
 NUM_SAMPLES=${3:-20}
 GPU_ID=${4:-"7"}
 
@@ -21,7 +26,9 @@ echo "=========================================="
 export CUDA_VISIBLE_DEVICES=$GPU_ID
 export OPENBLAS_NUM_THREADS=4
 
-python vis.py \
+cd "$WORKSPACE_DIR"
+
+python "${WORKSPACE_DIR}/vis_detr.py" \
     --checkpoint $CHECKPOINT \
     --config $CONFIG \
     --num_samples $NUM_SAMPLES \

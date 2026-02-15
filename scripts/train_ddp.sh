@@ -5,11 +5,16 @@
 
 set -e
 
+# Workspace path config
+ROOT_DIR="${ROOT_DIR:-/data/home/scxi704/run/xhj}"
+WORKSPACE_NAME="${WORKSPACE_NAME:-location_all_components}"
+WORKSPACE_DIR="${ROOT_DIR}/${WORKSPACE_NAME}"
+
 # Activate conda filtre environment
-source ~/run/miniconda3/bin/activate
+source /data/home/scxi704/run/miniconda3/bin/activate
 conda activate filtre
 
-CONFIG=${1:-"configs/test.yaml"}
+CONFIG=${1:-"${WORKSPACE_DIR}/configs/test.yaml"}
 GPU_IDS=${2:-"5,6,7"}
 
 # Count number of GPUs
@@ -27,10 +32,12 @@ export OPENBLAS_NUM_THREADS=4
 export MKL_NUM_THREADS=4
 export OMP_NUM_THREADS=4
 
+cd "$WORKSPACE_DIR"
+
 # Use random port to avoid conflicts with other running processes
 MASTER_PORT=$((29500 + RANDOM % 1000))
 echo "Using master port: $MASTER_PORT"
 
-torchrun --nproc_per_node=$NUM_GPUS --master_port=$MASTER_PORT train_ddp.py --config $CONFIG
+torchrun --nproc_per_node=$NUM_GPUS --master_port=$MASTER_PORT "${WORKSPACE_DIR}/train_ddp.py" --config "$CONFIG"
 
 echo "Training completed!"

@@ -37,6 +37,12 @@ from tqdm import tqdm
 from models import build_cross_view_localizer_v2
 
 
+# Workspace path config
+ROOT_DIR = os.environ.get("ROOT_DIR", "/data/home/scxi704/run/xhj")
+WORKSPACE_NAME = os.environ.get("WORKSPACE_NAME", "location")
+WORKSPACE_DIR = Path(ROOT_DIR) / WORKSPACE_NAME
+
+
 # =========================
 # 通用工具
 # =========================
@@ -543,8 +549,8 @@ def save_results_json(all_results: Dict[str, OrderedDict], path: str):
 
 def parse_args():
     p = argparse.ArgumentParser(description="Evaluate Cross-View Localizer V2 (grouped metrics)")
-    p.add_argument("--config", type=str, default="/data/home/scxi704/run/xhj/location/output_v2/config.yaml")
-    p.add_argument("--checkpoint", type=str, default="/data/home/scxi704/run/xhj/location/output_v2/best")
+    p.add_argument("--config", type=str, default=str(WORKSPACE_DIR / "output_v2" / "config.yaml"))
+    p.add_argument("--checkpoint", type=str, default=str(WORKSPACE_DIR / "output_v2" / "best"))
     p.add_argument("--image_root", type=str, default="")
     p.add_argument("--batch_size", type=int, default=8)
     p.add_argument("--num_workers", type=int, default=8)
@@ -606,7 +612,7 @@ def main():
             print(f"Skip unknown split: {split}")
             continue
 
-        json_path = Path("/data/home/scxi704/run/xhj/location/data") / split_to_json[split]
+        json_path = WORKSPACE_DIR / "data" / split_to_json[split]
         if not json_path.exists():
             print(f"Skip missing file: {json_path}")
             continue

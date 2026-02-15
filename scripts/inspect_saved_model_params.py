@@ -16,7 +16,13 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 from collections import Counter
+import os
 import torch
+
+
+ROOT_DIR = os.environ.get("ROOT_DIR", "/data/home/scxi704/run/xhj")
+WORKSPACE_NAME = os.environ.get("WORKSPACE_NAME", "location")
+WORKSPACE_DIR = Path(ROOT_DIR) / WORKSPACE_NAME
 
 
 def human_bytes(n: int) -> str:
@@ -95,7 +101,7 @@ def main():
     ap.add_argument(
         "--checkpoint",
         type=str,
-        default="/data/home/scxi704/run/xhj/location/output_v2/best",
+        default=str(WORKSPACE_DIR / "output_v2" / "best"),
         help="checkpoint 文件或目录路径",
     )
     args = ap.parse_args()

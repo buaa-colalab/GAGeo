@@ -1,6 +1,11 @@
 #!/bin/bash
 set -euo pipefail
 
+# Workspace path config
+ROOT_DIR="${ROOT_DIR:-/data/home/scxi704/run/xhj}"
+WORKSPACE_NAME="${WORKSPACE_NAME:-location_all_components}"
+WORKSPACE_DIR="${ROOT_DIR}/${WORKSPACE_NAME}"
+
 # ========================================================
 # Package large dataset into split tar parts, then upload
 # to Hugging Face dataset repo.
@@ -18,7 +23,7 @@ PART_SIZE="${PART_SIZE:-50G}"   # e.g. 10G / 20G / 50G
 KEEP_PACK="${KEEP_PACK:-1}"     # 1 keep tar parts, 0 remove after upload
 
 # conda env requested by user
-source ~/run/miniconda3/bin/activate
+source /data/home/scxi704/run/miniconda3/bin/activate
 conda activate filtre
 
 mkdir -p "$WORK_DIR"
@@ -81,7 +86,7 @@ if [[ -z "${HF_TOKEN:-}" && -z "${HUGGINGFACE_HUB_TOKEN:-}" ]]; then
   exit 1
 fi
 
-python /data/home/scxi704/run/xhj/location/scripts/upload_hf_dataset.py \
+python "${WORKSPACE_DIR}/scripts/upload_hf_dataset.py" \
   --repo-id "$REPO_ID" \
   --repo-type "$REPO_TYPE" \
   --pack-dir "$PACK_DIR"

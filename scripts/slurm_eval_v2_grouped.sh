@@ -21,6 +21,11 @@
 
 set -euo pipefail
 
+# Workspace path config
+ROOT_DIR="${ROOT_DIR:-/data/home/scxi704/run/xhj}"
+WORKSPACE_NAME="${WORKSPACE_NAME:-location_all_components}"
+WORKSPACE_DIR="${ROOT_DIR}/${WORKSPACE_NAME}"
+
 SAM_CKPT="${1:-}"
 GPU_ID="${2:-0}"
 
@@ -31,22 +36,22 @@ if [[ -z "$SAM_CKPT" ]]; then
 fi
 
 # conda env
-source ~/run/miniconda3/bin/activate
+source /data/home/scxi704/run/miniconda3/bin/activate
 conda activate filtre
 
 module load cuda
 
 # Cache dirs
-export HF_HOME="/data/run01/scxi704/xhj/.cache/huggingface"
-export TORCH_HOME="/data/run01/scxi704/xhj/.cache/torch"
-export TMPDIR="/data/run01/scxi704/xhj/.cache/tmp"
-export TRITON_CACHE_DIR="/data/run01/scxi704/xhj/.cache/triton"
+export HF_HOME="${ROOT_DIR}/.cache/huggingface"
+export TORCH_HOME="${ROOT_DIR}/.cache/torch"
+export TMPDIR="${ROOT_DIR}/.cache/tmp"
+export TRITON_CACHE_DIR="${ROOT_DIR}/.cache/triton"
 mkdir -p "$HF_HOME" "$TORCH_HOME" "$TMPDIR" "$TRITON_CACHE_DIR"
 
-cd "$SLURM_SUBMIT_DIR"
+cd "$WORKSPACE_DIR"
 mkdir -p logs
 
-OUT_JSON="output_v2/eval_grouped_$(date +%Y%m%d_%H%M%S).json"
+OUT_JSON="${WORKSPACE_DIR}/output_v2/eval_grouped_$(date +%Y%m%d_%H%M%S).json"
 
 echo "=========================================="
 echo "Cross-View V2 Grouped Evaluation"
@@ -59,9 +64,9 @@ echo "Output JSON: $OUT_JSON"
 echo "=========================================="
 
 srun /data/home/scxi704/run/miniconda3/bin/conda run -n filtre --no-capture-output \
-  python evaluate_custom_v2.py \
-    --config /data/home/scxi704/run/xhj/location/output_v2/config.yaml \
-    --checkpoint /data/home/scxi704/run/xhj/location/output_v2/best \
+  python "${WORKSPACE_DIR}/evaluate_custom_v2.py" \
+    --config "${WORKSPACE_DIR}/output_v2/config.yaml" \
+    --checkpoint "${WORKSPACE_DIR}/output_v2/best" \
     --splits test unseen_test \
     --batch_size 8 \
     --num_workers 8 \
