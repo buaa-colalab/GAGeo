@@ -38,24 +38,26 @@ def prepare_random_prompt(
     device: torch.device,
     prompt_types: List[str] = ['point', 'bbox', 'mask'],
     min_prompts: int = 1,
-    max_prompts: int = 3,
+    max_prompts: int = 1,
 ) -> Tuple[Optional[Tuple], Optional[torch.Tensor], Optional[torch.Tensor]]:
     """
-    随机组合多种 prompt 类型进行训练
+    随机选择一种 prompt 类型进行训练（互斥）
     
     Args:
         batch: 数据 batch
         device: 设备
         prompt_types: 可选的 prompt 类型列表
-        min_prompts: 最少使用的 prompt 数量
-        max_prompts: 最多使用的 prompt 数量
+        min_prompts: 最少使用的 prompt 数量（V3固定为1）
+        max_prompts: 最多使用的 prompt 数量（V3固定为1）
     
     Returns:
         points: (coords, labels) 或 None
         boxes: bbox tensor 或 None
         masks: mask tensor 或 None
     """
-    # 随机选择使用几种 prompt（1 到 min(max_prompts, len(prompt_types))）
+    # V3: prompt 类型最多 1 个（point / bbox / mask 三选一）
+    max_prompts = 1
+    min_prompts = 1
     num_prompts = random.randint(min_prompts, min(max_prompts, len(prompt_types)))
     selected_types = random.sample(prompt_types, num_prompts)
     

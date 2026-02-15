@@ -102,6 +102,59 @@ class MaskedFlashAttentionRope(nn.Module):
         x = self.base_attn.proj_drop(x)
         return x
 
+    def forward_qkv(self, x_q, x_kv, qpos=None, kvpos=None, attn_mask=None):
+        """
+        Forward with decoupled Q and K/V inputs.
+        Used by V3 global attention where K includes front+mask while Q/V use original tokens.
+        """
+        from torch.nn.functional import scaled_dot_product_attention
+        from torch.nn.attention import SDPBackend
+
+        Bq, Nq, Cq = x_q.shape
+        Bk, Nk, Ck = x_kv.shape
+        if Bq != Bk or Cq != Ck:
+            raise ValueError(f"Q and KV shape mismatch: q={x_q.shape}, kv={x_kv.shape}")
+
+        # Compute Q from x_q
+        q_all = self.base_attn.qkv(x_q)
+        q_all = q_all.reshape(Bq, Nq, 3, self.num_heads, Cq // self.num_heads).transpose(1, 3)
+        q = q_all[:, :, 0]
+
+        # Compute K,V from x_kv
+        kv_all = self.base_attn.qkv(x_kv)
+        kv_all = kv_all.reshape(Bk, Nk, 3, self.num_heads, Ck // self.num_heads).transpose(1, 3)
+        k = kv_all[:, :, 1]
+        v = kv_all[:, :, 2]
+
+        q, k = self.q_norm(q).to(v.dtype), self.k_norm(k).to(v.dtype)
+
+        if self.rope is not None:
+            q = self.rope(q, qpos)
+            k = self.rope(k, kvpos)
+
+        if attn_mask is not None:
+            sdpa_mask = attn_mask
+            if torch.is_floating_point(attn_mask):
+                sdpa_mask = torch.isfinite(attn_mask) & (attn_mask >= 0)
+            with nn.attention.sdpa_kernel([
+                SDPBackend.FLASH_ATTENTION,
+                SDPBackend.EFFICIENT_ATTENTION,
+                SDPBackend.MATH,
+            ]):
+                x = scaled_dot_product_attention(q, k, v, attn_mask=sdpa_mask)
+        else:
+            if q.dtype == torch.bfloat16:
+                with nn.attention.sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+                    x = scaled_dot_product_attention(q, k, v)
+            else:
+                with nn.attention.sdpa_kernel([SDPBackend.MATH, SDPBackend.EFFICIENT_ATTENTION]):
+                    x = scaled_dot_product_attention(q, k, v)
+
+        x = x.transpose(1, 2).reshape(Bq, Nq, Cq)
+        x = self.base_attn.proj(x)
+        x = self.base_attn.proj_drop(x)
+        return x
+
 
 class BlockRopeWithMask(nn.Module):
     """BlockRope wrapper that passes attention masks through to attention."""
@@ -126,6 +179,26 @@ class BlockRopeWithMask(nn.Module):
             return self.block.ls2(self.block.mlp(self.block.norm2(x_in)))
         
         x = x + attn_residual_func(x)
+        x = x + ffn_residual_func(x)
+        return x
+
+    def forward_qkv(self, x_q, x_kv, qpos=None, kvpos=None, attn_mask=None):
+        """Forward with decoupled Q and K/V inputs."""
+        def attn_residual_func(x_in):
+            return self.block.ls1(
+                self.masked_attn.forward_qkv(
+                    self.block.norm1(x_in),
+                    self.block.norm1(x_kv),
+                    qpos=qpos,
+                    kvpos=kvpos,
+                    attn_mask=attn_mask,
+                )
+            )
+
+        def ffn_residual_func(x_in):
+            return self.block.ls2(self.block.mlp(self.block.norm2(x_in)))
+
+        x = x_q + attn_residual_func(x_q)
         x = x + ffn_residual_func(x)
         return x
 
@@ -287,45 +360,47 @@ class Pi3BackboneV2(nn.Module):
         self.register_buffer("image_std", image_std)
     
     def _build_local_attn_mask(
-        self, 
+        self,
         N_sate: int,
         N_front: int,
         N_learn: int,
         N_prompt: int,
         device: torch.device,
         dtype: torch.dtype,
-    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> torch.Tensor:
         """
-        Build attention masks for local (intra-view) attention.
-        
-        Sate view: no mask needed (all tokens attend to each other)
-        Front view: prompt tokens cannot attend to each other
-        
-        Returns:
-            sate_mask: None (no constraints)
-            front_mask: [1, 1, N_front_total, N_front_total] bool keep mask for SDPA
-                        (True = keep/allow, False = block)
+        V3 Local stage uses a masked GLOBAL self-attention over all tokens:
+          Q=K=V=(sate, front, learnable, prompt)
+
+        Constraints:
+          - sate and front are mutually invisible
+          - prompt and sate are mutually invisible
+          - prompt tokens are mutually invisible (except self)
+          - learnable tokens can interact with both sate/front/prompt
         """
-        # Sate view has no extra constraints
-        sate_mask = None
-        
-        # Front view: [reg+patches | learnable | prompt]
-        N_front_total = N_front + N_learn + N_prompt
-        
-        if N_prompt == 0:
-            return sate_mask, None
-        
-        # Start with all-allowed keep mask
-        front_mask = torch.ones(1, 1, N_front_total, N_front_total, device=device, dtype=torch.bool)
-        
-        # Prompt tokens cannot attend to each other
-        prompt_start = N_front + N_learn
-        front_mask[:, :, prompt_start:, prompt_start:] = False
-        # But each prompt can attend to itself
-        for i in range(N_prompt):
-            front_mask[:, :, prompt_start + i, prompt_start + i] = True
-        
-        return sate_mask, front_mask
+        N_total = N_sate + N_front + N_learn + N_prompt
+        mask = torch.ones(1, 1, N_total, N_total, device=device, dtype=torch.bool)
+
+        sate_end = N_sate
+        front_end = N_sate + N_front
+        learn_end = front_end + N_learn
+        prompt_start = learn_end
+
+        # sate <-> front: mutual block
+        mask[:, :, :sate_end, sate_end:front_end] = False
+        mask[:, :, sate_end:front_end, :sate_end] = False
+
+        if N_prompt > 0:
+            # prompt <-> sate: mutual block
+            mask[:, :, prompt_start:, :sate_end] = False
+            mask[:, :, :sate_end, prompt_start:] = False
+
+            # prompt <-> prompt: mutual block except diagonal
+            mask[:, :, prompt_start:, prompt_start:] = False
+            for i in range(N_prompt):
+                mask[:, :, prompt_start + i, prompt_start + i] = True
+
+        return mask
     
     def _build_global_attn_mask(
         self,
@@ -451,12 +526,8 @@ class Pi3BackboneV2(nn.Module):
         N_sate = sate_hidden.shape[1]  # 5 + 1369 = 1374
         N_front_base = front_hidden.shape[1]  # 1374
         
-        # Add mask dense embedding to front tokens (element-wise addition)
-        if dense_embeddings is not None:
-            # dense_embeddings: [B, C, Hp, Wp] -> [B, Hp*Wp, C]
-            dense_flat = dense_embeddings.flatten(2).transpose(1, 2)  # [B, 1369, C]
-            # Add to front patch tokens (skip register tokens)
-            front_hidden[:, self.patch_start_idx:self.patch_start_idx + self.num_patches] += dense_flat
+        # NOTE (V3): dense mask embedding is NOT directly added to front_hidden.
+        # It is only injected into K during global attention.
         
         # Add learnable query tokens to front view
         learnable = self.learnable_queries.expand(B, -1, -1).to(hidden.dtype)  # [B, 2, C]
@@ -499,7 +570,7 @@ class Pi3BackboneV2(nn.Module):
             front_pos = torch.cat([front_pos, prompt_pos], dim=1)  # [B, 1376+K, 2]
         
         # Pre-compute attention masks
-        sate_local_mask, front_local_mask = self._build_local_attn_mask(
+        local_mask = self._build_local_attn_mask(
             N_sate, N_front_base, N_learn, N_prompt, hidden.device, hidden.dtype
         )
         global_mask = self._build_global_attn_mask(
@@ -510,27 +581,40 @@ class Pi3BackboneV2(nn.Module):
         final_output = []
         intermediate_outputs = {}
         
-        has_mask = (N_prompt > 0)  # Only use mask blocks when we have prompt tokens
+        dense_flat = None
+        if dense_embeddings is not None:
+            dense_flat = dense_embeddings.flatten(2).transpose(1, 2).to(hidden.dtype)  # [B,1369,C]
         
         for i in range(len(self.decoder)):
             if i % 2 == 0:
-                # ---- Local attention (intra-view) ----
-                if has_mask and front_local_mask is not None:
-                    sate_hidden = self.masked_blocks[i](sate_hidden, xpos=sate_pos, attn_mask=sate_local_mask)
-                    front_hidden = self.masked_blocks[i](front_hidden, xpos=front_pos, attn_mask=front_local_mask)
-                else:
-                    sate_hidden = self.decoder[i](sate_hidden, xpos=sate_pos)
-                    front_hidden = self.decoder[i](front_hidden, xpos=front_pos)
-            else:
-                # ---- Global attention (cross-view) ----
-                # Concatenate all tokens
+                # ---- Local stage (V3): masked GLOBAL self-attention over all tokens ----
                 global_hidden = torch.cat([sate_hidden, front_hidden], dim=1)
                 global_pos = torch.cat([sate_pos, front_pos], dim=1)
-                
-                if has_mask and global_mask is not None:
-                    global_hidden = self.masked_blocks[i](global_hidden, xpos=global_pos, attn_mask=global_mask)
-                else:
-                    global_hidden = self.decoder[i](global_hidden, xpos=global_pos)
+                global_hidden = self.masked_blocks[i](global_hidden, xpos=global_pos, attn_mask=local_mask)
+
+                # Split back
+                sate_hidden = global_hidden[:, :N_sate]
+                front_hidden = global_hidden[:, N_sate:]
+            else:
+                # ---- Global attention (V3):
+                # Q,V = (sate, front, learnable, prompt)
+                # K   = (sate, front_with_mask, learnable, prompt)
+                global_qv = torch.cat([sate_hidden, front_hidden], dim=1)
+                global_k = global_qv.clone()
+                if dense_flat is not None:
+                    # front patch indices in global layout
+                    g_front_patch_start = N_sate + self.patch_start_idx
+                    g_front_patch_end = g_front_patch_start + self.num_patches
+                    global_k[:, g_front_patch_start:g_front_patch_end] += dense_flat
+
+                global_pos = torch.cat([sate_pos, front_pos], dim=1)
+                global_hidden = self.masked_blocks[i].forward_qkv(
+                    global_qv,
+                    global_k,
+                    qpos=global_pos,
+                    kvpos=global_pos,
+                    attn_mask=global_mask,
+                )
                 
                 # Split back
                 sate_hidden = global_hidden[:, :N_sate]
@@ -552,6 +636,7 @@ class Pi3BackboneV2(nn.Module):
                 intermediate_outputs[stage_idx] = {
                     'learnable': proj(inter_learn),  # [B, 2, 2*C]
                     'sate_patches': proj(inter_sate),  # [B, 1369, 2*C]
+                    'front_patches': proj(front_hidden[:, self.patch_start_idx:self.patch_start_idx + self.num_patches]),
                 }
             
             # Collect last two layers for final output

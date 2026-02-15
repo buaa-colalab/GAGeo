@@ -73,8 +73,18 @@ def visualize_batch_sample(batch, outputs, idx, img_size, save_path, prompt_type
     pred_yaw = outputs['yaw'][idx].detach().float().cpu().item() if 'yaw' in outputs else None
     pred_position = outputs['position'][idx].detach().float().cpu().numpy() if 'position' in outputs else None
     
+    # Extract mask predictions for visualization if available
+    pred_mask = None
+    gt_mask = None
+    if 'mask_pred' in outputs:
+        pred_mask = outputs['mask_pred'][idx, 0].detach().float().cpu().numpy()
+    if 'sat_mask' in batch:
+        gt_mask = batch['sat_mask'][idx].detach().float().cpu().numpy()
+        if gt_mask.ndim == 3:
+            gt_mask = gt_mask[0]
+
     # Create figure
-    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    fig, axes = plt.subplots(1, 4, figsize=(24, 6))
     
     # Panel 1: Mono view with prompt visualization
     axes[0].imshow(mono_img)
@@ -117,6 +127,33 @@ def visualize_batch_sample(batch, outputs, idx, img_size, save_path, prompt_type
     axes[2].set_title('Camera Pose (on Sat)', fontsize=14)
     axes[2].legend(loc='upper right')
     axes[2].axis('off')
+
+    # Panel 4: Mask visualization (GT / Pred / overlap)
+    axes[3].imshow(sat_img)
+    if gt_mask is not None:
+        axes[3].imshow(gt_mask, cmap='Greens', alpha=0.25)
+    if pred_mask is not None:
+        pred_bin = (pred_mask > 0.5).astype(np.uint8)
+        axes[3].imshow(pred_bin, cmap='Reds', alpha=0.25)
+
+        # Overlap metrics
+        if gt_mask is not None:
+            gt_bin = (gt_mask > 0.5).astype(np.uint8)
+            inter = (pred_bin * gt_bin).sum()
+            union = pred_bin.sum() + gt_bin.sum() - inter
+            iou = float(inter) / float(union + 1e-8)
+            dice = float(2 * inter) / float(pred_bin.sum() + gt_bin.sum() + 1e-8)
+            axes[3].text(
+                10,
+                30,
+                f'Mask IoU: {iou:.3f} | Dice: {dice:.3f}',
+                color='white',
+                fontsize=11,
+                bbox=dict(boxstyle='round', facecolor='black', alpha=0.6),
+            )
+
+    axes[3].set_title('Mask (GT=green, Pred=red)', fontsize=14)
+    axes[3].axis('off')
     
     # Add metrics as title
     metrics = []

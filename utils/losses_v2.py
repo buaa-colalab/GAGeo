@@ -163,6 +163,7 @@ class DETRCriterionV2(nn.Module):
         
         self.supervision_layers = supervision_layers or [4, 11, 17]
         self.supervision_weights = supervision_weights or [0.1, 0.3, 0.6]
+        self.extra_supervision_layers = set(sorted(self.supervision_layers)[:-1])
         
         self.matcher = HungarianMatcher(
             cost_class=matcher_cost_class,
@@ -342,6 +343,18 @@ class DETRCriterionV2(nn.Module):
                     for k, v in inter_mask_losses.items():
                         if k.startswith('loss_'):
                             losses[f'inter_{layer_idx}_{k}'] = weight * v
+
+                    # Intermediate Heatmap + Rotation loss (only early/mid stages)
+                    if layer_idx in self.extra_supervision_layers:
+                        inter_heat_losses = self._compute_heatmap_loss(inter_outputs, targets)
+                        for k, v in inter_heat_losses.items():
+                            if k.startswith('loss_'):
+                                losses[f'inter_{layer_idx}_{k}'] = weight * v
+
+                        inter_rot_losses = self._compute_rotation_loss(inter_outputs, targets)
+                        for k, v in inter_rot_losses.items():
+                            if k.startswith('loss_'):
+                                losses[f'inter_{layer_idx}_{k}'] = weight * v
         
         # ============ Total Loss ============
         total_loss = 0.0
@@ -378,6 +391,10 @@ class DETRCriterionV2(nn.Module):
                     total_loss = total_loss + self.weight_mask_dice * v
                 elif loss_type == 'loss_class':
                     total_loss = total_loss + self.weight_class * v
+                elif loss_type == 'loss_heatmap':
+                    total_loss = total_loss + self.weight_heatmap * v
+                elif loss_type == 'loss_rotation':
+                    total_loss = total_loss + self.weight_rotation * v
         
         losses['loss'] = total_loss
         

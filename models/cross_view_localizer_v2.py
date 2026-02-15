@@ -70,6 +70,7 @@ class CrossViewLocalizerV2(nn.Module):
         self.num_patches_per_side = img_size // patch_size  # 37
         self.supervision_layers = supervision_layers or [4, 11, 17]
         self.supervision_weights = supervision_weights or [0.1, 0.3, 0.6]
+        self.extra_supervision_layers = sorted(self.supervision_layers)[:-1]
         
         # ============ 1. Pi3 Backbone V2 ============
         self.backbone = Pi3BackboneV2(
@@ -278,6 +279,7 @@ class CrossViewLocalizerV2(nn.Module):
         for layer_idx, inter_data in backbone_out['intermediate'].items():
             inter_learn = inter_data['learnable']     # [B, 2, 2048]
             inter_sate = inter_data['sate_patches']   # [B, 1369, 2048]
+            inter_front = inter_data.get('front_patches', None)  # [B, 1369, 2048]
             
             inter_bbox_query = inter_learn[:, 0]  # [B, 2048]
             
@@ -291,13 +293,38 @@ class CrossViewLocalizerV2(nn.Module):
                 spatial_size=(self.num_patches_per_side, self.num_patches_per_side),
             )
             
-            intermediate_preds[layer_idx] = {
+            inter_result = {
                 'pred_boxes': inter_bbox['pred_boxes'],
                 'class_logits': inter_bbox['class_logits'],
                 'bbox_scores': inter_bbox['bbox_scores'],
                 'mask_logits': inter_mask['mask_logits'],
                 'mask_pred': inter_mask['mask_pred'],
             }
+
+            # Extra supervision for stage 4/11: heatmap + rotation
+            if layer_idx in self.extra_supervision_layers and inter_front is not None:
+                inter_heat_query = inter_learn[:, 1]  # [B, 2048]
+                inter_heatmap = self.heatmap_head(
+                    query_features=inter_heat_query.unsqueeze(1),
+                    spatial_features=inter_sate,
+                    spatial_size=(self.num_patches_per_side, self.num_patches_per_side),
+                )
+                inter_camera = self.camera_head(
+                    front_patch_features=inter_front,
+                    sat_patch_features=inter_sate,
+                    img_size=self.img_size,
+                )
+                inter_result.update({
+                    'heatmap': inter_heatmap['heatmap'],
+                    'position': inter_heatmap['position'],
+                    'heatmap_logits': inter_heatmap['heatmap_logits'],
+                    'rotation_matrix': inter_camera['rotation_matrix'],
+                    'yaw': inter_camera['yaw'],
+                    'pitch': inter_camera['pitch'],
+                    'roll': inter_camera['roll'],
+                })
+
+            intermediate_preds[layer_idx] = inter_result
         
         # ============ Combine Outputs ============
         result = {

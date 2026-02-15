@@ -69,9 +69,9 @@ training:
   weight_giou: 2.0
   weight_mask_bce: 2.0    # SAM-style mask BCE loss
   weight_mask_dice: 5.0   # SAM-style mask Dice loss
-  weight_heatmap: 0.05    # MSE position loss
-  weight_rotation: 0.05
-  weight_contrastive: 0.05
+  weight_heatmap: 0.1    # MSE position loss
+  weight_rotation: 0.1
+  weight_contrastive: 0.1
   weight_class: 2.0
   
   # Rotation Loss
