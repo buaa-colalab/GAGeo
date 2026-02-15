@@ -1,0 +1,651 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Cross-View Localizer V2 独立评测脚本（参考 baseline/evaluate_custom.py）
+
+评估指标：
+  检测: mean IoU · ACC@25 · ACC@50
+  分割(模型 mask): mIoU · mDice · AAE · ME
+  分割(SAM mask, bbox+point->SAM): mIoU · mDice · AAE · ME
+
+支持：
+  - split: test / unseen_test（默认都评估）
+  - 分组: task_type / size_category / shape_category（并包含 task×size / task×shape）
+  - prompt 只使用 point
+  - 默认加载 output_v2/best
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import time
+from collections import OrderedDict
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
+
+import cv2
+import numpy as np
+import torch
+from PIL import Image
+from pycocotools import mask as mask_utils
+from torch.utils.data import Dataset, DataLoader
+from torchvision.transforms.functional import to_tensor
+from tqdm import tqdm
+
+from models import build_cross_view_localizer_v2
+
+
+# =========================
+# 通用工具
+# =========================
+
+def decode_segmentation(segmentation, h: int, w: int) -> np.ndarray:
+    """解码 COCO segmentation -> 二值 mask (H,W), uint8。"""
+    if segmentation is None:
+        return np.zeros((h, w), dtype=np.uint8)
+
+    if isinstance(segmentation, list):
+        # polygon
+        if len(segmentation) == 0:
+            return np.zeros((h, w), dtype=np.uint8)
+        mask = np.zeros((h, w), dtype=np.uint8)
+        for poly in segmentation:
+            if len(poly) >= 6:
+                pts = np.array(poly, dtype=np.float32).reshape(-1, 2).astype(np.int32)
+                cv2.fillPoly(mask, [pts], 1)
+        return mask
+
+    if isinstance(segmentation, dict) and "counts" in segmentation:
+        rle = segmentation
+        if isinstance(rle["counts"], list):
+            rle = mask_utils.frPyObjects(rle, h, w)
+        m = mask_utils.decode(rle)
+        if m.ndim == 3:
+            m = m[..., 0]
+        return (m > 0).astype(np.uint8)
+
+    return np.zeros((h, w), dtype=np.uint8)
+
+
+def bbox_xywh_to_xyxy(b: np.ndarray) -> np.ndarray:
+    x, y, w, h = b.astype(np.float32)
+    return np.array([x, y, x + w, y + h], dtype=np.float32)
+
+
+def bbox_cxcywh_norm_to_xyxy_abs(b: torch.Tensor, img_size: int) -> np.ndarray:
+    # b: [4], normalized cxcywh
+    cx, cy, w, h = b.detach().cpu().numpy().astype(np.float32)
+    x1 = (cx - w / 2) * img_size
+    y1 = (cy - h / 2) * img_size
+    x2 = (cx + w / 2) * img_size
+    y2 = (cy + h / 2) * img_size
+    return np.array([x1, y1, x2, y2], dtype=np.float32)
+
+
+def clip_bbox_xyxy(b: np.ndarray, size: int) -> np.ndarray:
+    b = b.copy()
+    b[0::2] = np.clip(b[0::2], 0, size - 1)
+    b[1::2] = np.clip(b[1::2], 0, size - 1)
+    return b
+
+
+def bbox_iou_np(b1: np.ndarray, b2: np.ndarray) -> float:
+    x1 = max(float(b1[0]), float(b2[0]))
+    y1 = max(float(b1[1]), float(b2[1]))
+    x2 = min(float(b1[2]), float(b2[2]))
+    y2 = min(float(b1[3]), float(b2[3]))
+
+    inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+    a1 = max(0.0, float(b1[2] - b1[0])) * max(0.0, float(b1[3] - b1[1]))
+    a2 = max(0.0, float(b2[2] - b2[0])) * max(0.0, float(b2[3] - b2[1]))
+    return inter / (a1 + a2 - inter + 1e-16)
+
+
+class SegMetrics:
+    @staticmethod
+    def iou(p: np.ndarray, g: np.ndarray) -> float:
+        p, g = p.astype(bool), g.astype(bool)
+        inter = np.logical_and(p, g).sum()
+        union = np.logical_or(p, g).sum()
+        return 1.0 if union == 0 else float(inter) / float(union)
+
+    @staticmethod
+    def dice(p: np.ndarray, g: np.ndarray) -> float:
+        p, g = p.astype(bool), g.astype(bool)
+        inter = np.logical_and(p, g).sum()
+        total = p.sum() + g.sum()
+        return 1.0 if total == 0 else 2.0 * float(inter) / float(total)
+
+    @staticmethod
+    def aae(p: np.ndarray, g: np.ndarray) -> float:
+        return float(abs(int(p.astype(bool).sum()) - int(g.astype(bool).sum())))
+
+    @staticmethod
+    def me(p: np.ndarray, g: np.ndarray) -> float:
+        pb, gb = p.astype(bool), g.astype(bool)
+        if pb.sum() == 0 or gb.sum() == 0:
+            return float(np.sqrt(p.shape[0] ** 2 + p.shape[1] ** 2))
+        py, px = np.where(pb)
+        gy, gx = np.where(gb)
+        return float(np.sqrt((px.mean() - gx.mean()) ** 2 + (py.mean() - gy.mean()) ** 2))
+
+    @classmethod
+    def all(cls, p: np.ndarray, g: np.ndarray) -> Tuple[float, float, float, float]:
+        return cls.iou(p, g), cls.dice(p, g), cls.aae(p, g), cls.me(p, g)
+
+
+# =========================
+# 分组评估器
+# =========================
+
+class GroupedEvaluator:
+    def __init__(self):
+        self.records: List[Dict[str, Any]] = []
+
+    def add(
+        self,
+        *,
+        det_iou: float,
+        model_seg: Tuple[float, float, float, float] | None,
+        sam_seg: Tuple[float, float, float, float] | None,
+        task_type: str,
+        size_category: str,
+        shape_category: str,
+    ):
+        self.records.append(
+            {
+                "det_iou": det_iou,
+                "model_seg": model_seg,
+                "sam_seg": sam_seg,
+                "task_type": task_type,
+                "size_category": size_category,
+                "shape_category": shape_category,
+            }
+        )
+
+    @staticmethod
+    def _agg(records: List[Dict[str, Any]]) -> Dict[str, Any] | None:
+        if not records:
+            return None
+
+        det = [r["det_iou"] for r in records]
+        out: Dict[str, Any] = {
+            "count": len(records),
+            "det_iou": float(np.mean(det)),
+            "det_acc25": float(np.mean([1.0 if x > 0.25 else 0.0 for x in det])),
+            "det_acc50": float(np.mean([1.0 if x > 0.50 else 0.0 for x in det])),
+        }
+
+        for key, prefix in (("model_seg", "model"), ("sam_seg", "sam")):
+            vals = [r[key] for r in records if r[key] is not None]
+            if vals:
+                out[f"{prefix}_miou"] = float(np.mean([v[0] for v in vals]))
+                out[f"{prefix}_mdice"] = float(np.mean([v[1] for v in vals]))
+                out[f"{prefix}_aae"] = float(np.mean([v[2] for v in vals]))
+                out[f"{prefix}_me"] = float(np.mean([v[3] for v in vals]))
+
+        return out
+
+    def summarize(self) -> OrderedDict:
+        g = OrderedDict()
+        g["overall"] = self._agg(self.records)
+
+        for tt in ("drone", "ground"):
+            s = [r for r in self.records if r["task_type"] == tt]
+            if s:
+                g[f"task/{tt}"] = self._agg(s)
+
+        for sc in ("small", "medium", "large"):
+            s = [r for r in self.records if r["size_category"] == sc]
+            if s:
+                g[f"size/{sc}"] = self._agg(s)
+
+        for sh in ("regular", "irregular"):
+            s = [r for r in self.records if r["shape_category"] == sh]
+            if s:
+                g[f"shape/{sh}"] = self._agg(s)
+
+        for tt in ("drone", "ground"):
+            for sc in ("small", "medium", "large"):
+                s = [r for r in self.records if r["task_type"] == tt and r["size_category"] == sc]
+                if s:
+                    g[f"task×size/{tt}/{sc}"] = self._agg(s)
+            for sh in ("regular", "irregular"):
+                s = [r for r in self.records if r["task_type"] == tt and r["shape_category"] == sh]
+                if s:
+                    g[f"task×shape/{tt}/{sh}"] = self._agg(s)
+
+        return g
+
+
+# =========================
+# 数据集
+# =========================
+
+class EvalDatasetV2(Dataset):
+    """
+    与训练解耦的评估数据集：
+      - 只读取 test/unseen_test json
+      - prompt 只用 point
+      - 返回分组字段 task_type/size_category/shape_category
+    """
+
+    def __init__(self, data_list: List[Dict[str, Any]], image_root: str, img_size: int = 518):
+        self.data_list = data_list
+        self.image_root = image_root
+        self.img_size = img_size
+
+    def __len__(self):
+        return len(self.data_list)
+
+    def _load_rgb(self, path: str) -> np.ndarray:
+        img = cv2.imread(path)
+        if img is None:
+            raise FileNotFoundError(f"Image not found: {path}")
+        return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+    def __getitem__(self, idx: int):
+        item = self.data_list[idx]
+        city = item.get("city", "")
+
+        mono_name = item["mono_filename"]
+        sat_name = item.get("sat_filename") or item.get("sate_filename")
+        if sat_name is None:
+            raise KeyError("sample missing sat_filename/sate_filename")
+
+        mono_path = os.path.join(self.image_root, city, "mono", mono_name)
+        sat_path = os.path.join(self.image_root, city, "crop_sate", sat_name)
+
+        mono = self._load_rgb(mono_path)
+        sat = self._load_rgb(sat_path)
+
+        # 原始尺寸
+        h_m, w_m = mono.shape[:2]
+        h_s, w_s = sat.shape[:2]
+
+        # 点提示（mono坐标）
+        mono_point = np.array(item["mono_point"][:2], dtype=np.float32)
+
+        # GT bbox: sate_bbox in xywh
+        gt_bbox_xywh = np.array(item["sate_bbox"][:4], dtype=np.float32)
+
+        # GT mask
+        gt_mask = decode_segmentation(item.get("sate_segmentation"), h_s, w_s)
+
+        # resize 到 img_size 并同步坐标
+        S = self.img_size
+
+        if (h_m, w_m) != (S, S):
+            sx_m, sy_m = S / w_m, S / h_m
+            mono = cv2.resize(mono, (S, S), interpolation=cv2.INTER_LINEAR)
+            mono_point = np.array([mono_point[0] * sx_m, mono_point[1] * sy_m], dtype=np.float32)
+
+        if (h_s, w_s) != (S, S):
+            sx_s, sy_s = S / w_s, S / h_s
+            sat = cv2.resize(sat, (S, S), interpolation=cv2.INTER_LINEAR)
+            gt_mask = cv2.resize(gt_mask.astype(np.uint8), (S, S), interpolation=cv2.INTER_NEAREST)
+            gt_bbox_xywh = np.array(
+                [
+                    gt_bbox_xywh[0] * sx_s,
+                    gt_bbox_xywh[1] * sy_s,
+                    gt_bbox_xywh[2] * sx_s,
+                    gt_bbox_xywh[3] * sy_s,
+                ],
+                dtype=np.float32,
+            )
+
+        gt_bbox_xyxy = bbox_xywh_to_xyxy(gt_bbox_xywh)
+
+        mono_t = to_tensor(Image.fromarray(mono))  # [3,S,S], [0,1]
+        sat_t = to_tensor(Image.fromarray(sat))
+
+        return {
+            "front_view": mono_t,
+            "sat_view": sat_t,
+            "mono_point": torch.from_numpy(mono_point),
+            "gt_bbox_xyxy": torch.from_numpy(gt_bbox_xyxy),
+            "gt_mask": torch.from_numpy((gt_mask > 0).astype(np.uint8)),
+            "sat_rgb": sat,
+            "task_type": item.get("task_type", "unknown"),
+            "size_category": item.get("size_category", "unknown"),
+            "shape_category": item.get("shape_category", "unknown"),
+            "index": idx,
+        }
+
+
+def collate_eval(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
+    return {
+        "front_view": torch.stack([x["front_view"] for x in batch], dim=0),
+        "sat_view": torch.stack([x["sat_view"] for x in batch], dim=0),
+        "mono_point": torch.stack([x["mono_point"] for x in batch], dim=0),
+        "gt_bbox_xyxy": torch.stack([x["gt_bbox_xyxy"] for x in batch], dim=0),
+        "gt_mask": torch.stack([x["gt_mask"] for x in batch], dim=0),
+        "sat_rgb": [x["sat_rgb"] for x in batch],
+        "task_type": [x["task_type"] for x in batch],
+        "size_category": [x["size_category"] for x in batch],
+        "shape_category": [x["shape_category"] for x in batch],
+        "index": [x["index"] for x in batch],
+    }
+
+
+# =========================
+# 模型加载
+# =========================
+
+def resolve_checkpoint(path: Path) -> Path:
+    if path.is_file():
+        return path
+
+    candidates = [
+        path / "pytorch_model" / "mp_rank_00_model_states.pt",
+        path / "mp_rank_00_model_states.pt",
+        path / "pytorch_model.bin",
+        path / "model.safetensors",
+    ]
+    for c in candidates:
+        if c.exists():
+            return c
+
+    raise FileNotFoundError(f"Cannot resolve checkpoint file from: {path}")
+
+
+def extract_state_dict(obj: Dict[str, Any]) -> Dict[str, torch.Tensor]:
+    if isinstance(obj, dict):
+        for k in ["module", "model", "state_dict", "model_state_dict"]:
+            if k in obj and isinstance(obj[k], dict):
+                sd = obj[k]
+                # strip possible 'module.' prefix
+                if len(sd) > 0:
+                    first_k = next(iter(sd.keys()))
+                    if first_k.startswith("module."):
+                        sd = {kk[len("module."):]: vv for kk, vv in sd.items()}
+                return sd
+        # root state_dict
+        if all(isinstance(v, torch.Tensor) for v in obj.values()):
+            return obj
+    raise ValueError("Unrecognized checkpoint format")
+
+
+def build_model_from_cfg(cfg: Dict[str, Any], device: torch.device):
+    mc = cfg["model"]
+    dc = cfg["data"]
+
+    model = build_cross_view_localizer_v2(
+        pretrained_pi3=None,  # 评测时由 checkpoint 覆盖
+        freeze_backbone=False,
+        freeze_prompt_encoder=False,
+        load_camera_head_weights=False,
+        sam_weights=None,
+        img_size=dc.get("img_size", 518),
+        decoder_size=mc.get("decoder_size", "large"),
+        num_learnable_tokens=mc.get("num_learnable_tokens", 2),
+        supervision_layers=mc.get("supervision_layers", [4, 11, 17]),
+        supervision_weights=mc.get("supervision_weights", [0.1, 0.3, 0.6]),
+        dropout=mc.get("dropout", 0.1),
+        contrastive=mc.get("contrastive", True),
+        contrastive_proj_dim=mc.get("contrastive_proj_dim", 256),
+        contrastive_queue_size=mc.get("contrastive_queue_size", 16384),
+        contrastive_momentum=mc.get("contrastive_momentum", 0.999),
+        contrastive_temperature=mc.get("contrastive_temperature", 0.07),
+        sam_embed_dim=mc.get("sam_embed_dim", 256),
+        num_mask_tokens=mc.get("num_mask_tokens", 1),
+    )
+
+    model.to(device)
+    model.eval()
+    for p in model.parameters():
+        p.requires_grad = False
+    return model
+
+
+# =========================
+# 评测
+# =========================
+
+@torch.no_grad()
+def evaluate_split(
+    model,
+    sam_predictor,
+    loader: DataLoader,
+    img_size: int,
+    device: torch.device,
+    use_sam: bool,
+):
+    evaluator = GroupedEvaluator()
+
+    for batch in tqdm(loader, desc="Evaluating", leave=False):
+        front = batch["front_view"].to(device, non_blocking=True)
+        sat = batch["sat_view"].to(device, non_blocking=True)
+        mono_point = batch["mono_point"].to(device, non_blocking=True)  # [B,2]
+
+        B = front.shape[0]
+        point_coords = mono_point.unsqueeze(1)  # [B,1,2]
+        point_labels = torch.ones(B, 1, device=device)
+
+        outputs = model(
+            front_view=front,
+            satellite_view=sat,
+            points=(point_coords, point_labels),
+            boxes=None,
+            masks=None,
+            mono_mask=None,
+            sat_mask=None,
+        )
+
+        pred_bbox_norm = outputs["pred_boxes"][:, 0]  # [B,4], cxcywh in [0,1]
+        pred_mask = outputs["mask_pred"][:, 0].detach().cpu().numpy()  # [B,S,S]
+
+        gt_bbox_xyxy = batch["gt_bbox_xyxy"].numpy()
+        gt_mask = batch["gt_mask"].numpy().astype(np.uint8)
+
+        for i in range(B):
+            # ---- Detection ----
+            pb = clip_bbox_xyxy(bbox_cxcywh_norm_to_xyxy_abs(pred_bbox_norm[i], img_size), img_size)
+            gb = clip_bbox_xyxy(gt_bbox_xyxy[i].astype(np.float32), img_size)
+            det_iou = bbox_iou_np(pb, gb)
+
+            # ---- Model mask metrics ----
+            pm = (pred_mask[i] > 0.5).astype(np.uint8)
+            gm = (gt_mask[i] > 0).astype(np.uint8)
+            model_seg = SegMetrics.all(pm, gm)
+
+            # ---- SAM mask metrics: bbox + point(center) -> SAM ----
+            sam_seg = None
+            if use_sam and sam_predictor is not None:
+                try:
+                    sat_rgb = batch["sat_rgb"][i]  # uint8 RGB, SxS
+                    sam_predictor.set_image(sat_rgb)
+                    cx = (pb[0] + pb[2]) * 0.5
+                    cy = (pb[1] + pb[3]) * 0.5
+                    point = np.array([[cx, cy]], dtype=np.float32)
+                    plabel = np.array([1], dtype=np.int32)
+                    box = pb.astype(np.float32)
+                    masks, _, _ = sam_predictor.predict(
+                        point_coords=point,
+                        point_labels=plabel,
+                        box=box,
+                        multimask_output=False,
+                    )
+                    sm = masks[0].astype(np.uint8)
+                    sam_seg = SegMetrics.all(sm, gm)
+                except Exception:
+                    sam_seg = None
+
+            evaluator.add(
+                det_iou=det_iou,
+                model_seg=model_seg,
+                sam_seg=sam_seg,
+                task_type=batch["task_type"][i],
+                size_category=batch["size_category"][i],
+                shape_category=batch["shape_category"][i],
+            )
+
+    return evaluator.summarize()
+
+
+# =========================
+# 打印与保存
+# =========================
+
+def _fmt(v, w=8, decimals=4):
+    if v is None:
+        return "-".center(w)
+    if isinstance(v, (int, np.integer)):
+        return str(int(v)).rjust(w)
+    return f"{float(v):.{decimals}f}".rjust(w)
+
+
+def print_grouped(results: OrderedDict, split_name: str, has_model_mask=True, has_sam=True):
+    print("\n" + "=" * 120)
+    print(f"  Cross-View V2 Evaluation — {split_name}")
+    print("=" * 120)
+
+    hdr_det = f'{"Count":>7} {"Det_mIoU":>9} {"ACC@25":>8} {"ACC@50":>8}'
+    hdr_model = f' │ {"M_mIoU":>8} {"M_mDice":>8} {"M_AAE":>9} {"M_ME":>8}' if has_model_mask else ""
+    hdr_sam = f' │ {"S_mIoU":>8} {"S_mDice":>8} {"S_AAE":>9} {"S_ME":>8}' if has_sam else ""
+
+    print(f'  {"Group":<30} {hdr_det}{hdr_model}{hdr_sam}')
+    print(f'  {"─" * 30} {"─" * 35}{"─" * 40 if has_model_mask else ""}{"─" * 40 if has_sam else ""}')
+
+    for name, r in results.items():
+        if r is None:
+            continue
+        line = f'  {name:<30} '
+        line += f'{_fmt(r["count"], 7, 0)} {_fmt(r["det_iou"], 9)} {_fmt(r["det_acc25"], 8)} {_fmt(r["det_acc50"], 8)}'
+        if has_model_mask:
+            line += f' │ {_fmt(r.get("model_miou"), 8)} {_fmt(r.get("model_mdice"), 8)} {_fmt(r.get("model_aae"), 9, 1)} {_fmt(r.get("model_me"), 8, 2)}'
+        if has_sam:
+            line += f' │ {_fmt(r.get("sam_miou"), 8)} {_fmt(r.get("sam_mdice"), 8)} {_fmt(r.get("sam_aae"), 9, 1)} {_fmt(r.get("sam_me"), 8, 2)}'
+        print(line)
+
+
+def save_results_json(all_results: Dict[str, OrderedDict], path: str):
+    out = {}
+    for split, groups in all_results.items():
+        out[split] = {}
+        for gname, gval in groups.items():
+            if gval is None:
+                continue
+            out[split][gname] = {
+                k: (float(v) if isinstance(v, (np.floating, np.integer)) else v)
+                for k, v in gval.items()
+            }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(out, f, indent=2, ensure_ascii=False)
+    print(f"Results saved to: {path}")
+
+
+# =========================
+# Main
+# =========================
+
+def parse_args():
+    p = argparse.ArgumentParser(description="Evaluate Cross-View Localizer V2 (grouped metrics)")
+    p.add_argument("--config", type=str, default="/data/home/scxi704/run/xhj/location/output_v2/config.yaml")
+    p.add_argument("--checkpoint", type=str, default="/data/home/scxi704/run/xhj/location/output_v2/best")
+    p.add_argument("--image_root", type=str, default="")
+    p.add_argument("--batch_size", type=int, default=8)
+    p.add_argument("--num_workers", type=int, default=8)
+    p.add_argument("--splits", nargs="+", default=["test", "unseen_test"])
+    p.add_argument("--gpu", type=str, default="0")
+    p.add_argument("--sam_checkpoint", type=str, required=True, help="segment-anything checkpoint path")
+    p.add_argument("--sam_model_type", type=str, default="vit_h", choices=["vit_h", "vit_l", "vit_b"])
+    p.add_argument("--save_json", type=str, default="")
+    return p.parse_args()
+
+
+def main():
+    args = parse_args()
+    os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device: {device} | GPU: {args.gpu}")
+
+    with open(args.config, "r", encoding="utf-8") as f:
+        cfg = json.load(f) if args.config.endswith(".json") else __import__("yaml").safe_load(f)
+
+    data_root = cfg["data"]["data_root"]
+    image_root = args.image_root or data_root
+    img_size = int(cfg["data"].get("img_size", 518))
+
+    # build/load model
+    print("\n[1/3] Loading model ...")
+    model = build_model_from_cfg(cfg, device)
+
+    ckpt_file = resolve_checkpoint(Path(args.checkpoint).resolve())
+    print(f"Checkpoint file: {ckpt_file}")
+    obj = torch.load(str(ckpt_file), map_location="cpu")
+    sd = extract_state_dict(obj)
+    missing, unexpected = model.load_state_dict(sd, strict=False)
+    print(f"Loaded state_dict keys: {len(sd)}")
+    print(f"Missing: {len(missing)}, Unexpected: {len(unexpected)}")
+
+    # load SAM
+    print("\n[2/3] Loading SAM ...")
+    from segment_anything import sam_model_registry, SamPredictor
+
+    sam = sam_model_registry[args.sam_model_type](checkpoint=args.sam_checkpoint)
+    sam.to(device)
+    sam.eval()
+    for p in sam.parameters():
+        p.requires_grad = False
+    sam_predictor = SamPredictor(sam)
+
+    split_to_json = {
+        "test": "test_all.json",
+        "unseen_test": "unseen_test.json",
+    }
+
+    all_results: Dict[str, OrderedDict] = OrderedDict()
+
+    print("\n[3/3] Evaluating ...")
+    for split in args.splits:
+        if split not in split_to_json:
+            print(f"Skip unknown split: {split}")
+            continue
+
+        json_path = Path("/data/home/scxi704/run/xhj/location/data") / split_to_json[split]
+        if not json_path.exists():
+            print(f"Skip missing file: {json_path}")
+            continue
+
+        with open(json_path, "r", encoding="utf-8") as f:
+            data_list = json.load(f)
+
+        ds = EvalDatasetV2(data_list, image_root=image_root, img_size=img_size)
+        loader = DataLoader(
+            ds,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=args.num_workers,
+            pin_memory=True,
+            collate_fn=collate_eval,
+        )
+
+        t0 = time.time()
+        results = evaluate_split(
+            model=model,
+            sam_predictor=sam_predictor,
+            loader=loader,
+            img_size=img_size,
+            device=device,
+            use_sam=True,
+        )
+        dt = time.time() - t0
+
+        print_grouped(results, split_name=split, has_model_mask=True, has_sam=True)
+        print(f"Split {split} done in {dt:.1f}s")
+        all_results[split] = results
+
+    if args.save_json:
+        save_results_json(all_results, args.save_json)
+
+    print("\n" + "=" * 120)
+    print("All evaluations completed!")
+    print("=" * 120)
+
+
+if __name__ == "__main__":
+    main()
