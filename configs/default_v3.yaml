@@ -1,4 +1,4 @@
-# Cross-View Localization V2 Configuration
+# Cross-View Localization V3 Configuration
 # Unified backbone architecture with token injection + attention masks
 
 # Data
@@ -15,13 +15,17 @@ data:
 # Model
 model:
   # Version flag
-  version: 'v2'
+  version: 'v3'
   
   # Pi3 backbone settings
   decoder_size: 'large'  # 'small', 'base', 'large'
   
-  # V2 Token injection settings
+  # V3 Token injection settings
   num_learnable_tokens: 2  # Learnable query 0=bbox/mask, 1=heatmap
+
+  # Ablation switches
+  use_deep_supervision: true
+  use_contrastive_loss: true
   
   # Deep supervision (0-indexed pair-layers: one local+global = one layer)
   supervision_layers: [4, 11, 17]  # Early, Mid, Late
@@ -31,7 +35,7 @@ model:
   num_mask_tokens: 1  # Number of mask output tokens
   
   # Pi3 pretrained weights
-  pi3_weights: "${ROOT_DIR}/${WORKSPACE_NAME}/ckpt/pi3/model.safetensors"
+  pi3_weights: "${ROOT_DIR}/ckpt/pi3/model.safetensors"
   freeze_dinov2: true  # Freeze DINOv2 encoder
   freeze_decoder: false  # Pi3 decoder trainable (with low LR)
   freeze_prompt_encoder: true  # Freeze SAM prompt encoder (keep projections trainable)
@@ -39,7 +43,7 @@ model:
   load_camera_head_weights: true  # Load Pi3 camera head pretrained weights
   
   # SAM2 pretrained weights
-  sam_weights: "${ROOT_DIR}/../sam2/checkpoints/sam2.1_hiera_large.pt"
+  sam_weights: "${ROOT_DIR}/ckpt/sam2.1_hiera_large.pt"
   sam_embed_dim: 256  # SAM internal dimension
 
   # Contrastive (MoCo-style)
@@ -73,6 +77,9 @@ training:
   weight_rotation: 0.1
   weight_contrastive: 0.1
   weight_class: 2.0
+
+  # Ablation switch: control rot+pos supervision (heatmap + rotation)
+  use_rot_pos_supervision: true
   
   # Rotation Loss
   smooth_rotation: true
@@ -100,7 +107,7 @@ training:
 
 # Checkpointing
 checkpoint:
-  output_dir: "${ROOT_DIR}/${WORKSPACE_NAME}/output_v2"
+  output_dir: "${ROOT_DIR}/${WORKSPACE_NAME}/output_v3"
   save_freq: 5
   resume: null
 

@@ -242,7 +242,7 @@ class Pi3BackboneV2(nn.Module):
         self.num_patches_per_side = img_size // patch_size  # 37
         self.num_patches = self.num_patches_per_side ** 2   # 1369
         self.num_learnable_tokens = num_learnable_tokens
-        self.supervision_layers = supervision_layers or [4, 11, 17]
+        self.supervision_layers = [4, 11, 17] if supervision_layers is None else list(supervision_layers)
         
         # ----------------------
         #        Encoder

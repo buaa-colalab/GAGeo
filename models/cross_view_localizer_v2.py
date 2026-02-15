@@ -68,8 +68,8 @@ class CrossViewLocalizerV2(nn.Module):
         self.img_size = img_size
         self.patch_size = patch_size
         self.num_patches_per_side = img_size // patch_size  # 37
-        self.supervision_layers = supervision_layers or [4, 11, 17]
-        self.supervision_weights = supervision_weights or [0.1, 0.3, 0.6]
+        self.supervision_layers = [4, 11, 17] if supervision_layers is None else list(supervision_layers)
+        self.supervision_weights = [0.1, 0.3, 0.6] if supervision_weights is None else list(supervision_weights)
         self.extra_supervision_layers = sorted(self.supervision_layers)[:-1]
         
         # ============ 1. Pi3 Backbone V2 ============

@@ -148,6 +148,9 @@ class DETRCriterionV2(nn.Module):
         smooth_rotation: bool = True,
         supervision_layers: List[int] = None,
         supervision_weights: List[float] = None,
+        use_deep_supervision: bool = True,
+        use_contrastive_loss: bool = True,
+        use_rot_pos_supervision: bool = True,
     ):
         super().__init__()
         self.weight_bbox = weight_bbox
@@ -160,9 +163,12 @@ class DETRCriterionV2(nn.Module):
         self.weight_class = weight_class
         self.smooth_rotation = smooth_rotation
         self.img_size = img_size
+        self.use_deep_supervision = use_deep_supervision
+        self.use_contrastive_loss = use_contrastive_loss
+        self.use_rot_pos_supervision = use_rot_pos_supervision
         
-        self.supervision_layers = supervision_layers or [4, 11, 17]
-        self.supervision_weights = supervision_weights or [0.1, 0.3, 0.6]
+        self.supervision_layers = [4, 11, 17] if supervision_layers is None else list(supervision_layers)
+        self.supervision_weights = [0.1, 0.3, 0.6] if supervision_weights is None else list(supervision_weights)
         self.extra_supervision_layers = set(sorted(self.supervision_layers)[:-1])
         
         self.matcher = HungarianMatcher(
@@ -320,14 +326,15 @@ class DETRCriterionV2(nn.Module):
         # ============ Final prediction losses ============
         losses.update(self._compute_bbox_loss(outputs, targets))
         losses.update(self._compute_mask_loss(outputs, targets))
-        losses.update(self._compute_heatmap_loss(outputs, targets))
-        losses.update(self._compute_rotation_loss(outputs, targets))
+        if self.use_rot_pos_supervision:
+            losses.update(self._compute_heatmap_loss(outputs, targets))
+            losses.update(self._compute_rotation_loss(outputs, targets))
         
-        if 'contrastive_loss' in outputs:
+        if self.use_contrastive_loss and 'contrastive_loss' in outputs:
             losses['loss_contrastive'] = outputs['contrastive_loss']
         
         # ============ Deep Supervision losses ============
-        if 'intermediate_preds' in outputs:
+        if self.use_deep_supervision and 'intermediate_preds' in outputs:
             for layer_idx, weight in zip(self.supervision_layers, self.supervision_weights):
                 if layer_idx in outputs['intermediate_preds']:
                     inter_outputs = outputs['intermediate_preds'][layer_idx]
@@ -345,7 +352,7 @@ class DETRCriterionV2(nn.Module):
                             losses[f'inter_{layer_idx}_{k}'] = weight * v
 
                     # Intermediate Heatmap + Rotation loss (only early/mid stages)
-                    if layer_idx in self.extra_supervision_layers:
+                    if self.use_rot_pos_supervision and layer_idx in self.extra_supervision_layers:
                         inter_heat_losses = self._compute_heatmap_loss(inter_outputs, targets)
                         for k, v in inter_heat_losses.items():
                             if k.startswith('loss_'):

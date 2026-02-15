@@ -24,7 +24,7 @@ WORKSPACE_DIR="${ROOT_DIR}/${WORKSPACE_NAME}"
 export ROOT_DIR WORKSPACE_NAME WORKSPACE_DIR
 
 # Conda env: filtre
-source /data/home/scxi704/run/miniconda3/bin/activate
+source ~/run/miniconda3/etc/profile.d/conda.sh
 conda activate filtre
 
 # CUDA module
@@ -41,6 +41,7 @@ mkdir -p "$HF_HOME" "$TORCH_HOME" "$TMPDIR" "$TRITON_CACHE_DIR"
 TRAINING_CONFIG=${1:-"${WORKSPACE_DIR}/configs/default_v3.yaml"}
 ACCELERATE_CONFIG="${WORKSPACE_DIR}/configs/accelerate_deepspeed_zero2.yaml"
 NUM_GPUS=${SLURM_GPUS_ON_NODE:-1}
+EXTRA_ARGS=("${@:2}")
 
 echo "=========================================="
 echo "SLURM Accelerate Training (V3)"
@@ -48,6 +49,7 @@ echo "=========================================="
 echo "Job ID: $SLURM_JOB_ID"
 echo "Node: $SLURM_NODELIST"
 echo "Training Config: $TRAINING_CONFIG"
+echo "Extra Args: ${EXTRA_ARGS[*]}"
 echo "GPUs: $NUM_GPUS"
 echo "Accelerate Config: $ACCELERATE_CONFIG"
 echo "Conda Env: filtre"
@@ -59,6 +61,7 @@ mkdir -p logs
 srun accelerate launch \
     --config_file "$ACCELERATE_CONFIG" \
     "${WORKSPACE_DIR}/train_detr_v2.py" \
-    --config "$TRAINING_CONFIG"
+    --config "$TRAINING_CONFIG" \
+    "${EXTRA_ARGS[@]}"
 
 echo "Training completed!"

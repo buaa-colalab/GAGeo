@@ -1,5 +1,5 @@
 """
-Cross-View Localization V2 Training Script
+Cross-View Localization V3 Training Script
 Unified backbone architecture with token injection, attention masks, deep supervision.
 """
 
@@ -31,11 +31,30 @@ from utils import (
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Train Cross-View Localizer V2')
+    parser = argparse.ArgumentParser(description='Train Cross-View Localizer V3')
+
+    def str2bool(v):
+        if isinstance(v, bool):
+            return v
+        v = str(v).strip().lower()
+        if v in ('1', 'true', 't', 'yes', 'y', 'on'):
+            return True
+        if v in ('0', 'false', 'f', 'no', 'n', 'off'):
+            return False
+        raise argparse.ArgumentTypeError(f'Invalid boolean value: {v}')
+
     parser.add_argument('--config', type=str, required=True,
                         help='Path to training config file (YAML)')
     parser.add_argument('--resume', type=str, default=None,
                         help='Resume from checkpoint path')
+    parser.add_argument('--output_dir', type=str, default=None,
+                        help='Override checkpoint.output_dir for this run')
+    parser.add_argument('--use_deep_supervision', type=str2bool, default=None,
+                        help='Override model.use_deep_supervision for ablation')
+    parser.add_argument('--use_contrastive_loss', type=str2bool, default=None,
+                        help='Override model.use_contrastive_loss for ablation')
+    parser.add_argument('--use_rot_pos_supervision', type=str2bool, default=None,
+                        help='Override training.use_rot_pos_supervision for ablation')
     return parser.parse_args()
 
 
@@ -309,6 +328,25 @@ def main():
 
     if args.resume:
         cfg['checkpoint']['resume'] = args.resume
+    if args.output_dir:
+        cfg.setdefault('checkpoint', {})['output_dir'] = args.output_dir
+
+    if args.use_deep_supervision is not None:
+        cfg.setdefault('model', {})['use_deep_supervision'] = args.use_deep_supervision
+    if args.use_contrastive_loss is not None:
+        cfg.setdefault('model', {})['use_contrastive_loss'] = args.use_contrastive_loss
+    if args.use_rot_pos_supervision is not None:
+        cfg.setdefault('training', {})['use_rot_pos_supervision'] = args.use_rot_pos_supervision
+
+    use_deep_supervision = cfg.get('model', {}).get('use_deep_supervision', True)
+    use_contrastive_loss = cfg.get('model', {}).get('use_contrastive_loss', cfg.get('model', {}).get('contrastive', True))
+    use_rot_pos_supervision = cfg.get('training', {}).get('use_rot_pos_supervision', True)
+
+    if not use_deep_supervision:
+        cfg['model']['supervision_layers'] = []
+        cfg['model']['supervision_weights'] = []
+
+    cfg['model']['contrastive'] = use_contrastive_loss
 
     gradient_accumulation_steps = cfg['training'].get('gradient_accumulation_steps', 1)
     mixed_precision = cfg['training'].get('mixed_precision', 'bf16') if cfg['training'].get('use_amp', True) else "no"
@@ -329,10 +367,14 @@ def main():
         with open(output_dir / 'config.yaml', 'w') as f:
             yaml.dump(cfg, f)
         accelerator.print(f"Output directory: {output_dir}")
+        accelerator.print(
+            f"Ablation switches -> deep_supervision={use_deep_supervision}, "
+            f"contrastive={use_contrastive_loss}, rot_pos_supervision={use_rot_pos_supervision}"
+        )
 
     if accelerator.is_main_process and cfg['logging'].get('use_tensorboard', True):
         accelerator.init_trackers(
-            project_name="cross_view_v2",
+            project_name="cross_view_v3",
             config={
                 "batch_size": cfg['training']['batch_size'],
                 "num_epochs": cfg['training']['num_epochs'],
@@ -378,7 +420,7 @@ def main():
 
     accelerator.print(f'Train: {len(train_dataset)} samples, Val: {len(val_dataset)} samples')
 
-    # ============ Create V2 Model ============
+    # ============ Create V3 Model ============
     model = build_cross_view_localizer_v2(
         pretrained_pi3=cfg['model'].get('pi3_weights'),
         freeze_backbone=False,  # Freeze selectively below
@@ -391,7 +433,7 @@ def main():
         supervision_layers=cfg['model'].get('supervision_layers', [4, 11, 17]),
         supervision_weights=cfg['model'].get('supervision_weights', [0.1, 0.3, 0.6]),
         dropout=cfg['model'].get('dropout', 0.1),
-        contrastive=cfg['model'].get('contrastive', True),
+        contrastive=use_contrastive_loss,
         contrastive_proj_dim=cfg['model'].get('contrastive_proj_dim', 256),
         contrastive_queue_size=cfg['model'].get('contrastive_queue_size', 16384),
         contrastive_momentum=cfg['model'].get('contrastive_momentum', 0.999),
@@ -442,7 +484,7 @@ def main():
     total = sum(p.numel() for p in model.parameters())
     accelerator.print(f'Parameters: {total/1e6:.1f}M total, {trainable/1e6:.1f}M trainable')
 
-    # ============ Create V2 Criterion ============
+    # ============ Create V3 Criterion ============
     criterion = DETRCriterionV2(
         weight_bbox=cfg['training']['weight_bbox'],
         weight_giou=cfg['training']['weight_giou'],
@@ -459,6 +501,9 @@ def main():
         smooth_rotation=cfg['training'].get('smooth_rotation', True),
         supervision_layers=cfg['model'].get('supervision_layers', [4, 11, 17]),
         supervision_weights=cfg['model'].get('supervision_weights', [0.1, 0.3, 0.6]),
+        use_deep_supervision=use_deep_supervision,
+        use_contrastive_loss=use_contrastive_loss,
+        use_rot_pos_supervision=use_rot_pos_supervision,
     )
 
     # ============ Create Optimizer with 3-Group LR ============

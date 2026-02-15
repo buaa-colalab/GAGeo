@@ -105,7 +105,7 @@ class CrossViewDataset(Dataset):
         
         # 相机位置和角度 (all in radians)
         camera_position = np.array(item.get('camera_position', [self.sat_size/2, self.sat_size/2]), dtype=np.float32)
-        yaw = np.deg2rad(float(item['rotation']))
+        yaw = np.deg2rad(float(item['relative_yaw']))
         if 'drone' in item['mono_filename']:
             pitch = np.deg2rad(float(item.get('relative_pitch', 45.0)))  # 默认地面-卫星=90°
             roll = np.deg2rad(float(item.get('relative_roll', 0.0)))
