@@ -4,6 +4,8 @@ set -e
 ROOT_DIR="/mnt/dolphinfs/ssd_pool/docker/user/hadoop-aipnlp/EVA/yangheqing/workspace/colab"
 WORKSPACE_NAME=${WORKSPACE_NAME:-"location_v3"}
 WORKSPACE_DIR="${ROOT_DIR}/${WORKSPACE_NAME}"
+RUN_ROOT="$(dirname "$ROOT_DIR")"
+CACHE_ROOT=${CACHE_ROOT:-"${ROOT_DIR}/.cache"}
 export ROOT_DIR WORKSPACE_NAME WORKSPACE_DIR
 
 source "${ROOT_DIR}/location_v1/.venv/bin/activate"
