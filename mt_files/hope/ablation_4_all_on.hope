@@ -3,14 +3,14 @@ type = ml-easy-job
 
 [resource]
 usergroup = hadoop-aipnlp
-queue = root.shxs_training_cluster.hadoop-aipnlp.h800_eval
+queue = root.zw05_training_cluster.hadoop-aipnlp.llm_debug
 
 [roles]
 worker.script = bash mt_files/slurm_train_accelerate_v3_ablation_4_all_on.sh
 workers = 1
-worker.memory = 1800000
-worker.vcore = 184
-worker.gcoresh800-141g = 8
+worker.memory = 524288
+worker.vcore = 128
+worker.gcores80g = 8
 worker.ports = 1
 
 [am]
