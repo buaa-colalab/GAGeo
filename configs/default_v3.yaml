@@ -58,7 +58,7 @@ model:
 
 # Training
 training:
-  batch_size: 3
+  batch_size: 2
   gradient_accumulation_steps: 4
   num_epochs: 20
   
