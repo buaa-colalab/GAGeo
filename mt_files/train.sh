@@ -6,7 +6,6 @@ WORKSPACE_NAME=${WORKSPACE_NAME:-"location_v3"}
 WORKSPACE_DIR="${ROOT_DIR}/${WORKSPACE_NAME}"
 export ROOT_DIR WORKSPACE_NAME WORKSPACE_DIR
 
-source "${ROOT_DIR}/location_v1/.venv/activate"
 source "${ROOT_DIR}/location_v1/.venv/bin/activate"
 
 # Cache dirs (avoid home quota pressure)
