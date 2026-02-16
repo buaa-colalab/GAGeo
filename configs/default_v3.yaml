@@ -3,9 +3,9 @@
 
 # Data
 data:
-  train_json: "${ROOT_DIR}/${WORKSPACE_NAME}/data/train_all.json"
-  val_json: "${ROOT_DIR}/${WORKSPACE_NAME}/data/val_all.json"
-  data_root: "${ROOT_DIR}/data"
+  train_json: "${ROOT_DIR}/data/json/train_all.json"
+  val_json: "${ROOT_DIR}/data/json/val_all.json"
+  data_root: "${ROOT_DIR}/data/urban"
   img_size: 518
   crop_size: 518
   num_workers: 24

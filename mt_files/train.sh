@@ -37,7 +37,7 @@ echo "=========================================="
 cd "$WORKSPACE_DIR"
 mkdir -p logs
 
-srun accelerate launch \
+accelerate launch \
     --config_file "$ACCELERATE_CONFIG" \
     "${WORKSPACE_DIR}/train_detr_v2.py" \
     --config "$TRAINING_CONFIG" \
