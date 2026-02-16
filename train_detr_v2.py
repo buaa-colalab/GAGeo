@@ -2,7 +2,8 @@
 Cross-View Localization V3 Training Script
 Unified backbone architecture with token injection, attention masks, deep supervision.
 """
-
+import os
+os.environ["TMPDIR"] = "/tmp"
 import argparse
 import math
 import yaml
