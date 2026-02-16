@@ -42,3 +42,7 @@ data/unseen_test_G.json
 data/unseen_test_D.json
 visualizations/
 data_preprocess/
+datasets/*
+.hopeignore
+ckpt
+*.json
