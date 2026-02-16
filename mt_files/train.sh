@@ -6,8 +6,7 @@ WORKSPACE_NAME=${WORKSPACE_NAME:-"location_v3"}
 WORKSPACE_DIR="${ROOT_DIR}/${WORKSPACE_NAME}"
 export ROOT_DIR WORKSPACE_NAME WORKSPACE_DIR
 
-# Conda env: filtre
-source "/mnt/dolphinfs/ssd_pool/docker/user/hadoop-nlp-sh02/hadoop-aipnlp/EVA/yangheqing/workspace/colab/location_backbone_v2/.venv/activate"
+source "${ROOT_DIR}/location_v2/.venv/activate"
 
 # Cache dirs (avoid home quota pressure)
 export HF_HOME="${CACHE_ROOT}/huggingface"
