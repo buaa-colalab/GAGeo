@@ -63,9 +63,9 @@ training:
   num_epochs: 20
   
   # 3-group learning rate strategy
-  lr_backbone: 1.0e-5     # Low LR: Pi3 encoder + decoder (pretrained)
-  lr_new_tokens: 5.0e-4   # Mid LR: Learnable queries, intermediate projections, prompt projections
-  lr_heads: 1.0e-4        # High LR: Task heads + intermediate supervision heads
+  lr_backbone: 2.0e-5     # Low LR: Pi3 encoder + decoder (pretrained)
+  lr_new_tokens: 1.0e-3   # Mid LR: Learnable queries, intermediate projections, prompt projections
+  lr_heads: 2.0e-4        # High LR: Task heads + intermediate supervision heads
   weight_decay: 1.0e-4
   
   # Loss weights (final predictions)
