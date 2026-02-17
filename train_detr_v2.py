@@ -585,16 +585,24 @@ def main():
     start_epoch = 0
     best_loss = float('inf')
     resume_global_step = 0
-    if cfg['checkpoint'].get('resume'):
-        accelerator.print(f'Resuming from {cfg["checkpoint"]["resume"]}')
-        accelerator.load_state(cfg['checkpoint']['resume'])
-        ckpt_path = Path(cfg['checkpoint']['resume'])
-        if (ckpt_path / 'training_state.pt').exists():
-            training_state = torch.load(ckpt_path / 'training_state.pt', map_location='cpu')
-            start_epoch = training_state.get('epoch', 0) + 1
-            best_loss = training_state.get('best_loss', float('inf'))
-            resume_global_step = training_state.get('global_step', 0)
-        accelerator.print(f'Resumed from epoch {start_epoch}, global_step {resume_global_step}')
+    resume_path = cfg['checkpoint'].get('resume')
+    if resume_path:
+        ckpt_path = Path(resume_path)
+        if not ckpt_path.exists():
+            accelerator.print(
+                f"[WARN] Resume checkpoint not found: {ckpt_path}. "
+                "Will start training from scratch."
+            )
+            cfg['checkpoint']['resume'] = None
+        else:
+            accelerator.print(f'Resuming from {resume_path}')
+            accelerator.load_state(str(ckpt_path))
+            if (ckpt_path / 'training_state.pt').exists():
+                training_state = torch.load(ckpt_path / 'training_state.pt', map_location='cpu')
+                start_epoch = training_state.get('epoch', 0) + 1
+                best_loss = training_state.get('best_loss', float('inf'))
+                resume_global_step = training_state.get('global_step', 0)
+            accelerator.print(f'Resumed from epoch {start_epoch}, global_step {resume_global_step}')
 
     # ============ Training Loop ============
     global_step = resume_global_step
