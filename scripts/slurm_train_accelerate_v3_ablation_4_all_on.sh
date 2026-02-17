@@ -18,7 +18,10 @@ WORKSPACE_DIR="${ROOT_DIR}/${WORKSPACE_NAME}"
 TRAINING_CONFIG=${1:-"${WORKSPACE_DIR}/configs/default_v3.yaml"}
 OUTPUT_DIR="${WORKSPACE_DIR}/output_v3/ablation_4_all_on"
 
+EXPRIMENT_NAME="ablation_4_all_on"
+
 bash "${WORKSPACE_DIR}/scripts/slurm_train_accelerate_v3.sh" \
+  "$EXPRIMENT_NAME" \
   "$TRAINING_CONFIG" \
   --output_dir "$OUTPUT_DIR" \
   --use_deep_supervision true \

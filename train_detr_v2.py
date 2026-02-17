@@ -87,6 +87,30 @@ def load_config(config_path: str) -> dict:
         return _expand_env(yaml.safe_load(f))
 
 
+def _assert_bbox_prompt_for_forward(boxes: torch.Tensor, front_view: torch.Tensor) -> None:
+    """Guard: training-time bbox prompt must be pixel-space [x, y, w, h]."""
+    if boxes is None:
+        return
+    if boxes.dim() != 3 or boxes.shape[-1] != 4:
+        raise ValueError(f"Expected boxes shape [B, N, 4], got {tuple(boxes.shape)}")
+
+    H = front_view.shape[-2]
+    W = front_view.shape[-1]
+    x = boxes[..., 0]
+    y = boxes[..., 1]
+    w = boxes[..., 2]
+    h = boxes[..., 3]
+
+    if torch.any(w <= 0) or torch.any(h <= 0):
+        raise ValueError("Invalid bbox prompt: width/height must be > 0 (pixel xywh)")
+    if torch.any(x < -1e-4) or torch.any(y < -1e-4):
+        raise ValueError("Invalid bbox prompt: x/y must be non-negative (pixel xywh)")
+    if torch.any(x > (W - 1 + 1e-4)) or torch.any(y > (H - 1 + 1e-4)):
+        raise ValueError("Invalid bbox prompt: x/y exceed image boundary (pixel xywh expected)")
+    if torch.any(w > (W + 1e-4)) or torch.any(h > (H + 1e-4)):
+        raise ValueError("Invalid bbox prompt: w/h exceed image size (pixel xywh expected)")
+
+
 def train_one_epoch(
     model: nn.Module,
     dataloader: DataLoader,
@@ -132,6 +156,7 @@ def train_one_epoch(
 
             # Random prompt selection
             points, boxes, masks = prepare_random_prompt(batch, accelerator.device)
+            _assert_bbox_prompt_for_forward(boxes, front_view)
 
             # Forward
             with accelerator.autocast():

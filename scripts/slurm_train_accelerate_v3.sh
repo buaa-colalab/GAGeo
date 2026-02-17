@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=cvloc_v2_accel
-#SBATCH --output=logs/slurm_v2_accelerate_%j.out
-#SBATCH --error=logs/slurm_v2_accelerate_%j.err
+#SBATCH --job-name=cvloc_v3_${1:-default}
+#SBATCH --output=logs/slurm_v3_${1:-default}_%j.out
+#SBATCH --error=logs/slurm_v3_${1:-default}_%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=64
@@ -11,7 +11,7 @@
 
 # ============================================
 # SLURM Accelerate Training Script for Cross-View Localization V3
-# Usage: sbatch scripts/slurm_train_accelerate_v3.sh [config_file]
+# Usage: sbatch scripts/slurm_train_accelerate_v3.sh [experiment_name] [config_file]
 # Example: sbatch scripts/slurm_train_accelerate_v3.sh configs/default_v3.yaml
 # ============================================
 
@@ -38,10 +38,12 @@ export TRITON_CACHE_DIR="${ROOT_DIR}/.cache/triton"
 mkdir -p "$HF_HOME" "$TORCH_HOME" "$TMPDIR" "$TRITON_CACHE_DIR"
 
 # Configuration
-TRAINING_CONFIG=${1:-"${WORKSPACE_DIR}/configs/default_v3.yaml"}
+EXPRIMENT_NAME="${1:-default}"
+export EXPRIMENT_NAME
+TRAINING_CONFIG=${2:-"${WORKSPACE_DIR}/configs/default_v3.yaml"}
 ACCELERATE_CONFIG="${WORKSPACE_DIR}/configs/accelerate_deepspeed_zero2.yaml"
 NUM_GPUS=${SLURM_GPUS_ON_NODE:-1}
-EXTRA_ARGS=("${@:2}")
+EXTRA_ARGS=("${@:3}")
 
 echo "=========================================="
 echo "SLURM Accelerate Training (V3)"

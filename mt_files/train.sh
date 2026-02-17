@@ -18,10 +18,12 @@ export TRITON_CACHE_DIR="${CACHE_ROOT}/triton"
 mkdir -p "$HF_HOME" "$TORCH_HOME" "$TMPDIR" "$TRITON_CACHE_DIR"
 
 # Configuration
-TRAINING_CONFIG=${1:-"${WORKSPACE_DIR}/configs/default_v3.yaml"}
+EXPRIMENT_NAME="${1:-default}"
+export EXPRIMENT_NAME
+TRAINING_CONFIG=${2:-"${WORKSPACE_DIR}/configs/default_v3.yaml"}
 ACCELERATE_CONFIG="${WORKSPACE_DIR}/configs/accelerate_deepspeed_zero2.yaml"
 NUM_GPUS=${SLURM_GPUS_ON_NODE:-1}
-EXTRA_ARGS=("${@:2}")
+EXTRA_ARGS=("${@:3}")
 
 echo "=========================================="
 echo "SLURM Accelerate Training (V3)"

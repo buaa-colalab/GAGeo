@@ -60,7 +60,7 @@ model:
 training:
   batch_size: 6
   gradient_accumulation_steps: 4
-  num_epochs: 20
+  num_epochs: 30
   
   # 3-group learning rate strategy
   lr_backbone: 2.0e-5     # Low LR: Pi3 encoder + decoder (pretrained)
@@ -109,7 +109,8 @@ training:
 checkpoint:
   output_dir: "${ROOT_DIR}/${WORKSPACE_NAME}/output_v3"
   save_freq: 5
-  resume: null
+  resume: "${ROOT_DIR}/${WORKSPACE_NAME}/output_v3/${EXPRIMENT_NAME}/best"  # Path to checkpoint to resume from (set to null to train from scratch)
+  # resume: null
 
 # Logging
 logging:

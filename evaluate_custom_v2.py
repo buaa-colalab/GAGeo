@@ -9,10 +9,10 @@ Cross-View Localizer V2 独立评测脚本（参考 baseline/evaluate_custom.py�
   分割(SAM mask, bbox+point->SAM): mIoU · mDice · AAE · ME
 
 支持：
-  - split: test / unseen_test（默认都评估）
-  - 分组: task_type / size_category / shape_category（并包含 task×size / task×shape）
-  - prompt 只使用 point
-  - 默认加载 output_v2/best
+    - split: test / unseen_test（默认都评估）
+    - 分组: task_type / size_category / shape_category（并包含 task×size / task×shape）
+    - prompt 可选: point / bbox / mask（可一次评估多个）
+    - 默认加载 output_v2/best
 """
 
 from __future__ import annotations
@@ -37,10 +37,28 @@ from tqdm import tqdm
 from models import build_cross_view_localizer_v2
 
 
-# Workspace path config
-ROOT_DIR = os.environ.get("ROOT_DIR", "/data/home/scxi704/run/xhj")
-WORKSPACE_NAME = os.environ.get("WORKSPACE_NAME", "location_v3")
-WORKSPACE_DIR = Path(ROOT_DIR) / WORKSPACE_NAME
+def get_workspace_dir() -> Path:
+    root_dir = os.environ.get("ROOT_DIR", "")
+    workspace_name = os.environ.get("WORKSPACE_NAME", "")
+    if root_dir and workspace_name:
+        return Path(root_dir) / workspace_name
+    return Path(__file__).resolve().parent
+
+
+def load_cfg_with_env(config_path: str) -> Dict[str, Any]:
+    with open(config_path, "r", encoding="utf-8") as f:
+        cfg = json.load(f) if config_path.endswith(".json") else __import__("yaml").safe_load(f)
+
+    def _expand(obj):
+        if isinstance(obj, dict):
+            return {k: _expand(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_expand(v) for v in obj]
+        if isinstance(obj, str):
+            return os.path.expandvars(obj)
+        return obj
+
+    return _expand(cfg)
 
 
 # =========================
@@ -109,6 +127,26 @@ def bbox_iou_np(b1: np.ndarray, b2: np.ndarray) -> float:
     return inter / (a1 + a2 - inter + 1e-16)
 
 
+def rotation_matrix_to_yaw_np(R: np.ndarray) -> np.ndarray:
+    """Extract yaw (radians) from rotation matrix using ZYX convention.
+
+    Args:
+        R: [..., 3, 3] or [..., 4, 4]
+    Returns:
+        yaw: [...] in radians
+    """
+    if R.shape[-2:] == (4, 4):
+        R = R[..., :3, :3]
+    return np.arctan2(R[..., 1, 0], R[..., 0, 0]).astype(np.float32)
+
+
+def maybe_deg_to_rad(x: float) -> np.float32:
+    """Convert degree input to radians when value range indicates degrees."""
+    x = float(x)
+    x = np.deg2rad(x)
+    return np.float32(x)
+
+
 class SegMetrics:
     @staticmethod
     def iou(p: np.ndarray, g: np.ndarray) -> float:
@@ -156,6 +194,8 @@ class GroupedEvaluator:
         det_iou: float,
         model_seg: Tuple[float, float, float, float] | None,
         sam_seg: Tuple[float, float, float, float] | None,
+        yaw_err_deg: float | None,
+        pos_err_px: float | None,
         task_type: str,
         size_category: str,
         shape_category: str,
@@ -165,6 +205,8 @@ class GroupedEvaluator:
                 "det_iou": det_iou,
                 "model_seg": model_seg,
                 "sam_seg": sam_seg,
+                "yaw_err_deg": yaw_err_deg,
+                "pos_err_px": pos_err_px,
                 "task_type": task_type,
                 "size_category": size_category,
                 "shape_category": shape_category,
@@ -183,6 +225,13 @@ class GroupedEvaluator:
             "det_acc25": float(np.mean([1.0 if x > 0.25 else 0.0 for x in det])),
             "det_acc50": float(np.mean([1.0 if x > 0.50 else 0.0 for x in det])),
         }
+
+        yaw_vals = [r["yaw_err_deg"] for r in records if r.get("yaw_err_deg") is not None]
+        pos_vals = [r["pos_err_px"] for r in records if r.get("pos_err_px") is not None]
+        if yaw_vals:
+            out["yaw_err_deg"] = float(np.mean(yaw_vals))
+        if pos_vals:
+            out["pos_err_px"] = float(np.mean(pos_vals))
 
         for key, prefix in (("model_seg", "model"), ("sam_seg", "sam")):
             vals = [r[key] for r in records if r[key] is not None]
@@ -234,7 +283,7 @@ class EvalDatasetV2(Dataset):
     """
     与训练解耦的评估数据集：
       - 只读取 test/unseen_test json
-      - prompt 只用 point
+            - 支持 point / bbox / mask prompt
       - 返回分组字段 task_type/size_category/shape_category
     """
 
@@ -274,11 +323,31 @@ class EvalDatasetV2(Dataset):
         # 点提示（mono坐标）
         mono_point = np.array(item["mono_point"][:2], dtype=np.float32)
 
+        # bbox 提示（mono，通常为 cx,cy,w,h）
+        mono_bbox = np.array(item.get("mono_bbox", [0, 0, 0, 0])[:4], dtype=np.float32)
+
+        # mono mask 提示
+        mono_mask = decode_segmentation(item.get("mono_segmentation"), h_m, w_m)
+
         # GT bbox: sate_bbox in xywh
         gt_bbox_xywh = np.array(item["sate_bbox"][:4], dtype=np.float32)
 
         # GT mask
         gt_mask = decode_segmentation(item.get("sate_segmentation"), h_s, w_s)
+
+        # Pose GT (可选)
+        gt_yaw = item.get("rotation", None)
+        gt_pos = item.get("camera_position", None)
+        has_pose = (gt_yaw is not None) and (gt_pos is not None) and (len(gt_pos) >= 2)
+        if has_pose:
+            # JSON 中 rotation 通常为角度；统一转为弧度用于角度差计算
+            gt_yaw = maybe_deg_to_rad(gt_yaw)
+            gt_pos = np.array(gt_pos[:2], dtype=np.float32)
+            gt_pos_is_pixel = True
+        else:
+            gt_yaw = np.float32(0.0)
+            gt_pos = np.zeros((2,), dtype=np.float32)
+            gt_pos_is_pixel = False
 
         # resize 到 img_size 并同步坐标
         S = self.img_size
@@ -287,6 +356,16 @@ class EvalDatasetV2(Dataset):
             sx_m, sy_m = S / w_m, S / h_m
             mono = cv2.resize(mono, (S, S), interpolation=cv2.INTER_LINEAR)
             mono_point = np.array([mono_point[0] * sx_m, mono_point[1] * sy_m], dtype=np.float32)
+            mono_bbox = np.array(
+                [
+                    mono_bbox[0] * sx_m,
+                    mono_bbox[1] * sy_m,
+                    mono_bbox[2] * sx_m,
+                    mono_bbox[3] * sy_m,
+                ],
+                dtype=np.float32,
+            )
+            mono_mask = cv2.resize(mono_mask.astype(np.uint8), (S, S), interpolation=cv2.INTER_NEAREST)
 
         if (h_s, w_s) != (S, S):
             sx_s, sy_s = S / w_s, S / h_s
@@ -301,8 +380,16 @@ class EvalDatasetV2(Dataset):
                 ],
                 dtype=np.float32,
             )
+            if has_pose and gt_pos_is_pixel:
+                gt_pos = np.array([gt_pos[0] * sx_s, gt_pos[1] * sy_s], dtype=np.float32)
 
         gt_bbox_xyxy = bbox_xywh_to_xyxy(gt_bbox_xywh)
+
+        # Normalize GT position to [0,1] to match model output `position`.
+        if has_pose:
+            if gt_pos_is_pixel:
+                gt_pos = np.array([gt_pos[0] / S, gt_pos[1] / S], dtype=np.float32)
+            gt_pos = np.clip(gt_pos, 0.0, 1.0).astype(np.float32)
 
         mono_t = to_tensor(Image.fromarray(mono))  # [3,S,S], [0,1]
         sat_t = to_tensor(Image.fromarray(sat))
@@ -311,8 +398,13 @@ class EvalDatasetV2(Dataset):
             "front_view": mono_t,
             "sat_view": sat_t,
             "mono_point": torch.from_numpy(mono_point),
+            "mono_bbox": torch.from_numpy(mono_bbox),
+            "mono_mask": torch.from_numpy((mono_mask > 0).astype(np.uint8)),
             "gt_bbox_xyxy": torch.from_numpy(gt_bbox_xyxy),
             "gt_mask": torch.from_numpy((gt_mask > 0).astype(np.uint8)),
+            "gt_yaw": torch.tensor(gt_yaw, dtype=torch.float32),
+            "gt_position": torch.from_numpy(gt_pos),
+            "has_pose": bool(has_pose),
             "sat_rgb": sat,
             "task_type": item.get("task_type", "unknown"),
             "size_category": item.get("size_category", "unknown"),
@@ -326,8 +418,13 @@ def collate_eval(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
         "front_view": torch.stack([x["front_view"] for x in batch], dim=0),
         "sat_view": torch.stack([x["sat_view"] for x in batch], dim=0),
         "mono_point": torch.stack([x["mono_point"] for x in batch], dim=0),
+        "mono_bbox": torch.stack([x["mono_bbox"] for x in batch], dim=0),
+        "mono_mask": torch.stack([x["mono_mask"] for x in batch], dim=0),
         "gt_bbox_xyxy": torch.stack([x["gt_bbox_xyxy"] for x in batch], dim=0),
         "gt_mask": torch.stack([x["gt_mask"] for x in batch], dim=0),
+        "gt_yaw": torch.stack([x["gt_yaw"] for x in batch], dim=0),
+        "gt_position": torch.stack([x["gt_position"] for x in batch], dim=0),
+        "has_pose": [x["has_pose"] for x in batch],
         "sat_rgb": [x["sat_rgb"] for x in batch],
         "task_type": [x["task_type"] for x in batch],
         "size_category": [x["size_category"] for x in batch],
@@ -418,6 +515,7 @@ def evaluate_split(
     img_size: int,
     device: torch.device,
     use_sam: bool,
+    prompt_type: str,
 ):
     evaluator = GroupedEvaluator()
 
@@ -425,17 +523,37 @@ def evaluate_split(
         front = batch["front_view"].to(device, non_blocking=True)
         sat = batch["sat_view"].to(device, non_blocking=True)
         mono_point = batch["mono_point"].to(device, non_blocking=True)  # [B,2]
+        mono_bbox = batch["mono_bbox"].to(device, non_blocking=True)    # [B,4] cx,cy,w,h
+        mono_mask = batch["mono_mask"].to(device, non_blocking=True).float().unsqueeze(1)  # [B,1,S,S]
 
         B = front.shape[0]
-        point_coords = mono_point.unsqueeze(1)  # [B,1,2]
-        point_labels = torch.ones(B, 1, device=device)
+        points, boxes, masks = None, None, None
+        if prompt_type == "point":
+            point_coords = mono_point.unsqueeze(1)  # [B,1,2]
+            point_labels = torch.ones(B, 1, device=device)
+            points = (point_coords, point_labels)
+        elif prompt_type == "bbox":
+            # IMPORTANT:
+            # V2 prompt encoder + prompt_coords path expects boxes in (x, y, w, h)
+            # pixel space (top-left + size), not (x1, y1, x2, y2).
+            # Wrong format may produce RoPE positions out-of-range and trigger CUDA assert.
+            boxes = mono_bbox.clone()
+            boxes[:, 0] = boxes[:, 0].clamp(0, img_size - 1)  # x
+            boxes[:, 1] = boxes[:, 1].clamp(0, img_size - 1)  # y
+            boxes[:, 2] = boxes[:, 2].clamp(min=1.0, max=img_size)  # w
+            boxes[:, 3] = boxes[:, 3].clamp(min=1.0, max=img_size)  # h
+            boxes = boxes.unsqueeze(1)  # [B,1,4] (x, y, w, h)
+        elif prompt_type == "mask":
+            masks = mono_mask
+        else:
+            raise ValueError(f"Unsupported prompt_type: {prompt_type}")
 
         outputs = model(
             front_view=front,
             satellite_view=sat,
-            points=(point_coords, point_labels),
-            boxes=None,
-            masks=None,
+            points=points,
+            boxes=boxes,
+            masks=masks,
             mono_mask=None,
             sat_mask=None,
         )
@@ -445,6 +563,21 @@ def evaluate_split(
 
         gt_bbox_xyxy = batch["gt_bbox_xyxy"].numpy()
         gt_mask = batch["gt_mask"].numpy().astype(np.uint8)
+        gt_yaw = batch["gt_yaw"].numpy().astype(np.float32)
+        gt_pos = batch["gt_position"].numpy().astype(np.float32)
+        has_pose = batch["has_pose"]
+
+        pred_R = outputs.get("rotation_matrix", None)
+        pred_yaw = outputs.get("yaw", None)
+        pred_pos = outputs.get("position", None)
+        # 优先使用旋转矩阵计算 yaw，避免不同实现下 yaw 字段缺失/不一致
+        if pred_R is not None:
+            pred_R = pred_R.detach().cpu().numpy().astype(np.float32)
+            pred_yaw = rotation_matrix_to_yaw_np(pred_R)
+        elif pred_yaw is not None:
+            pred_yaw = pred_yaw.detach().cpu().numpy().astype(np.float32)
+        if pred_pos is not None:
+            pred_pos = pred_pos.detach().cpu().numpy().astype(np.float32)
 
         for i in range(B):
             # ---- Detection ----
@@ -479,10 +612,20 @@ def evaluate_split(
                 except Exception:
                     sam_seg = None
 
+            # ---- Pose metrics ----
+            yaw_err_deg = None
+            pos_err_px = None
+            if has_pose[i] and pred_yaw is not None and pred_pos is not None:
+                dyaw = np.arctan2(np.sin(pred_yaw[i] - gt_yaw[i]), np.cos(pred_yaw[i] - gt_yaw[i]))
+                yaw_err_deg = float(np.abs(np.degrees(dyaw)))
+                pos_err_px = float(np.linalg.norm(pred_pos[i] - gt_pos[i]) * img_size)
+
             evaluator.add(
                 det_iou=det_iou,
                 model_seg=model_seg,
                 sam_seg=sam_seg,
+                yaw_err_deg=yaw_err_deg,
+                pos_err_px=pos_err_px,
                 task_type=batch["task_type"][i],
                 size_category=batch["size_category"][i],
                 shape_category=batch["shape_category"][i],
@@ -503,23 +646,26 @@ def _fmt(v, w=8, decimals=4):
     return f"{float(v):.{decimals}f}".rjust(w)
 
 
-def print_grouped(results: OrderedDict, split_name: str, has_model_mask=True, has_sam=True):
+def print_grouped(results: OrderedDict, split_name: str, prompt_type: str, has_model_mask=True, has_sam=True):
     print("\n" + "=" * 120)
-    print(f"  Cross-View V2 Evaluation — {split_name}")
+    print(f"  Cross-View V2 Evaluation — {split_name} | prompt={prompt_type}")
     print("=" * 120)
 
-    hdr_det = f'{"Count":>7} {"Det_mIoU":>9} {"ACC@25":>8} {"ACC@50":>8}'
+    hdr_det = f'{"Count":>7} {"Det_mIoU":>9} {"ACC@25":>8} {"ACC@50":>8} {"YawErr":>8} {"PosErrPx":>9}'
     hdr_model = f' │ {"M_mIoU":>8} {"M_mDice":>8} {"M_AAE":>9} {"M_ME":>8}' if has_model_mask else ""
     hdr_sam = f' │ {"S_mIoU":>8} {"S_mDice":>8} {"S_AAE":>9} {"S_ME":>8}' if has_sam else ""
 
     print(f'  {"Group":<30} {hdr_det}{hdr_model}{hdr_sam}')
-    print(f'  {"─" * 30} {"─" * 35}{"─" * 40 if has_model_mask else ""}{"─" * 40 if has_sam else ""}')
+    print(f'  {"─" * 30} {"─" * 54}{"─" * 40 if has_model_mask else ""}{"─" * 40 if has_sam else ""}')
 
     for name, r in results.items():
         if r is None:
             continue
         line = f'  {name:<30} '
-        line += f'{_fmt(r["count"], 7, 0)} {_fmt(r["det_iou"], 9)} {_fmt(r["det_acc25"], 8)} {_fmt(r["det_acc50"], 8)}'
+        line += (
+            f'{_fmt(r["count"], 7, 0)} {_fmt(r["det_iou"], 9)} {_fmt(r["det_acc25"], 8)} {_fmt(r["det_acc50"], 8)} '
+            f'{_fmt(r.get("yaw_err_deg"), 8, 2)} {_fmt(r.get("pos_err_px"), 9, 2)}'
+        )
         if has_model_mask:
             line += f' │ {_fmt(r.get("model_miou"), 8)} {_fmt(r.get("model_mdice"), 8)} {_fmt(r.get("model_aae"), 9, 1)} {_fmt(r.get("model_me"), 8, 2)}'
         if has_sam:
@@ -527,17 +673,19 @@ def print_grouped(results: OrderedDict, split_name: str, has_model_mask=True, ha
         print(line)
 
 
-def save_results_json(all_results: Dict[str, OrderedDict], path: str):
+def save_results_json(all_results: Dict[str, Dict[str, OrderedDict]], path: str):
     out = {}
-    for split, groups in all_results.items():
+    for split, prompt_dict in all_results.items():
         out[split] = {}
-        for gname, gval in groups.items():
-            if gval is None:
-                continue
-            out[split][gname] = {
-                k: (float(v) if isinstance(v, (np.floating, np.integer)) else v)
-                for k, v in gval.items()
-            }
+        for prompt_type, groups in prompt_dict.items():
+            out[split][prompt_type] = {}
+            for gname, gval in groups.items():
+                if gval is None:
+                    continue
+                out[split][prompt_type][gname] = {
+                    k: (float(v) if isinstance(v, (np.floating, np.integer)) else v)
+                    for k, v in gval.items()
+                }
     with open(path, "w", encoding="utf-8") as f:
         json.dump(out, f, indent=2, ensure_ascii=False)
     print(f"Results saved to: {path}")
@@ -548,13 +696,17 @@ def save_results_json(all_results: Dict[str, OrderedDict], path: str):
 # =========================
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Evaluate Cross-View Localizer V2 (grouped metrics)")
-    p.add_argument("--config", type=str, default=str(WORKSPACE_DIR / "output_v2" / "config.yaml"))
-    p.add_argument("--checkpoint", type=str, default=str(WORKSPACE_DIR / "output_v2" / "best"))
+    ws_dir = get_workspace_dir()
+    output_dir = ws_dir / "output_v3"
+    p = argparse.ArgumentParser(description="Evaluate Cross-View Localizer V3 (grouped metrics)")
+    p.add_argument("--config", type=str, default=str(output_dir / "config.yaml"))
+    p.add_argument("--checkpoint", type=str, default=str(output_dir / "best"))
     p.add_argument("--image_root", type=str, default="")
     p.add_argument("--batch_size", type=int, default=8)
     p.add_argument("--num_workers", type=int, default=8)
     p.add_argument("--splits", nargs="+", default=["test", "unseen_test"])
+    p.add_argument("--prompt_types", nargs="+", default=["point", "bbox", "mask"],
+                   choices=["point", "bbox", "mask"])
     p.add_argument("--gpu", type=str, default="0")
     p.add_argument("--sam_checkpoint", type=str, required=True, help="segment-anything checkpoint path")
     p.add_argument("--sam_model_type", type=str, default="vit_h", choices=["vit_h", "vit_l", "vit_b"])
@@ -564,35 +716,23 @@ def parse_args():
 
 def main():
     args = parse_args()
-    os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
+    ws_dir = get_workspace_dir()
+    os.environ.setdefault("ROOT_DIR", str(ws_dir.parent))
+    os.environ.setdefault("WORKSPACE_NAME", ws_dir.name)
+    # IMPORTANT for multi-process multi-GPU launch:
+    # If launcher already sets CUDA_VISIBLE_DEVICES per process, do NOT override it here,
+    # otherwise all workers may collapse to the same physical GPU and trigger OOM.
+    preset_cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+    if not preset_cvd:
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
+        preset_cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    else:
+        print(f"Using preset CUDA_VISIBLE_DEVICES={preset_cvd}; ignore --gpu={args.gpu}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device} | GPU: {args.gpu}")
+    print(f"Device: {device} | CUDA_VISIBLE_DEVICES={preset_cvd}")
 
-    defaults = {
-        "ROOT_DIR": ROOT_DIR,
-        "WORKSPACE_NAME": WORKSPACE_NAME,
-        "WORKSPACE_DIR": str(WORKSPACE_DIR),
-    }
-
-    def _expand_str(s: str) -> str:
-        s = os.path.expandvars(s)
-        for k, v in defaults.items():
-            s = s.replace(f"${{{k}}}", v)
-        return s
-
-    def _expand_env(obj):
-        if isinstance(obj, dict):
-            return {k: _expand_env(v) for k, v in obj.items()}
-        if isinstance(obj, list):
-            return [_expand_env(v) for v in obj]
-        if isinstance(obj, str):
-            return _expand_str(obj)
-        return obj
-
-    with open(args.config, "r", encoding="utf-8") as f:
-        cfg_raw = json.load(f) if args.config.endswith(".json") else __import__("yaml").safe_load(f)
-    cfg = _expand_env(cfg_raw)
+    cfg = load_cfg_with_env(args.config)
 
     data_root = cfg["data"]["data_root"]
     image_root = args.image_root or data_root
@@ -612,6 +752,10 @@ def main():
 
     # load SAM
     print("\n[2/3] Loading SAM ...")
+    _cvos_dir = str(ws_dir.parents[1] / "baseline" / "CVOS-Code")
+    import sys
+    if os.path.isdir(_cvos_dir):
+        sys.path.insert(0, _cvos_dir)
     from segment_anything import sam_model_registry, SamPredictor
 
     sam = sam_model_registry[args.sam_model_type](checkpoint=args.sam_checkpoint)
@@ -626,7 +770,7 @@ def main():
         "unseen_test": "unseen_test.json",
     }
 
-    all_results: Dict[str, OrderedDict] = OrderedDict()
+    all_results: Dict[str, Dict[str, OrderedDict]] = OrderedDict()
 
     print("\n[3/3] Evaluating ...")
     for split in args.splits:
@@ -634,7 +778,7 @@ def main():
             print(f"Skip unknown split: {split}")
             continue
 
-        json_path = WORKSPACE_DIR / "data" / split_to_json[split]
+        json_path = ws_dir / "data" / split_to_json[split]
         if not json_path.exists():
             print(f"Skip missing file: {json_path}")
             continue
@@ -652,20 +796,23 @@ def main():
             collate_fn=collate_eval,
         )
 
-        t0 = time.time()
-        results = evaluate_split(
-            model=model,
-            sam_predictor=sam_predictor,
-            loader=loader,
-            img_size=img_size,
-            device=device,
-            use_sam=True,
-        )
-        dt = time.time() - t0
+        all_results[split] = OrderedDict()
+        for prompt_type in args.prompt_types:
+            t0 = time.time()
+            results = evaluate_split(
+                model=model,
+                sam_predictor=sam_predictor,
+                loader=loader,
+                img_size=img_size,
+                device=device,
+                use_sam=True,
+                prompt_type=prompt_type,
+            )
+            dt = time.time() - t0
 
-        print_grouped(results, split_name=split, has_model_mask=True, has_sam=True)
-        print(f"Split {split} done in {dt:.1f}s")
-        all_results[split] = results
+            print_grouped(results, split_name=split, prompt_type=prompt_type, has_model_mask=True, has_sam=True)
+            print(f"Split {split} | prompt={prompt_type} done in {dt:.1f}s")
+            all_results[split][prompt_type] = results
 
     if args.save_json:
         save_results_json(all_results, args.save_json)

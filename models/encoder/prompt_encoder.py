@@ -141,8 +141,7 @@ class GeometryPromptEncoder(nn.Module):
         Embeds box prompts.
         
         Args:
-            boxes: [B, N, 4] boxes in (x, y, w, h) or (x1, y1, x2, y2) format
-                   We assume (x, y, w, h) format from the data
+            boxes: [B, N, 4] boxes in pixel-space (x, y, w, h) format
         
         Returns:
             [B, N*2, C] corner embeddings
@@ -201,7 +200,7 @@ class GeometryPromptEncoder(nn.Module):
         
         Args:
             points: Tuple of (coords [B, N, 2], labels [B, N])
-            boxes: [B, M, 4] boxes in (x1, y1, x2, y2) format
+            boxes: [B, M, 4] boxes in pixel-space (x, y, w, h) format
             masks: [B, 1, H, W] binary masks
         
         Returns:
