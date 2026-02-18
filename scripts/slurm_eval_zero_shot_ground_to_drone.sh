@@ -27,8 +27,8 @@
 
 set -euo pipefail
 
-ROOT_DIR=${ROOT_DIR:-"$(cd "$(dirname "$0")/../.." && pwd)"}
-WORKSPACE_NAME=${WORKSPACE_NAME:-"location"}
+ROOT_DIR=${ROOT_DIR:-"/data/home/scxi704/run/xhj"}
+WORKSPACE_NAME=${WORKSPACE_NAME:-"location_v3"}
 WORKSPACE_DIR="${ROOT_DIR}/${WORKSPACE_NAME}"
 RUN_ROOT="$(dirname "$ROOT_DIR")"
 CACHE_ROOT=${CACHE_ROOT:-"${ROOT_DIR}/.cache"}
@@ -36,11 +36,12 @@ EXPRIMENT_NAME="ablation_4_all_on"
 
 TRIPLET_JSON="${1:-${ROOT_DIR}/University-Release/verified_triplets.json}"
 ROOT_DIR_DATA="${2:-${ROOT_DIR}/University-Release}"
-CKPT_DIR="${3:-${WORKSPACE_DIR}/output_v3/${EXPRIMENT_NAME}/best}"
+CKPT_DIR="${3:-${WORKSPACE_DIR}//output_v3/${EXPRIMENT_NAME}/best}"
 GPU_ID="${4:-0}"
 
 CONFIG_PATH="${WORKSPACE_DIR}/output_v3/${EXPRIMENT_NAME}/config.yaml"
 OUT_JSON="${WORKSPACE_DIR}/output_v3/${EXPRIMENT_NAME}/eval_zero_shot_ground_to_drone_$(date +%Y%m%d_%H%M%S).json"
+
 if [[ ! -f "$TRIPLET_JSON" ]]; then
   echo "[ERROR] triplet json not found: $TRIPLET_JSON"
   exit 1
@@ -65,7 +66,7 @@ export TRITON_CACHE_DIR="${CACHE_ROOT}/triton"
 mkdir -p "$HF_HOME" "$TORCH_HOME" "$TMPDIR" "$TRITON_CACHE_DIR"
 
 cd "$WORKSPACE_DIR"
-mkdir -p logs output_v2
+mkdir -p logs output_v3
 
 echo "=========================================="
 echo "Zero-shot Ground->Drone Evaluation"

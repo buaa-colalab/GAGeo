@@ -147,6 +147,50 @@ def maybe_deg_to_rad(x: float) -> np.float32:
     return np.float32(x)
 
 
+def euler_to_rotation_matrix_np(yaw: float, pitch: float, roll: float) -> np.ndarray:
+    """ZYX convention: R = Rz(yaw) @ Ry(pitch) @ Rx(roll)."""
+    cy, sy = np.cos(yaw), np.sin(yaw)
+    cp, sp = np.cos(pitch), np.sin(pitch)
+    cr, sr = np.cos(roll), np.sin(roll)
+
+    return np.array([
+        [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+        [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+        [-sp, cp * sr, cp * cr],
+    ], dtype=np.float32)
+
+
+def geodesic_rotation_error_deg_np(pred_R: np.ndarray, gt_R: np.ndarray) -> float:
+    """SO(3) geodesic rotation error in degrees (same definition as training/val)."""
+    if pred_R.shape == (4, 4):
+        pred_R = pred_R[:3, :3]
+    if gt_R.shape == (4, 4):
+        gt_R = gt_R[:3, :3]
+
+    R_diff = pred_R.T @ gt_R
+    trace = float(R_diff[0, 0] + R_diff[1, 1] + R_diff[2, 2])
+    cos_angle = (trace - 1.0) / 2.0
+    cos_angle = float(np.clip(cos_angle, -1.0 + 1e-7, 1.0 - 1e-7))
+    return float(np.degrees(np.arccos(cos_angle)))
+
+
+def build_gt_rotation_matrix(item: Dict[str, Any]) -> Tuple[np.ndarray, bool]:
+    """Build GT relative rotation matrix with training-consistent fields/defaults."""
+    if "relative_yaw" in item:
+        yaw = np.deg2rad(float(item.get("relative_yaw", 0.0)))
+        default_pitch = 45.0 if "drone" in str(item.get("mono_filename", "")).lower() else 90.0
+        pitch = np.deg2rad(float(item.get("relative_pitch", default_pitch)))
+        roll = np.deg2rad(float(item.get("relative_roll", 0.0)))
+        return euler_to_rotation_matrix_np(yaw, pitch, roll), True
+
+    # Fallback: only absolute/legacy yaw is available
+    if "rotation" in item and item.get("rotation") is not None:
+        yaw = float(maybe_deg_to_rad(item["rotation"]))
+        return euler_to_rotation_matrix_np(yaw, 0.0, 0.0), True
+
+    return np.eye(3, dtype=np.float32), False
+
+
 class SegMetrics:
     @staticmethod
     def iou(p: np.ndarray, g: np.ndarray) -> float:
@@ -194,7 +238,7 @@ class GroupedEvaluator:
         det_iou: float,
         model_seg: Tuple[float, float, float, float] | None,
         sam_seg: Tuple[float, float, float, float] | None,
-        yaw_err_deg: float | None,
+        rotation_error_deg: float | None,
         pos_err_px: float | None,
         task_type: str,
         size_category: str,
@@ -205,7 +249,7 @@ class GroupedEvaluator:
                 "det_iou": det_iou,
                 "model_seg": model_seg,
                 "sam_seg": sam_seg,
-                "yaw_err_deg": yaw_err_deg,
+                "rotation_error_deg": rotation_error_deg,
                 "pos_err_px": pos_err_px,
                 "task_type": task_type,
                 "size_category": size_category,
@@ -226,10 +270,10 @@ class GroupedEvaluator:
             "det_acc50": float(np.mean([1.0 if x > 0.50 else 0.0 for x in det])),
         }
 
-        yaw_vals = [r["yaw_err_deg"] for r in records if r.get("yaw_err_deg") is not None]
+        rot_vals = [r["rotation_error_deg"] for r in records if r.get("rotation_error_deg") is not None]
         pos_vals = [r["pos_err_px"] for r in records if r.get("pos_err_px") is not None]
-        if yaw_vals:
-            out["yaw_err_deg"] = float(np.mean(yaw_vals))
+        if rot_vals:
+            out["rotation_error_deg"] = float(np.mean(rot_vals))
         if pos_vals:
             out["pos_err_px"] = float(np.mean(pos_vals))
 
@@ -335,17 +379,14 @@ class EvalDatasetV2(Dataset):
         # GT mask
         gt_mask = decode_segmentation(item.get("sate_segmentation"), h_s, w_s)
 
-        # Pose GT (可选)
-        gt_yaw = item.get("rotation", None)
+        # Pose GT (可选): 统一为旋转矩阵 + 位置
+        gt_rotation_matrix, has_rotation = build_gt_rotation_matrix(item)
         gt_pos = item.get("camera_position", None)
-        has_pose = (gt_yaw is not None) and (gt_pos is not None) and (len(gt_pos) >= 2)
-        if has_pose:
-            # JSON 中 rotation 通常为角度；统一转为弧度用于角度差计算
-            gt_yaw = maybe_deg_to_rad(gt_yaw)
+        has_position = (gt_pos is not None) and (len(gt_pos) >= 2)
+        if has_position:
             gt_pos = np.array(gt_pos[:2], dtype=np.float32)
             gt_pos_is_pixel = True
         else:
-            gt_yaw = np.float32(0.0)
             gt_pos = np.zeros((2,), dtype=np.float32)
             gt_pos_is_pixel = False
 
@@ -380,13 +421,13 @@ class EvalDatasetV2(Dataset):
                 ],
                 dtype=np.float32,
             )
-            if has_pose and gt_pos_is_pixel:
+            if has_position and gt_pos_is_pixel:
                 gt_pos = np.array([gt_pos[0] * sx_s, gt_pos[1] * sy_s], dtype=np.float32)
 
         gt_bbox_xyxy = bbox_xywh_to_xyxy(gt_bbox_xywh)
 
         # Normalize GT position to [0,1] to match model output `position`.
-        if has_pose:
+        if has_position:
             if gt_pos_is_pixel:
                 gt_pos = np.array([gt_pos[0] / S, gt_pos[1] / S], dtype=np.float32)
             gt_pos = np.clip(gt_pos, 0.0, 1.0).astype(np.float32)
@@ -402,9 +443,10 @@ class EvalDatasetV2(Dataset):
             "mono_mask": torch.from_numpy((mono_mask > 0).astype(np.uint8)),
             "gt_bbox_xyxy": torch.from_numpy(gt_bbox_xyxy),
             "gt_mask": torch.from_numpy((gt_mask > 0).astype(np.uint8)),
-            "gt_yaw": torch.tensor(gt_yaw, dtype=torch.float32),
+            "gt_rotation_matrix": torch.from_numpy(gt_rotation_matrix),
             "gt_position": torch.from_numpy(gt_pos),
-            "has_pose": bool(has_pose),
+            "has_rotation": bool(has_rotation),
+            "has_pose": bool(has_position),
             "sat_rgb": sat,
             "task_type": item.get("task_type", "unknown"),
             "size_category": item.get("size_category", "unknown"),
@@ -422,8 +464,9 @@ def collate_eval(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
         "mono_mask": torch.stack([x["mono_mask"] for x in batch], dim=0),
         "gt_bbox_xyxy": torch.stack([x["gt_bbox_xyxy"] for x in batch], dim=0),
         "gt_mask": torch.stack([x["gt_mask"] for x in batch], dim=0),
-        "gt_yaw": torch.stack([x["gt_yaw"] for x in batch], dim=0),
+        "gt_rotation_matrix": torch.stack([x["gt_rotation_matrix"] for x in batch], dim=0),
         "gt_position": torch.stack([x["gt_position"] for x in batch], dim=0),
+        "has_rotation": [x["has_rotation"] for x in batch],
         "has_pose": [x["has_pose"] for x in batch],
         "sat_rgb": [x["sat_rgb"] for x in batch],
         "task_type": [x["task_type"] for x in batch],
@@ -563,19 +606,15 @@ def evaluate_split(
 
         gt_bbox_xyxy = batch["gt_bbox_xyxy"].numpy()
         gt_mask = batch["gt_mask"].numpy().astype(np.uint8)
-        gt_yaw = batch["gt_yaw"].numpy().astype(np.float32)
+        gt_rotation = batch["gt_rotation_matrix"].numpy().astype(np.float32)
         gt_pos = batch["gt_position"].numpy().astype(np.float32)
+        has_rotation = batch["has_rotation"]
         has_pose = batch["has_pose"]
 
         pred_R = outputs.get("rotation_matrix", None)
-        pred_yaw = outputs.get("yaw", None)
         pred_pos = outputs.get("position", None)
-        # 优先使用旋转矩阵计算 yaw，避免不同实现下 yaw 字段缺失/不一致
         if pred_R is not None:
             pred_R = pred_R.detach().cpu().numpy().astype(np.float32)
-            pred_yaw = rotation_matrix_to_yaw_np(pred_R)
-        elif pred_yaw is not None:
-            pred_yaw = pred_yaw.detach().cpu().numpy().astype(np.float32)
         if pred_pos is not None:
             pred_pos = pred_pos.detach().cpu().numpy().astype(np.float32)
 
@@ -613,18 +652,18 @@ def evaluate_split(
                     sam_seg = None
 
             # ---- Pose metrics ----
-            yaw_err_deg = None
+            rotation_error_deg = None
             pos_err_px = None
-            if has_pose[i] and pred_yaw is not None and pred_pos is not None:
-                dyaw = np.arctan2(np.sin(pred_yaw[i] - gt_yaw[i]), np.cos(pred_yaw[i] - gt_yaw[i]))
-                yaw_err_deg = float(np.abs(np.degrees(dyaw)))
+            if has_rotation[i] and pred_R is not None:
+                rotation_error_deg = geodesic_rotation_error_deg_np(pred_R[i], gt_rotation[i])
+            if has_pose[i] and pred_pos is not None:
                 pos_err_px = float(np.linalg.norm(pred_pos[i] - gt_pos[i]) * img_size)
 
             evaluator.add(
                 det_iou=det_iou,
                 model_seg=model_seg,
                 sam_seg=sam_seg,
-                yaw_err_deg=yaw_err_deg,
+                rotation_error_deg=rotation_error_deg,
                 pos_err_px=pos_err_px,
                 task_type=batch["task_type"][i],
                 size_category=batch["size_category"][i],
@@ -651,7 +690,7 @@ def print_grouped(results: OrderedDict, split_name: str, prompt_type: str, has_m
     print(f"  Cross-View V2 Evaluation — {split_name} | prompt={prompt_type}")
     print("=" * 120)
 
-    hdr_det = f'{"Count":>7} {"Det_mIoU":>9} {"ACC@25":>8} {"ACC@50":>8} {"YawErr":>8} {"PosErrPx":>9}'
+    hdr_det = f'{"Count":>7} {"Det_mIoU":>9} {"ACC@25":>8} {"ACC@50":>8} {"RotErr":>8} {"PosErrPx":>9}'
     hdr_model = f' │ {"M_mIoU":>8} {"M_mDice":>8} {"M_AAE":>9} {"M_ME":>8}' if has_model_mask else ""
     hdr_sam = f' │ {"S_mIoU":>8} {"S_mDice":>8} {"S_AAE":>9} {"S_ME":>8}' if has_sam else ""
 
@@ -664,7 +703,7 @@ def print_grouped(results: OrderedDict, split_name: str, prompt_type: str, has_m
         line = f'  {name:<30} '
         line += (
             f'{_fmt(r["count"], 7, 0)} {_fmt(r["det_iou"], 9)} {_fmt(r["det_acc25"], 8)} {_fmt(r["det_acc50"], 8)} '
-            f'{_fmt(r.get("yaw_err_deg"), 8, 2)} {_fmt(r.get("pos_err_px"), 9, 2)}'
+            f'{_fmt(r.get("rotation_error_deg"), 8, 2)} {_fmt(r.get("pos_err_px"), 9, 2)}'
         )
         if has_model_mask:
             line += f' │ {_fmt(r.get("model_miou"), 8)} {_fmt(r.get("model_mdice"), 8)} {_fmt(r.get("model_aae"), 9, 1)} {_fmt(r.get("model_me"), 8, 2)}'
