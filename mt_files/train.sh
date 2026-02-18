@@ -18,8 +18,10 @@ export TRITON_CACHE_DIR="${CACHE_ROOT}/triton"
 mkdir -p "$HF_HOME" "$TORCH_HOME" "$TMPDIR" "$TRITON_CACHE_DIR"
 
 # Configuration
-EXPRIMENT_NAME="${1:-default}"
-export EXPRIMENT_NAME
+EXPERIMENT_NAME="${1:-default}"
+export EXPERIMENT_NAME
+# Backward compatibility (legacy typo used in some scripts/configs)
+export EXPRIMENT_NAME="$EXPERIMENT_NAME"
 TRAINING_CONFIG=${2:-"${WORKSPACE_DIR}/configs/default_v3.yaml"}
 ACCELERATE_CONFIG="${WORKSPACE_DIR}/configs/accelerate_deepspeed_zero2.yaml"
 NUM_GPUS=${SLURM_GPUS_ON_NODE:-1}

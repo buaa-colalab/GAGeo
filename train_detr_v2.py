@@ -573,6 +573,11 @@ def main():
         num_warmup_steps=num_warmup_steps,
         num_training_steps=num_training_steps,
     )
+    # NOTE:
+    # Do not register scheduler as a custom checkpoint object here.
+    # Historical checkpoints in this project were saved without custom objects,
+    # and registering now causes load_state() to fail with a mismatch error.
+    # We recover scheduler position from `resume_global_step` below.
 
     if accelerator.is_main_process:
         accelerator.print(f"Optimizer param groups (after scheduler init): {len(optimizer.param_groups)}")
@@ -602,6 +607,17 @@ def main():
                 start_epoch = training_state.get('epoch', 0) + 1
                 best_loss = training_state.get('best_loss', float('inf'))
                 resume_global_step = training_state.get('global_step', 0)
+
+            # Backward compatibility: old checkpoints may not contain scheduler state.
+            # In that case, recover LR schedule position from saved global_step.
+            sched_step = int(getattr(scheduler, 'last_epoch', -1))
+            if resume_global_step > 0 and sched_step < resume_global_step:
+                accelerator.print(
+                    f"[WARN] Scheduler state seems stale (last_epoch={sched_step}, "
+                    f"global_step={resume_global_step}). Fast-forwarding scheduler..."
+                )
+                for _ in range(resume_global_step - sched_step):
+                    scheduler.step()
             accelerator.print(f'Resumed from epoch {start_epoch}, global_step {resume_global_step}')
 
     # ============ Training Loop ============
