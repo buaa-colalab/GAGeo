@@ -641,6 +641,15 @@ def main():
             val_losses = validate(model, val_loader, criterion, accelerator, cfg, epoch)
             accelerator.print(f'Val   - ' + ', '.join([f'{k}: {v:.4f}' for k, v in val_losses.items()]))
 
+            # IMPORTANT: use globally reduced val loss for checkpoint decision.
+            # If each rank uses its local val loss, branches may diverge and trigger
+            # distributed deadlock / timeout at epoch boundaries.
+            val_loss_global = accelerator.reduce(
+                torch.tensor(val_losses['loss'], device=accelerator.device, dtype=torch.float32),
+                reduction='mean'
+            ).item()
+            val_losses['loss_global'] = val_loss_global
+
             if cfg['logging'].get('visualize', True):
                 vis_prompt_types = cfg['logging'].get('vis_prompt_types', ['point'])
                 num_vis = cfg['logging'].get('vis_samples', 10)
@@ -648,8 +657,8 @@ def main():
                     visualize_validation_samples(model, val_loader, accelerator, cfg, epoch,
                                                 num_samples=num_vis, prompt_type=prompt_type)
 
-            if val_losses['loss'] < best_loss:
-                best_loss = val_losses['loss']
+            if val_loss_global < best_loss:
+                best_loss = val_loss_global
                 accelerator.save_state(output_dir / 'best')
                 if accelerator.is_main_process:
                     torch.save({
