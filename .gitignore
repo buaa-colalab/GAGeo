@@ -46,3 +46,4 @@ datasets/*
 .hopeignore
 ckpt
 *.json
+vis/

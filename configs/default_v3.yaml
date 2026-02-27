@@ -21,7 +21,11 @@ model:
   decoder_size: 'large'  # 'small', 'base', 'large'
   
   # V3 Token injection settings
-  num_learnable_tokens: 2  # Learnable query 0=bbox/mask, 1=heatmap
+  # Total learnable queries = num_bbox_mask_queries + num_heatmap_queries.
+  # Keep num_learnable_tokens for backward compatibility with old scripts.
+  num_bbox_mask_queries: 1
+  num_heatmap_queries: 1
+  num_learnable_tokens: 2
 
   # Ablation switches
   use_deep_supervision: true
@@ -30,9 +34,6 @@ model:
   # Deep supervision (0-indexed pair-layers: one local+global = one layer)
   supervision_layers: [4, 11, 17]  # Early, Mid, Late
   supervision_weights: [0.1, 0.3, 0.6]  # Increasing weights
-  
-  # Mask head
-  num_mask_tokens: 1  # Number of mask output tokens
   
   # Pi3 pretrained weights
   pi3_weights: "${ROOT_DIR}/ckpt/pi3/model.safetensors"
@@ -58,14 +59,14 @@ model:
 
 # Training
 training:
-  batch_size: 6
+  batch_size: 3
   gradient_accumulation_steps: 4
   num_epochs: 30
   
   # 3-group learning rate strategy
-  lr_backbone: 2.0e-5     # Low LR: Pi3 encoder + decoder (pretrained)
-  lr_new_tokens: 8.0e-4   # Mid LR: Learnable queries, intermediate projections, prompt projections
-  lr_heads: 2.0e-4        # High LR: Task heads + intermediate supervision heads
+  lr_backbone: 1.0e-5     # Low LR: Pi3 encoder + decoder (pretrained)
+  lr_new_tokens: 5.0e-4   # Mid LR: Learnable queries, intermediate projections, prompt projections
+  lr_heads: 1.0e-4        # High LR: Task heads + intermediate supervision heads
   weight_decay: 1.0e-4
   
   # Loss weights (final predictions)
@@ -78,8 +79,9 @@ training:
   weight_contrastive: 0.1
   weight_class: 2.0
 
-  # Ablation switch: control rot+pos supervision (heatmap + rotation)
+  # Ablation switches for pose-related supervision
   use_rot_pos_supervision: true
+  use_heatmap_loss: true
   
   # Rotation Loss
   smooth_rotation: true
@@ -104,6 +106,10 @@ training:
   use_amp: true
   mixed_precision: bf16
   gpu: "0,1,2,3,4,5,6,7"
+
+  # Speed optimizations
+  compile_encoder: false         # Multi-GPU/DeepSpeed may hit inductor(triton) cache issues
+  gradient_checkpointing: false  # Enable to save VRAM → allows larger batch_size
 
 # Checkpointing
 checkpoint:

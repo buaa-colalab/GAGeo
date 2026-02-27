@@ -38,8 +38,8 @@ class SAMMaskHead(nn.Module):
     """
     SAM-style mask prediction head.
     
-    Takes a learnable query token output and satellite spatial features,
-    predicts a segmentation mask on the satellite view.
+    Takes one or more learnable query token outputs and satellite spatial
+    features, predicts segmentation masks on the satellite view.
     
     Architecture (following SAM2 MaskDecoder):
     1. output_upscaling: ConvTranspose2d 37x37 -> 74x74 -> 148x148
@@ -50,19 +50,16 @@ class SAMMaskHead(nn.Module):
     Args:
         hidden_dim: Input feature dimension (2048 for Pi3 large)
         output_size: Final mask output size (default 518)
-        num_mask_tokens: Number of mask prediction tokens (default 1, single mask)
     """
     
     def __init__(
         self,
         hidden_dim: int = 2048,
         output_size: int = 518,
-        num_mask_tokens: int = 1,
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.output_size = output_size
-        self.num_mask_tokens = num_mask_tokens
         
         # Upscale spatial features: 37x37 -> 74x74 -> 148x148
         # Following SAM2: ConvTranspose2d with stride 2
@@ -74,19 +71,15 @@ class SAMMaskHead(nn.Module):
             nn.GELU(),
         )
         
-        # Hypernetwork MLP: query token -> dynamic convolution kernel
-        # Each mask token produces a kernel of dim hidden_dim // 8
-        self.output_hypernetworks_mlps = nn.ModuleList([
-            MLP(hidden_dim, hidden_dim, hidden_dim // 8, 3)
-            for _ in range(num_mask_tokens)
-        ])
-        
-        # IoU prediction head (mask quality)
-        self.iou_prediction_head = MLP(hidden_dim, hidden_dim // 4, num_mask_tokens, 3, sigmoid_output=True)
+        # Shared hypernetwork: each query token -> one dynamic convolution kernel
+        self.output_hypernetwork_mlp = MLP(hidden_dim, hidden_dim, hidden_dim // 8, 3)
+
+        # Per-query IoU prediction head
+        self.iou_prediction_head = MLP(hidden_dim, hidden_dim // 4, 1, 3, sigmoid_output=True)
     
     def forward(
         self,
-        query_token: torch.Tensor,
+        query_tokens: torch.Tensor,
         spatial_features: torch.Tensor,
         spatial_size: Tuple[int, int],
     ) -> Dict[str, torch.Tensor]:
@@ -94,17 +87,22 @@ class SAMMaskHead(nn.Module):
         Predict segmentation mask.
         
         Args:
-            query_token: [B, C] learnable query token output (bbox/mask query)
+            query_tokens: [B, Q, C] or [B, C], learnable query outputs for bbox/mask
             spatial_features: [B, P, C] satellite patch features (P = H*W)
             spatial_size: (H, W) spatial dimensions (37, 37)
         
         Returns:
             Dict with:
-                - mask_logits: [B, num_masks, output_size, output_size] raw logits
-                - mask_pred: [B, num_masks, output_size, output_size] sigmoid probabilities
-                - iou_pred: [B, num_masks] predicted IoU scores
+                - mask_logits: [B, Q, output_size, output_size] raw logits
+                - mask_pred: [B, Q, output_size, output_size] sigmoid probabilities
+                - iou_pred: [B, Q] predicted IoU scores
         """
-        B = query_token.shape[0]
+        if query_tokens.dim() == 2:
+            query_tokens = query_tokens.unsqueeze(1)
+        if query_tokens.dim() != 3:
+            raise ValueError(f"query_tokens must be [B, Q, C] or [B, C], got {tuple(query_tokens.shape)}")
+
+        B = query_tokens.shape[0]
         H, W = spatial_size
         C = self.hidden_dim
         
@@ -114,24 +112,21 @@ class SAMMaskHead(nn.Module):
         # Upscale: [B, C, 37, 37] -> [B, C//8, 148, 148]
         upscaled = self.output_upscaling(src)
         
-        # Hypernetwork: query_token -> dynamic kernel
-        hyper_in_list = []
-        for i in range(self.num_mask_tokens):
-            hyper_in_list.append(self.output_hypernetworks_mlps[i](query_token))
-        hyper_in = torch.stack(hyper_in_list, dim=1)  # [B, num_masks, C//8]
+        # Hypernetwork: query token(s) -> dynamic kernel(s)
+        hyper_in = self.output_hypernetwork_mlp(query_tokens)  # [B, Q, C//8]
         
         # Dot product: [B, num_masks, C//8] @ [B, C//8, H*W] -> [B, num_masks, H*W]
         b, c, h, w = upscaled.shape
-        masks = (hyper_in @ upscaled.view(b, c, h * w)).view(b, -1, h, w)  # [B, num_masks, 148, 148]
+        masks = (hyper_in @ upscaled.view(b, c, h * w)).view(b, -1, h, w)  # [B, Q, 148, 148]
         
         # Interpolate to output size
         mask_logits = F.interpolate(
             masks, size=(self.output_size, self.output_size),
             mode='bilinear', align_corners=False,
-        )  # [B, num_masks, 518, 518]
+        )  # [B, Q, 518, 518]
         
         # IoU prediction
-        iou_pred = self.iou_prediction_head(query_token)  # [B, num_masks]
+        iou_pred = self.iou_prediction_head(query_tokens).squeeze(-1)  # [B, Q]
         
         return {
             'mask_logits': mask_logits,

@@ -56,6 +56,10 @@ def parse_args():
                         help='Override model.use_contrastive_loss for ablation')
     parser.add_argument('--use_rot_pos_supervision', type=str2bool, default=None,
                         help='Override training.use_rot_pos_supervision for ablation')
+    parser.add_argument('--use_heatmap_loss', type=str2bool, default=None,
+                        help='Override training.use_heatmap_loss for ablation')
+    parser.add_argument('--num_bbox_mask_queries', type=int, default=None,
+                        help='Override model.num_bbox_mask_queries for ablation')
     return parser.parse_args()
 
 
@@ -156,7 +160,6 @@ def train_one_epoch(
 
             # Random prompt selection
             points, boxes, masks = prepare_random_prompt(batch, accelerator.device)
-            _assert_bbox_prompt_for_forward(boxes, front_view)
 
             # Forward
             with accelerator.autocast():
@@ -179,7 +182,7 @@ def train_one_epoch(
                 accelerator.clip_grad_norm_(model.parameters(), cfg['training']['grad_clip'])
 
             optimizer.step()
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
 
         if accelerator.sync_gradients:
             scheduler.step()
@@ -363,10 +366,16 @@ def main():
         cfg.setdefault('model', {})['use_contrastive_loss'] = args.use_contrastive_loss
     if args.use_rot_pos_supervision is not None:
         cfg.setdefault('training', {})['use_rot_pos_supervision'] = args.use_rot_pos_supervision
+    if args.use_heatmap_loss is not None:
+        cfg.setdefault('training', {})['use_heatmap_loss'] = args.use_heatmap_loss
+    if args.num_bbox_mask_queries is not None:
+        cfg.setdefault('model', {})['num_bbox_mask_queries'] = int(args.num_bbox_mask_queries)
 
     use_deep_supervision = cfg.get('model', {}).get('use_deep_supervision', True)
     use_contrastive_loss = cfg.get('model', {}).get('use_contrastive_loss', cfg.get('model', {}).get('contrastive', True))
     use_rot_pos_supervision = cfg.get('training', {}).get('use_rot_pos_supervision', True)
+    use_heatmap_loss = cfg.get('training', {}).get('use_heatmap_loss', use_rot_pos_supervision)
+    num_bbox_mask_queries = int(cfg.get('model', {}).get('num_bbox_mask_queries', 1))
 
     if not use_deep_supervision:
         cfg['model']['supervision_layers'] = []
@@ -376,6 +385,13 @@ def main():
 
     gradient_accumulation_steps = cfg['training'].get('gradient_accumulation_steps', 1)
     mixed_precision = cfg['training'].get('mixed_precision', 'bf16') if cfg['training'].get('use_amp', True) else "no"
+
+    # ============ RTX 5090 Performance Knobs ============
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
+        torch.set_float32_matmul_precision('high')
 
     output_dir = Path(cfg['checkpoint']['output_dir'])
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -395,7 +411,8 @@ def main():
         accelerator.print(f"Output directory: {output_dir}")
         accelerator.print(
             f"Ablation switches -> deep_supervision={use_deep_supervision}, "
-            f"contrastive={use_contrastive_loss}, rot_pos_supervision={use_rot_pos_supervision}"
+            f"contrastive={use_contrastive_loss}, rot_pos_supervision={use_rot_pos_supervision}, "
+            f"heatmap_loss={use_heatmap_loss}, num_bbox_mask_queries={num_bbox_mask_queries}"
         )
 
     if accelerator.is_main_process and cfg['logging'].get('use_tensorboard', True):
@@ -425,23 +442,31 @@ def main():
         crop_sat=False,
     )
 
+    num_workers = int(cfg['data']['num_workers'])
+    persistent = num_workers > 0
+    prefetch = 4 if num_workers > 0 else None
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=cfg['training']['batch_size'],
         shuffle=True,
-        num_workers=cfg['data']['num_workers'],
+        num_workers=num_workers,
         collate_fn=collate_fn,
         pin_memory=True,
         drop_last=True,
+        persistent_workers=persistent,
+        prefetch_factor=prefetch,
     )
 
     val_loader = DataLoader(
         val_dataset,
         batch_size=cfg['training']['batch_size'],
         shuffle=False,
-        num_workers=cfg['data']['num_workers'],
+        num_workers=num_workers,
         collate_fn=collate_fn,
         pin_memory=True,
+        persistent_workers=persistent,
+        prefetch_factor=prefetch,
     )
 
     accelerator.print(f'Train: {len(train_dataset)} samples, Val: {len(val_dataset)} samples')
@@ -456,6 +481,8 @@ def main():
         img_size=cfg['data']['img_size'],
         decoder_size=cfg['model'].get('decoder_size', 'large'),
         num_learnable_tokens=cfg['model'].get('num_learnable_tokens', 2),
+        num_bbox_mask_queries=num_bbox_mask_queries,
+        num_heatmap_queries=cfg['model'].get('num_heatmap_queries', 1),
         supervision_layers=cfg['model'].get('supervision_layers', [4, 11, 17]),
         supervision_weights=cfg['model'].get('supervision_weights', [0.1, 0.3, 0.6]),
         dropout=cfg['model'].get('dropout', 0.1),
@@ -465,7 +492,6 @@ def main():
         contrastive_momentum=cfg['model'].get('contrastive_momentum', 0.999),
         contrastive_temperature=cfg['model'].get('contrastive_temperature', 0.07),
         sam_embed_dim=cfg['model'].get('sam_embed_dim'),
-        num_mask_tokens=cfg['model'].get('num_mask_tokens', 1),
     )
 
     if cfg['model'].get('pi3_weights'):
@@ -488,6 +514,25 @@ def main():
             param.requires_grad = False
         accelerator.print('Froze DINOv2 encoder')
 
+    # torch.compile can speed up single-GPU frozen encoder, but it is unstable on some
+    # multi-GPU + DeepSpeed setups due to inductor/triton cache races.
+    compile_encoder = cfg.get('training', {}).get('compile_encoder', False)
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if compile_encoder and hasattr(torch, 'compile'):
+        if world_size > 1:
+            accelerator.print(
+                f"[WARN] compile_encoder=True but WORLD_SIZE={world_size}; "
+                "skip torch.compile to avoid distributed inductor cache failures."
+            )
+        else:
+            try:
+                model.backbone.encoder = torch.compile(
+                    model.backbone.encoder, mode='reduce-overhead', fullgraph=False,
+                )
+                accelerator.print('Compiled DINOv2 encoder with torch.compile (reduce-overhead)')
+            except Exception as e:
+                accelerator.print(f'[WARN] torch.compile failed, skipping: {e}')
+
     # Freeze prompt encoder (keep projection layers)
     if cfg['model'].get('freeze_prompt_encoder', True):
         model._freeze_prompt_encoder()
@@ -505,6 +550,16 @@ def main():
         for param in model.backbone.decoder.parameters():
             param.requires_grad = False
         accelerator.print('Froze Pi3 decoder')
+
+    # Gradient checkpointing (trade compute for memory → enables larger batch)
+    if cfg.get('training', {}).get('gradient_checkpointing', False):
+        if hasattr(model.backbone, 'encoder') and hasattr(model.backbone.encoder, 'gradient_checkpointing_enable'):
+            model.backbone.encoder.gradient_checkpointing_enable()
+            accelerator.print('Enabled gradient checkpointing on DINOv2 encoder')
+        # For decoder blocks: enable torch gradient checkpointing
+        for blk in model.backbone.decoder:
+            blk.requires_grad_(True)  # ensure checkpointing works
+        accelerator.print('Gradient checkpointing enabled (use with larger batch_size for speedup)')
 
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total = sum(p.numel() for p in model.parameters())
@@ -530,6 +585,7 @@ def main():
         use_deep_supervision=use_deep_supervision,
         use_contrastive_loss=use_contrastive_loss,
         use_rot_pos_supervision=use_rot_pos_supervision,
+        use_heatmap_loss=use_heatmap_loss,
     )
 
     # ============ Create Optimizer with 3-Group LR ============

@@ -1,0 +1,109 @@
+\section{Method}
+
+We present a unified architecture for cross-view drone localization that jointly addresses object detection, segmentation, and camera pose estimation. Our approach leverages a 3D-aware backbone with learnable task tokens to enable multi-modal reasoning across geometric prompts, front-view images, and satellite maps. The architecture processes all modalities through a unified transformer backbone, eliminating the need for separate encoders and enabling end-to-end learning of cross-view correspondences.
+
+\subsection{Overall Architecture}
+
+Our model takes as input a front-view image $I_f$, a satellite image $I_s$, and geometric prompts $P$ that specify the target object in the front view. The prompts can be points, bounding boxes, or masks, following the SAM2 prompt encoding paradigm. The architecture follows a unified token-based processing pipeline where all modalities are encoded into a common representation space and processed jointly.
+
+The pipeline begins by encoding both images using a DINOv2 encoder, which extracts patch-level features $F_f \in \mathbb{R}^{B \times N_p \times D}$ and $F_s \in \mathbb{R}^{B \times N_p \times D}$ from the front and satellite views respectively, where $N_p = 37 \times 37 = 1369$ patches and $D = 2048$ for the large decoder configuration. Geometric prompts are processed through a pretrained SAM2 prompt encoder, which produces sparse prompt tokens $T_p \in \mathbb{R}^{B \times N_p \times D}$ encoding point and box coordinates, and dense embeddings $E_d \in \mathbb{R}^{B \times D \times H \times W}$ for mask prompts.
+
+The key innovation lies in how these tokens are unified and processed. Learnable task tokens $Q \in \mathbb{R}^{B \times N_q \times D}$ are introduced, where $N_q = N_{bbox} + N_{heatmap}$ represents queries for bounding box detection and camera position prediction. These task tokens, along with prompt tokens and image patch tokens, are concatenated and processed through the Pi3 backbone with alternating local and global attention mechanisms. The backbone enables cross-view reasoning by allowing tokens from different modalities to attend to each other through carefully designed attention masks that respect the geometric relationships between views.
+
+The learnable task tokens emerge from the backbone with rich cross-modal representations, having attended to both the prompt-encoded front view and the satellite spatial features. These tokens are then decoded by task-specific heads to produce final predictions: bounding boxes and masks for object localization, and camera position and rotation for pose estimation. The unified processing ensures that all predictions benefit from the same rich cross-view feature representations, enabling consistent multi-task learning.
+
+\subsection{3D-Aware Backbone}
+
+The choice of Pi3 as our backbone is motivated by its inherent 3D geometric awareness, which is crucial for cross-view localization tasks. Unlike VGGT-style architectures that process views independently, Pi3 is designed to reason about 3D space and camera geometry, making it naturally suited for establishing correspondences between ground-level and overhead views.
+
+The Pi3 backbone employs alternating local and global attention layers, where local attention operates within spatial neighborhoods to capture fine-grained details, while global attention enables long-range dependencies across the entire image. This alternating pattern is particularly effective for cross-view tasks, as it allows the model to first establish local correspondences through geometric reasoning, then propagate this information globally to refine predictions.
+
+Geometric awareness is embedded through Rotary Position Embedding (RoPE), which encodes 2D spatial coordinates directly into the attention mechanism. This enables the model to understand spatial relationships between patches, which is essential for matching objects across views with different perspectives. The attention masks further enforce geometric constraints by controlling which tokens can attend to each other, ensuring that cross-view reasoning respects the underlying 3D geometry.
+
+The backbone's ability to process both views simultaneously in a unified representation space enables pose-aware feature learning. As the model processes tokens through multiple layers, it learns to align features across views while maintaining awareness of the camera pose relationship between them. This geometric understanding is crucial for accurate localization, as it allows the model to reason about how objects appear differently in ground-level versus overhead views.
+
+\subsection{Task-Specific Components}
+
+The learnable task tokens are split into two groups based on their intended use: bbox/mask queries $Q_{bbox} \in \mathbb{R}^{B \times N_{bbox} \times D}$ for object detection and segmentation, and heatmap queries $Q_{heat} \in \mathbb{R}^{B \times N_{heat} \times D}$ for camera position prediction. This separation allows each group to specialize while sharing the same rich cross-view representations from the backbone.
+
+The bounding box head follows a DETR-style design, where each query token predicts a normalized bounding box $(c_x, c_y, w, h)$ and a confidence score. The head consists of a 3-layer MLP for regression and a linear layer for binary classification (object vs. no-object). The design choice of using the same queries for both bbox and mask prediction ensures spatial consistency, as both tasks require localizing the same object in the satellite view.
+
+The mask head adopts a SAM-style hypernetwork architecture, where each query token generates a dynamic convolution kernel that is applied to upscaled satellite spatial features. This design enables fine-grained mask prediction by allowing each query to focus on different aspects of the object's shape. The hypernetwork generates kernels of dimension $D/8$, which are then used in a dot product with the upscaled features to produce mask logits. This approach is more parameter-efficient than using separate decoders for each query, while still allowing query-specific mask generation.
+
+Camera position is predicted through a heatmap head that generates a probability distribution over the satellite image. The heatmap queries are first combined through a learned weighted combination, then used to compute a dot product with the satellite spatial features. The resulting heatmap is upsampled and normalized via softmax to form a probability distribution, from which the camera position is extracted using soft-argmax. This probabilistic formulation provides uncertainty estimates and enables end-to-end differentiable training.
+
+Camera rotation is predicted by a dedicated head that processes patch features from both views through a transformer decoder with RoPE positional encoding. The head outputs a 4$\times$4 SE(3) transformation matrix, from which Euler angles (yaw, pitch, roll) are extracted. The use of patch features rather than a single camera token allows the model to leverage spatial context for more accurate pose estimation.
+
+The unified query design enables multi-task learning by allowing different tasks to share representations while maintaining task-specific specializations. The bbox and mask queries share the same tokens, ensuring that detection and segmentation predictions are spatially consistent. The heatmap queries are separate, allowing them to focus on position-specific features. This design balances shared representation learning with task-specific adaptation.
+
+\subsection{Training Objective}
+
+Our training objective combines multiple losses with a Hungarian matching strategy to handle the multi-query scenario in single-target detection. The matching cost function combines bounding box distance, GIoU overlap, and classification confidence:
+
+\begin{equation}
+\mathcal{C}_{ij} = \lambda_{bbox} \|\hat{b}_i - b_{gt}\|_1 + \lambda_{giou} (1 - \text{GIoU}(\hat{b}_i, b_{gt})) + \lambda_{class} (1 - \sigma(\hat{c}_i))
+\end{equation}
+
+where $\hat{b}_i$ is the predicted bounding box for query $i$, $b_{gt}$ is the ground truth box, $\hat{c}_i$ is the classification logit, and $\lambda_{bbox} = 5.0$, $\lambda_{giou} = 2.0$, $\lambda_{class} = 1.0$ are weighting factors. The Hungarian algorithm selects the query with minimum cost for each ground truth, ensuring that only one query is assigned to the single target while others learn to predict "no-object".
+
+For matched predictions, the bounding box loss combines L1 distance and GIoU overlap:
+
+\begin{equation}
+\mathcal{L}_{bbox} = \lambda_{bbox} \frac{1}{B} \sum_{b=1}^{B} \|\hat{b}_b - b_{gt,b}\|_1 + \lambda_{giou} \frac{1}{B} \sum_{b=1}^{B} (1 - \text{GIoU}(\hat{b}_b, b_{gt,b}))
+\end{equation}
+
+The classification loss uses sigmoid focal loss to address the severe class imbalance in single-target detection, where many queries are negative (unmatched) and only one is positive (matched). The focal loss formulation is:
+
+\begin{equation}
+\mathcal{L}_{class} = \frac{1}{B \cdot N_q} \sum_{b=1}^{B} \sum_{q=1}^{N_q} \alpha_t \cdot \text{CE}_{b,q} \cdot (1 - p_t)^{\gamma}
+\end{equation}
+
+where $\text{CE}_{b,q} = -[y_{b,q} \log(p_{b,q}) + (1-y_{b,q}) \log(1-p_{b,q})]$ is the binary cross-entropy, $p_{b,q} = \sigma(\text{class\_logit}_{b,q})$ is the prediction probability, and $p_t$ is the probability of correct prediction (equal to $p_{b,q}$ for positive samples and $1-p_{b,q}$ for negative samples). The focal parameter $\gamma = 2.0$ downweights easy examples, while $\alpha_t = 0.25$ for positives and $0.75$ for negatives balances the contribution of each class. This formulation ensures that the model focuses on hard examples while preventing negative samples from dominating the loss.
+
+The mask loss combines binary cross-entropy and Dice loss for the matched mask prediction:
+
+\begin{equation}
+\mathcal{L}_{mask} = \lambda_{bce} \frac{1}{B \cdot H \cdot W} \sum_{b,h,w} \text{BCE}(\hat{m}_{b,h,w}, m_{gt,b,h,w}) + \lambda_{dice} \frac{1}{B} \sum_{b=1}^{B} \left(1 - \frac{2|\hat{m}_b \cap m_{gt,b}| + \epsilon}{|\hat{m}_b| + |m_{gt,b}| + \epsilon}\right)
+\end{equation}
+
+where $\hat{m}_b = \sigma(\text{mask\_logits}_b)$ and $\epsilon = 1.0$ is a smoothing factor. Only the mask corresponding to the Hungarian-matched bbox query is used for loss computation, ensuring consistency between detection and segmentation.
+
+Camera position is supervised through a simple MSE loss on the extracted position:
+
+\begin{equation}
+\mathcal{L}_{heatmap} = \lambda_{heat} \|\hat{p} - p_{gt}\|_2^2
+\end{equation}
+
+where $\hat{p} \in \mathbb{R}^2$ is the predicted position from soft-argmax and $p_{gt}$ is the ground truth camera position normalized to $[0,1]$.
+
+Camera rotation is supervised using geodesic distance on SO(3):
+
+\begin{equation}
+\mathcal{L}_{rotation} = \lambda_{rot} \|\log(\hat{R}^T R_{gt})\|_F
+\end{equation}
+
+where $\log(\cdot)$ maps the rotation matrix to the Lie algebra $\mathfrak{so}(3)$. This formulation respects the manifold structure of rotations and provides smooth gradients during training.
+
+Cross-view feature alignment is enforced through a MoCo-style contrastive loss. Masked average pooling extracts global features $f_f$ and $f_s$ from front and satellite patch features, which are then projected to a contrastive space via MLPs. The InfoNCE loss with momentum encoder and negative queue encourages aligned representations:
+
+\begin{equation}
+\mathcal{L}_{contrastive} = \lambda_{contrast} \left(-\log \frac{\exp(z_f \cdot z_s^+ / \tau)}{\exp(z_f \cdot z_s^+ / \tau) + \sum_{z^- \in Q} \exp(z_f \cdot z^- / \tau)}\right)
+\end{equation}
+
+where $z_s^+$ is the positive sample from the momentum encoder, $Q$ is a negative queue of size 16384, and $\tau = 0.07$ is the temperature parameter.
+
+To improve gradient flow and training stability, we apply deep supervision at intermediate decoder layers (layers 4, 11, and 17). Intermediate predictions are computed using lightweight heads attached to these layers, and losses are computed with layer-specific weights $w_4 = 0.1$, $w_{11} = 0.3$, $w_{17} = 0.6$:
+
+\begin{equation}
+\mathcal{L}_{deep} = \sum_{l \in \{4, 11, 17\}} w_l \cdot \mathcal{L}_{intermediate}^{(l)}
+\end{equation}
+
+The intermediate losses include bbox, mask, heatmap (for layers 4 and 11), and rotation (for layers 4 and 11) losses, enabling the model to learn meaningful representations at different abstraction levels.
+
+The total training loss is a weighted combination of all components:
+
+\begin{equation}
+\mathcal{L}_{total} = \mathcal{L}_{bbox} + \mathcal{L}_{giou} + \mathcal{L}_{class} + \mathcal{L}_{mask} + \mathcal{L}_{heatmap} + \mathcal{L}_{rotation} + \mathcal{L}_{contrastive} + \mathcal{L}_{deep}
+\end{equation}
+
+with default weights $\lambda_{bbox} = 5.0$, $\lambda_{giou} = 2.0$, $\lambda_{class} = 2.0$, $\lambda_{bce} = 2.0$, $\lambda_{dice} = 5.0$, $\lambda_{heat} = 0.1$, $\lambda_{rot} = 0.1$, and $\lambda_{contrast} = 0.1$.

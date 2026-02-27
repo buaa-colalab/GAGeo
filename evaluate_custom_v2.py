@@ -4,9 +4,10 @@
 Cross-View Localizer V2 独立评测脚本（参考 baseline/evaluate_custom.py）
 
 评估指标：
-  检测: mean IoU · ACC@25 · ACC@50
+    检测: A@0.5:0.95(步长0.05,10点均值) · ACC@0.5 · ACC@0.75
   分割(模型 mask): mIoU · mDice · AAE · ME
   分割(SAM mask, bbox+point->SAM): mIoU · mDice · AAE · ME
+    性能: 参数量 · 平均推理延迟(ms/sample)
 
 支持：
     - split: test / unseen_test（默认都评估）
@@ -35,6 +36,9 @@ from torchvision.transforms.functional import to_tensor
 from tqdm import tqdm
 
 from models import build_cross_view_localizer_v2
+
+
+DET_THRESHOLDS = np.arange(0.5, 1.0, 0.05, dtype=np.float32)
 
 
 def get_workspace_dir() -> Path:
@@ -113,6 +117,20 @@ def clip_bbox_xyxy(b: np.ndarray, size: int) -> np.ndarray:
     b[0::2] = np.clip(b[0::2], 0, size - 1)
     b[1::2] = np.clip(b[1::2], 0, size - 1)
     return b
+
+
+def sanitize_bbox_xyxy(b: np.ndarray, size: int) -> np.ndarray:
+    b = clip_bbox_xyxy(b, size)
+    x1, y1, x2, y2 = [float(v) for v in b]
+    if x2 < x1:
+        x1, x2 = x2, x1
+    if y2 < y1:
+        y1, y2 = y2, y1
+    if x2 <= x1:
+        x2 = min(float(size - 1), x1 + 1.0)
+    if y2 <= y1:
+        y2 = min(float(size - 1), y1 + 1.0)
+    return np.array([x1, y1, x2, y2], dtype=np.float32)
 
 
 def bbox_iou_np(b1: np.ndarray, b2: np.ndarray) -> float:
@@ -238,6 +256,7 @@ class GroupedEvaluator:
         det_iou: float,
         model_seg: Tuple[float, float, float, float] | None,
         sam_seg: Tuple[float, float, float, float] | None,
+        latency_ms: float,
         rotation_error_deg: float | None,
         pos_err_px: float | None,
         task_type: str,
@@ -249,6 +268,7 @@ class GroupedEvaluator:
                 "det_iou": det_iou,
                 "model_seg": model_seg,
                 "sam_seg": sam_seg,
+                "latency_ms": latency_ms,
                 "rotation_error_deg": rotation_error_deg,
                 "pos_err_px": pos_err_px,
                 "task_type": task_type,
@@ -265,9 +285,11 @@ class GroupedEvaluator:
         det = [r["det_iou"] for r in records]
         out: Dict[str, Any] = {
             "count": len(records),
-            "det_iou": float(np.mean(det)),
-            "det_acc25": float(np.mean([1.0 if x > 0.25 else 0.0 for x in det])),
-            "det_acc50": float(np.mean([1.0 if x > 0.50 else 0.0 for x in det])),
+            "det_miou": float(np.mean(det)),
+            "det_avg_acc": float(np.mean([np.mean([x >= t for t in DET_THRESHOLDS]) for x in det])),
+            "det_acc50": float(np.mean([1.0 if x >= 0.50 else 0.0 for x in det])),
+            "det_acc75": float(np.mean([1.0 if x >= 0.75 else 0.0 for x in det])),
+            "latency_ms": float(np.mean([r["latency_ms"] for r in records])),
         }
 
         rot_vals = [r["rotation_error_deg"] for r in records if r.get("rotation_error_deg") is not None]
@@ -325,8 +347,8 @@ class GroupedEvaluator:
 
 class EvalDatasetV2(Dataset):
     """
-    与训练解耦的评估数据集：
-      - 只读取 test/unseen_test json
+        与训练解耦的评估数据集：
+            - 读取 val/test/unseen_test json
             - 支持 point / bbox / mask prompt
       - 返回分组字段 task_type/size_category/shape_category
     """
@@ -514,6 +536,28 @@ def extract_state_dict(obj: Dict[str, Any]) -> Dict[str, torch.Tensor]:
     raise ValueError("Unrecognized checkpoint format")
 
 
+def remap_legacy_mask_head_keys(state_dict: Dict[str, torch.Tensor]) -> Tuple[Dict[str, torch.Tensor], int]:
+    """
+    Backward-compat key remap for old checkpoints:
+      *.output_hypernetworks_mlps.0.*  ->  *.output_hypernetwork_mlp.*
+
+    We changed mask head from ModuleList(single token) to a shared MLP.
+    Old checkpoints otherwise load with many missing/unexpected keys, causing
+    random-initialized mask heads and abnormally low model-mask metrics.
+    """
+    remapped: Dict[str, torch.Tensor] = {}
+    num_renamed = 0
+    needle = ".output_hypernetworks_mlps.0."
+    repl = ".output_hypernetwork_mlp."
+    for k, v in state_dict.items():
+        if needle in k:
+            remapped[k.replace(needle, repl)] = v
+            num_renamed += 1
+        else:
+            remapped[k] = v
+    return remapped, num_renamed
+
+
 def build_model_from_cfg(cfg: Dict[str, Any], device: torch.device):
     mc = cfg["model"]
     dc = cfg["data"]
@@ -527,6 +571,8 @@ def build_model_from_cfg(cfg: Dict[str, Any], device: torch.device):
         img_size=dc.get("img_size", 518),
         decoder_size=mc.get("decoder_size", "large"),
         num_learnable_tokens=mc.get("num_learnable_tokens", 2),
+        num_bbox_mask_queries=mc.get("num_bbox_mask_queries"),
+        num_heatmap_queries=mc.get("num_heatmap_queries", 1),
         supervision_layers=mc.get("supervision_layers", [4, 11, 17]),
         supervision_weights=mc.get("supervision_weights", [0.1, 0.3, 0.6]),
         dropout=mc.get("dropout", 0.1),
@@ -544,6 +590,12 @@ def build_model_from_cfg(cfg: Dict[str, Any], device: torch.device):
     for p in model.parameters():
         p.requires_grad = False
     return model
+
+
+def count_params(model) -> Tuple[int, int]:
+    total = sum(p.numel() for p in model.parameters())
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    return total, trainable
 
 
 # =========================
@@ -591,6 +643,9 @@ def evaluate_split(
         else:
             raise ValueError(f"Unsupported prompt_type: {prompt_type}")
 
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        t0 = time.perf_counter()
         outputs = model(
             front_view=front,
             satellite_view=sat,
@@ -600,9 +655,25 @@ def evaluate_split(
             mono_mask=None,
             sat_mask=None,
         )
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        forward_ms = (time.perf_counter() - t0) * 1000.0
+        per_sample_latency_ms = forward_ms / float(max(B, 1))
 
-        pred_bbox_norm = outputs["pred_boxes"][:, 0]  # [B,4], cxcywh in [0,1]
-        pred_mask = outputs["mask_pred"][:, 0].detach().cpu().numpy()  # [B,S,S]
+        # Select best query based on confidence score (for multi-query scenarios)
+        pred_boxes = outputs["pred_boxes"]  # [B, Q, 4]
+        pred_masks = outputs["mask_pred"]  # [B, Q, H, W]
+        
+        if pred_boxes.shape[1] > 1 and "bbox_scores" in outputs:
+            # Multiple queries: select the one with highest confidence
+            bbox_scores = outputs["bbox_scores"]  # [B, Q]
+            best_query_idx = bbox_scores.argmax(dim=1)  # [B]
+            pred_bbox_norm = pred_boxes[torch.arange(B), best_query_idx]  # [B, 4]
+            pred_mask = pred_masks[torch.arange(B), best_query_idx].detach().cpu().numpy()  # [B, H, W]
+        else:
+            # Single query or no scores: use first query
+            pred_bbox_norm = pred_boxes[:, 0]  # [B,4], cxcywh in [0,1]
+            pred_mask = pred_masks[:, 0].detach().cpu().numpy()  # [B,S,S]
 
         gt_bbox_xyxy = batch["gt_bbox_xyxy"].numpy()
         gt_mask = batch["gt_mask"].numpy().astype(np.uint8)
@@ -620,7 +691,7 @@ def evaluate_split(
 
         for i in range(B):
             # ---- Detection ----
-            pb = clip_bbox_xyxy(bbox_cxcywh_norm_to_xyxy_abs(pred_bbox_norm[i], img_size), img_size)
+            pb = sanitize_bbox_xyxy(bbox_cxcywh_norm_to_xyxy_abs(pred_bbox_norm[i], img_size), img_size)
             gb = clip_bbox_xyxy(gt_bbox_xyxy[i].astype(np.float32), img_size)
             det_iou = bbox_iou_np(pb, gb)
 
@@ -629,25 +700,25 @@ def evaluate_split(
             gm = (gt_mask[i] > 0).astype(np.uint8)
             model_seg = SegMetrics.all(pm, gm)
 
-            # ---- SAM mask metrics: bbox + point(center) -> SAM ----
+            # ---- SAM mask metrics: bbox + center point -> SAM ----
             sam_seg = None
             if use_sam and sam_predictor is not None:
                 try:
                     sat_rgb = batch["sat_rgb"][i]  # uint8 RGB, SxS
                     sam_predictor.set_image(sat_rgb)
-                    cx = (pb[0] + pb[2]) * 0.5
-                    cy = (pb[1] + pb[3]) * 0.5
-                    point = np.array([[cx, cy]], dtype=np.float32)
-                    plabel = np.array([1], dtype=np.int32)
-                    box = pb.astype(np.float32)
-                    masks, _, _ = sam_predictor.predict(
-                        point_coords=point,
-                        point_labels=plabel,
-                        box=box,
+                    cx = (pb[0] + pb[2]) / 2.0
+                    cy = (pb[1] + pb[3]) / 2.0
+                    center_point = np.array([[cx, cy]], dtype=np.float32)
+                    point_label = np.array([1], dtype=np.int32)
+                    masks, scores, _ = sam_predictor.predict(
+                        point_coords=center_point,
+                        point_labels=point_label,
+                        box=pb.astype(np.float32),
                         multimask_output=False,
                     )
-                    sm = masks[0].astype(np.uint8)
-                    sam_seg = SegMetrics.all(sm, gm)
+                    if masks is not None and len(masks) > 0:
+                        sm = masks[0].astype(np.uint8)
+                        sam_seg = SegMetrics.all(sm, gm)
                 except Exception:
                     sam_seg = None
 
@@ -663,6 +734,7 @@ def evaluate_split(
                 det_iou=det_iou,
                 model_seg=model_seg,
                 sam_seg=sam_seg,
+                latency_ms=per_sample_latency_ms,
                 rotation_error_deg=rotation_error_deg,
                 pos_err_px=pos_err_px,
                 task_type=batch["task_type"][i],
@@ -690,19 +762,19 @@ def print_grouped(results: OrderedDict, split_name: str, prompt_type: str, has_m
     print(f"  Cross-View V2 Evaluation — {split_name} | prompt={prompt_type}")
     print("=" * 120)
 
-    hdr_det = f'{"Count":>7} {"Det_mIoU":>9} {"ACC@25":>8} {"ACC@50":>8} {"RotErr":>8} {"PosErrPx":>9}'
+    hdr_det = f'{"Count":>7} {"A@.5:.95":>9} {"ACC@0.5":>8} {"ACC@0.75":>9} {"Lat(ms)":>8} {"RotErr":>8} {"PosErrPx":>9}'
     hdr_model = f' │ {"M_mIoU":>8} {"M_mDice":>8} {"M_AAE":>9} {"M_ME":>8}' if has_model_mask else ""
     hdr_sam = f' │ {"S_mIoU":>8} {"S_mDice":>8} {"S_AAE":>9} {"S_ME":>8}' if has_sam else ""
 
     print(f'  {"Group":<30} {hdr_det}{hdr_model}{hdr_sam}')
-    print(f'  {"─" * 30} {"─" * 54}{"─" * 40 if has_model_mask else ""}{"─" * 40 if has_sam else ""}')
+    print(f'  {"─" * 30} {"─" * 64}{"─" * 40 if has_model_mask else ""}{"─" * 40 if has_sam else ""}')
 
     for name, r in results.items():
         if r is None:
             continue
         line = f'  {name:<30} '
         line += (
-            f'{_fmt(r["count"], 7, 0)} {_fmt(r["det_iou"], 9)} {_fmt(r["det_acc25"], 8)} {_fmt(r["det_acc50"], 8)} '
+            f'{_fmt(r["count"], 7, 0)} {_fmt(r["det_avg_acc"], 9)} {_fmt(r["det_acc50"], 8)} {_fmt(r["det_acc75"], 9)} {_fmt(r.get("latency_ms"), 8, 2)} '
             f'{_fmt(r.get("rotation_error_deg"), 8, 2)} {_fmt(r.get("pos_err_px"), 9, 2)}'
         )
         if has_model_mask:
@@ -743,7 +815,7 @@ def parse_args():
     p.add_argument("--image_root", type=str, default="")
     p.add_argument("--batch_size", type=int, default=8)
     p.add_argument("--num_workers", type=int, default=8)
-    p.add_argument("--splits", nargs="+", default=["test", "unseen_test"])
+    p.add_argument("--splits", nargs="+", default=["val", "test", "unseen_test"])
     p.add_argument("--prompt_types", nargs="+", default=["point", "bbox", "mask"],
                    choices=["point", "bbox", "mask"])
     p.add_argument("--gpu", type=str, default="0")
@@ -779,15 +851,34 @@ def main():
 
     # build/load model
     print("\n[1/3] Loading model ...")
+    mc = cfg["model"]
+    # Debug: print model config for query length experiments
+    if "num_bbox_mask_queries" in mc:
+        print(f"Model config: num_bbox_mask_queries={mc.get('num_bbox_mask_queries')}, "
+              f"num_heatmap_queries={mc.get('num_heatmap_queries', 1)}, "
+              f"num_learnable_tokens={mc.get('num_learnable_tokens', 'N/A')}")
     model = build_model_from_cfg(cfg, device)
+    total_params, trainable_params = count_params(model)
+    print(f"Model params: total={total_params:,} ({total_params/1e6:.3f}M), trainable={trainable_params:,} ({trainable_params/1e6:.3f}M)")
+    # Debug: print actual model query configuration
+    if hasattr(model, 'num_bbox_mask_queries'):
+        print(f"Model actual: num_bbox_mask_queries={model.num_bbox_mask_queries}, "
+              f"num_heatmap_queries={model.num_heatmap_queries}, "
+              f"num_learnable_tokens={model.num_learnable_tokens}")
 
     ckpt_file = resolve_checkpoint(Path(args.checkpoint).resolve())
     print(f"Checkpoint file: {ckpt_file}")
     obj = torch.load(str(ckpt_file), map_location="cpu")
     sd = extract_state_dict(obj)
+    sd, renamed = remap_legacy_mask_head_keys(sd)
+    if renamed > 0:
+        print(f"Applied legacy mask-head key remap: {renamed} tensors")
     missing, unexpected = model.load_state_dict(sd, strict=False)
     print(f"Loaded state_dict keys: {len(sd)}")
     print(f"Missing: {len(missing)}, Unexpected: {len(unexpected)}")
+    if missing or unexpected:
+        print("Missing sample:", missing[:8])
+        print("Unexpected sample:", unexpected[:8])
 
     # load SAM
     print("\n[2/3] Loading SAM ...")
@@ -805,6 +896,7 @@ def main():
     sam_predictor = SamPredictor(sam)
 
     split_to_json = {
+        "val": "val_all.json",
         "test": "test_all.json",
         "unseen_test": "unseen_test.json",
     }

@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=cvloc_zs_g2d
-#SBATCH --output=logs/slurm_zs_g2d_%j.out
-#SBATCH --error=logs/slurm_zs_g2d_%j.err
+#SBATCH --output=/data/home/scxi704/run/eval_logs/slurm_zs_g2d_%j.out
+#SBATCH --error=/data/home/scxi704/run/eval_logs/slurm_zs_g2d_%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16

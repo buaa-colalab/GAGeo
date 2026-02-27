@@ -600,12 +600,14 @@ class Pi3BackboneV2(nn.Module):
                 # Q,V = (sate, front, learnable, prompt)
                 # K   = (sate, front_with_mask, learnable, prompt)
                 global_qv = torch.cat([sate_hidden, front_hidden], dim=1)
-                global_k = global_qv.clone()
                 if dense_flat is not None:
-                    # front patch indices in global layout
+                    # Only clone when we need to inject dense mask into K
+                    global_k = global_qv.clone()
                     g_front_patch_start = N_sate + self.patch_start_idx
                     g_front_patch_end = g_front_patch_start + self.num_patches
                     global_k[:, g_front_patch_start:g_front_patch_end] += dense_flat
+                else:
+                    global_k = global_qv  # No mask prompt → K == QV, skip clone
 
                 global_pos = torch.cat([sate_pos, front_pos], dim=1)
                 global_hidden = self.masked_blocks[i].forward_qkv(
@@ -633,11 +635,18 @@ class Pi3BackboneV2(nn.Module):
                 
                 # Project from single-layer C to output_dim (2*C)
                 proj = self.intermediate_projs[str(stage_idx)]
-                intermediate_outputs[stage_idx] = {
+                out_dict = {
                     'learnable': proj(inter_learn),  # [B, 2, 2*C]
                     'sate_patches': proj(inter_sate),  # [B, 1369, 2*C]
-                    'front_patches': proj(front_hidden[:, self.patch_start_idx:self.patch_start_idx + self.num_patches]),
                 }
+                # front_patches projection is expensive (1369 tokens); only store
+                # if this layer actually needs it (extra supervision layers).
+                final_stage = max(self.supervision_layers)
+                if stage_idx != final_stage:
+                    out_dict['front_patches'] = proj(
+                        front_hidden[:, self.patch_start_idx:self.patch_start_idx + self.num_patches]
+                    )
+                intermediate_outputs[stage_idx] = out_dict
             
             # Collect last two layers for final output
             if i + 1 in [len(self.decoder) - 1, len(self.decoder)]:

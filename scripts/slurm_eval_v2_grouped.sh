@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=cvloc_v2_eval
-#SBATCH --output=logs/slurm_v2_eval_%j.out
-#SBATCH --error=logs/slurm_v2_eval_%j.err
+#SBATCH --output=/data/home/scxi704/run/eval_logs/slurm_v3_eval_%j.out
+#SBATCH --error=/data/home/scxi704/run/eval_logs/slurm_v3_eval_%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=32
@@ -11,17 +11,17 @@
 
 # ============================================
 # SLURM Evaluate Script for Cross-View V2
-# 评估 test + unseen_test，按 task/size/shape 分组
+# 评估 val + test + unseen_test，按 task/size/shape 分组
 # 并按 prompt 类型(point/bbox/mask)分别评估
 # ============================================
 # Usage:
 #   # 单卡（串行）
-#   sbatch scripts/slurm_eval_v2_grouped.sh <sam_checkpoint> [gpu_ids]
+#   sbatch scripts/slurm_eval_v2_grouped.sh <sam_checkpoint> [gpu_ids] [experiment_name] [model_dir]
 #
 #   # 多卡（并行，建议按 prompt 次数申请）
-#   sbatch --gres=gpu:3 scripts/slurm_eval_v2_grouped.sh <sam_checkpoint> 0,1,2
+#   sbatch --gres=gpu:3 scripts/slurm_eval_v2_grouped.sh <sam_checkpoint> 0,1,2 [experiment_name] [model_dir]
 # Example:
-#   sbatch --gres=gpu:3 scripts/slurm_eval_v2_grouped.sh /path/to/sam_vit_h_4b8939.pth 0,1,2
+#   sbatch --gres=gpu:3 scripts/slurm_eval_v2_grouped.sh /data/home/scxi704/run/baseline/CVOS-Code/segment_anything/weights/sam_vit_h_4b8939.pth 0,1,2
 # ============================================
 
 set -euo pipefail
@@ -32,10 +32,10 @@ WORKSPACE_DIR="${ROOT_DIR}/${WORKSPACE_NAME}"
 RUN_ROOT="$(dirname "$ROOT_DIR")"
 CACHE_ROOT=${CACHE_ROOT:-"${ROOT_DIR}/.cache"}
 
-EXPRIMENT_NAME="ablation_4_all_on"
-
-SAM_CKPT="${1:-}"
+SAM_CKPT="${1:-/data/home/scxi704/run/baseline/CVOS-Code/segment_anything/weights/sam_vit_h_4b8939.pth}"
 GPU_IDS="${2:-${CUDA_VISIBLE_DEVICES:-0}}"
+EXPRIMENT_NAME="${3:-ablation_4_all_on}"
+MODEL_DIR="${4:-output_v3/${EXPRIMENT_NAME}}"
 PROMPT_TYPES=(point bbox mask)
 
 if [[ -z "$SAM_CKPT" ]]; then
@@ -65,7 +65,7 @@ mkdir -p logs
 
 
 
-OUT_JSON="output_v3/${EXPRIMENT_NAME}/eval_grouped_$(date +%Y%m%d_%H%M%S).json"
+OUT_JSON="${MODEL_DIR}/eval_grouped_$(date +%Y%m%d_%H%M%S).json"
 
 echo "=========================================="
 echo "Cross-View V2 Grouped Evaluation"
@@ -76,6 +76,8 @@ echo "Allocated CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-N/A}"
 echo "Requested GPU ids: $GPU_IDS"
 echo "SAM checkpoint: $SAM_CKPT"
 echo "Prompt types: point bbox mask"
+echo "Experiment name: ${EXPRIMENT_NAME}"
+echo "Model dir: ${MODEL_DIR}"
 echo "Output JSON: $OUT_JSON"
 echo "=========================================="
 
@@ -86,7 +88,7 @@ if [[ $NUM_GPUS -lt 1 ]]; then
   exit 1
 fi
 
-TMP_JSON_DIR="output_v3/${EXPRIMENT_NAME}/eval_grouped_parts_${SLURM_JOB_ID:-manual}_$(date +%Y%m%d_%H%M%S)"
+TMP_JSON_DIR="${MODEL_DIR}/eval_grouped_parts_${SLURM_JOB_ID:-manual}_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$TMP_JSON_DIR"
 
 echo "Run mode: ${#PROMPT_TYPES[@]} prompt(s) over $NUM_GPUS GPU(s)"
@@ -103,8 +105,8 @@ launch_eval() {
   CUDA_VISIBLE_DEVICES="$gpu_id" \
   "${RUN_ROOT}/miniconda3/bin/conda" run -n filtre --no-capture-output \
     python "${WORKSPACE_DIR}/evaluate_custom_v2.py" \
-      --config "${WORKSPACE_DIR}/output_v3/${EXPRIMENT_NAME}/config.yaml" \
-      --checkpoint "${WORKSPACE_DIR}/output_v3/${EXPRIMENT_NAME}/best" \
+      --config "${WORKSPACE_DIR}/${MODEL_DIR}/config.yaml" \
+      --checkpoint "${WORKSPACE_DIR}/${MODEL_DIR}/best" \
       --splits test unseen_test \
       --prompt_types "$prompt_type" \
       --batch_size 8 \

@@ -151,6 +151,7 @@ class DETRCriterionV2(nn.Module):
         use_deep_supervision: bool = True,
         use_contrastive_loss: bool = True,
         use_rot_pos_supervision: bool = True,
+        use_heatmap_loss: bool = True,
     ):
         super().__init__()
         self.weight_bbox = weight_bbox
@@ -166,6 +167,7 @@ class DETRCriterionV2(nn.Module):
         self.use_deep_supervision = use_deep_supervision
         self.use_contrastive_loss = use_contrastive_loss
         self.use_rot_pos_supervision = use_rot_pos_supervision
+        self.use_heatmap_loss = use_heatmap_loss
         
         self.supervision_layers = [4, 11, 17] if supervision_layers is None else list(supervision_layers)
         self.supervision_weights = [0.1, 0.3, 0.6] if supervision_weights is None else list(supervision_weights)
@@ -177,14 +179,15 @@ class DETRCriterionV2(nn.Module):
             cost_giou=matcher_cost_giou,
         )
     
-    def _compute_bbox_loss(self, outputs, targets):
+    def _compute_bbox_loss(self, outputs, targets, indices: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None):
         """Compute BBox + Classification loss."""
         losses = {}
         
         if 'pred_boxes' not in outputs or 'sat_bbox' not in targets:
             return losses
         
-        indices = self.matcher(outputs, targets)
+        if indices is None:
+            indices = self.matcher(outputs, targets)
         pred_boxes = outputs['pred_boxes']
         target_boxes = targets['sat_bbox']
         B = pred_boxes.shape[0]
@@ -230,16 +233,32 @@ class DETRCriterionV2(nn.Module):
         
         return losses
     
-    def _compute_mask_loss(self, outputs, targets):
+    def _compute_mask_loss(
+        self,
+        outputs,
+        targets,
+        indices: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None,
+    ):
         """Compute Mask BCE + Dice loss."""
         losses = {}
         
         if 'mask_logits' not in outputs or 'sat_mask' not in targets:
             return losses
         
-        mask_logits = outputs['mask_logits']  # [B, num_masks, H, W]
-        # Use the first mask prediction (single target)
-        mask_logits = mask_logits[:, 0]  # [B, H, W]
+        mask_logits = outputs['mask_logits']  # [B, Q, H, W]
+        if mask_logits.dim() != 4:
+            raise ValueError(f"Expected mask_logits [B, Q, H, W], got {tuple(mask_logits.shape)}")
+
+        # Single-target setting: select one mask per image.
+        # If Hungarian assignment is available, use matched bbox query index.
+        if indices is not None and mask_logits.shape[1] > 1:
+            selected_masks = []
+            for b, (src_idx, _) in enumerate(indices):
+                match_idx = int(src_idx[0].item()) if len(src_idx) > 0 else 0
+                selected_masks.append(mask_logits[b, match_idx])
+            mask_logits = torch.stack(selected_masks, dim=0)  # [B, H, W]
+        else:
+            mask_logits = mask_logits[:, 0]  # [B, H, W]
         
         target_mask = targets['sat_mask']  # [B, 1, H_orig, W_orig]
         # Resize target mask to match prediction
@@ -322,12 +341,19 @@ class DETRCriterionV2(nn.Module):
             losses: Dict with all loss components and total loss
         """
         losses = {}
+        final_indices = None
+        if (
+            ('pred_boxes' in outputs and 'sat_bbox' in targets)
+            and ('class_logits' in outputs)
+        ):
+            final_indices = self.matcher(outputs, targets)
         
         # ============ Final prediction losses ============
-        losses.update(self._compute_bbox_loss(outputs, targets))
-        losses.update(self._compute_mask_loss(outputs, targets))
+        losses.update(self._compute_bbox_loss(outputs, targets, indices=final_indices))
+        losses.update(self._compute_mask_loss(outputs, targets, indices=final_indices))
         if self.use_rot_pos_supervision:
-            losses.update(self._compute_heatmap_loss(outputs, targets))
+            if self.use_heatmap_loss:
+                losses.update(self._compute_heatmap_loss(outputs, targets))
             losses.update(self._compute_rotation_loss(outputs, targets))
         
         if self.use_contrastive_loss and 'contrastive_loss' in outputs:
@@ -338,26 +364,32 @@ class DETRCriterionV2(nn.Module):
             for layer_idx, weight in zip(self.supervision_layers, self.supervision_weights):
                 if layer_idx in outputs['intermediate_preds']:
                     inter_outputs = outputs['intermediate_preds'][layer_idx]
+                    inter_indices = None
+                    if (
+                        ('pred_boxes' in inter_outputs and 'sat_bbox' in targets)
+                        and ('class_logits' in inter_outputs)
+                    ):
+                        inter_indices = self.matcher(inter_outputs, targets)
                     
                     # Intermediate BBox loss
-                    inter_bbox_losses = self._compute_bbox_loss(inter_outputs, targets)
+                    inter_bbox_losses = self._compute_bbox_loss(inter_outputs, targets, indices=inter_indices)
                     for k, v in inter_bbox_losses.items():
                         if k.startswith('loss_'):
                             losses[f'inter_{layer_idx}_{k}'] = weight * v
                     
                     # Intermediate Mask loss
-                    inter_mask_losses = self._compute_mask_loss(inter_outputs, targets)
+                    inter_mask_losses = self._compute_mask_loss(inter_outputs, targets, indices=inter_indices)
                     for k, v in inter_mask_losses.items():
                         if k.startswith('loss_'):
                             losses[f'inter_{layer_idx}_{k}'] = weight * v
 
                     # Intermediate Heatmap + Rotation loss (only early/mid stages)
                     if self.use_rot_pos_supervision and layer_idx in self.extra_supervision_layers:
-                        inter_heat_losses = self._compute_heatmap_loss(inter_outputs, targets)
-                        for k, v in inter_heat_losses.items():
-                            if k.startswith('loss_'):
-                                losses[f'inter_{layer_idx}_{k}'] = weight * v
-
+                        if self.use_heatmap_loss:
+                            inter_heat_losses = self._compute_heatmap_loss(inter_outputs, targets)
+                            for k, v in inter_heat_losses.items():
+                                if k.startswith('loss_'):
+                                    losses[f'inter_{layer_idx}_{k}'] = weight * v
                         inter_rot_losses = self._compute_rotation_loss(inter_outputs, targets)
                         for k, v in inter_rot_losses.items():
                             if k.startswith('loss_'):

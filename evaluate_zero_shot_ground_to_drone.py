@@ -5,15 +5,21 @@ Zero-shot ground->drone evaluation for Cross-View Localizer V2.
 
 Task:
 - Input: ground image + point prompt (on ground image) + drone image
-- Model output: bbox on drone image
-- Metric: mean IoU · ACC@25 · ACC@50
+- Model output: bbox (and optional mask) on drone image
+
+Detection metrics:
+- A@0.5:0.95 · ACC@0.5 · ACC@0.75
+
+Segmentation metrics (if triplet JSON 含有无人机分割标注 `drone_segmentation`):
+- 分割 (模型 mask — mask_pred): mIoU · mDice · AAE · ME
 
 Triplet JSON format (per item):
 {
   "drone_image": "train/drone/xxxx/image-01.jpeg",
   "ground_image": "train/street/xxxx/1.jpg",
-  "drone_image_bbox": [x, y, w, h],
-  "ground_image_point": {"x": ..., "y": ...}
+  "drone_image_bbox": [x, y, w, h],                    # coco xywh
+  "ground_image_point": {"x": ..., "y": ...},
+  "drone_segmentation": { "size": [H, W], "counts": "..." }  # optional, COCO RLE
 }
 """
 
@@ -23,10 +29,11 @@ import argparse
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import cv2
 import numpy as np
+import pycocotools.mask as mask_utils
 import torch
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
@@ -34,6 +41,45 @@ from torchvision.transforms.functional import to_tensor
 from tqdm import tqdm
 
 from models import build_cross_view_localizer_v2
+
+
+DET_THRESHOLDS = np.arange(0.5, 1.0, 0.05, dtype=np.float32)
+
+
+class SegMetrics:
+    """单样本分割指标: mIoU / mDice / AAE / ME"""
+
+    @staticmethod
+    def iou(p: np.ndarray, g: np.ndarray) -> float:
+        p, g = p.astype(bool), g.astype(bool)
+        inter = np.logical_and(p, g).sum()
+        uni = np.logical_or(p, g).sum()
+        return 1.0 if uni == 0 else float(inter) / float(uni)
+
+    @staticmethod
+    def dice(p: np.ndarray, g: np.ndarray) -> float:
+        p, g = p.astype(bool), g.astype(bool)
+        inter = np.logical_and(p, g).sum()
+        total = p.sum() + g.sum()
+        return 1.0 if total == 0 else 2.0 * float(inter) / float(total)
+
+    @staticmethod
+    def aae(p: np.ndarray, g: np.ndarray) -> float:
+        return abs(int(p.astype(bool).sum()) - int(g.astype(bool).sum()))
+
+    @staticmethod
+    def me(p: np.ndarray, g: np.ndarray) -> float:
+        pb, gb = p.astype(bool), g.astype(bool)
+        if pb.sum() == 0 or gb.sum() == 0:
+            h, w = p.shape[:2]
+            return float(np.sqrt(h * h + w * w))
+        py, px = np.where(pb)
+        gy, gx = np.where(gb)
+        return float(np.sqrt((px.mean() - gx.mean()) ** 2 + (py.mean() - gy.mean()) ** 2))
+
+    @classmethod
+    def all(cls, p: np.ndarray, g: np.ndarray):
+        return cls.iou(p, g), cls.dice(p, g), cls.aae(p, g), cls.me(p, g)
 
 
 def get_workspace_dir() -> Path:
@@ -206,15 +252,29 @@ class GroundDroneTripletDataset(Dataset):
         Hg, Wg = ground.shape[:2]
         Hd, Wd = drone.shape[:2]
 
-        point = np.array([
-            float(item["ground_image_point"]["x"]),
-            float(item["ground_image_point"]["y"]),
-        ], dtype=np.float32)
+        point = np.array(
+            [
+                float(item["ground_image_point"]["x"]),
+                float(item["ground_image_point"]["y"]),
+            ],
+            dtype=np.float32,
+        )
 
         gt_bbox_xywh = np.array(item["drone_image_bbox"][:4], dtype=np.float32)
 
+        # 可选: 无人机图分割 GT, 由 SAM2 标注脚本产生
+        gt_mask = None
+        if "drone_segmentation" in item:
+            seg = item["drone_segmentation"]
+            if isinstance(seg, dict) and "counts" in seg:
+                rle = dict(seg)
+                if isinstance(rle["counts"], list):
+                    rle = mask_utils.frPyObjects(rle, Hd, Wd)
+                mask = mask_utils.decode(rle)
+                gt_mask = mask.astype(np.float32)
+
         # Model expects patch-multiple size (V2 uses 518, divisible by patch size 14).
-        # Raw triplet images may be 512x512; we always remap image/point/bbox to S.
+        # Raw triplet images may be 512x512; we always remap image/point/bbox/mask to S.
         S = self.input_size
 
         if (Hg, Wg) != (S, S):
@@ -234,10 +294,12 @@ class GroundDroneTripletDataset(Dataset):
                 ],
                 dtype=np.float32,
             )
+            if gt_mask is not None:
+                gt_mask = cv2.resize(gt_mask, (S, S), interpolation=cv2.INTER_NEAREST)
 
         gt_bbox_xyxy = bbox_xywh_to_xyxy(gt_bbox_xywh)
 
-        return {
+        out: Dict[str, Any] = {
             "front_view": to_tensor(Image.fromarray(ground)),
             "sat_view": to_tensor(Image.fromarray(drone)),
             "mono_point": torch.from_numpy(point),
@@ -246,10 +308,13 @@ class GroundDroneTripletDataset(Dataset):
             "ground_image": item["ground_image"],
             "drone_image": item["drone_image"],
         }
+        if gt_mask is not None:
+            out["gt_mask"] = torch.from_numpy((gt_mask > 0.5).astype(np.float32))
+        return out
 
 
 def collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
-    return {
+    out: Dict[str, Any] = {
         "front_view": torch.stack([x["front_view"] for x in batch], dim=0),
         "sat_view": torch.stack([x["sat_view"] for x in batch], dim=0),
         "mono_point": torch.stack([x["mono_point"] for x in batch], dim=0),
@@ -258,12 +323,16 @@ def collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
         "ground_image": [x["ground_image"] for x in batch],
         "drone_image": [x["drone_image"] for x in batch],
     }
+    if "gt_mask" in batch[0]:
+        out["gt_mask"] = torch.stack([x["gt_mask"] for x in batch], dim=0)
+    return out
 
 
 @torch.no_grad()
 def evaluate(model, loader: DataLoader, img_size: int, device: torch.device):
     ious: List[float] = []
     per_sample: List[Dict[str, Any]] = []
+    seg_values: List[Tuple[float, float, float, float]] = []
 
     for batch in tqdm(loader, desc="Evaluating ground->drone zero-shot"):
         front = batch["front_view"].to(device, non_blocking=True)
@@ -284,7 +353,21 @@ def evaluate(model, loader: DataLoader, img_size: int, device: torch.device):
             sat_mask=None,
         )
 
-        pred_bbox_norm = outputs["pred_boxes"][:, 0]  # [B,4] normalized cxcywh
+        pred_boxes_all = outputs["pred_boxes"]  # [B, Q, 4]
+        pred_masks_all = outputs.get("mask_pred", None)
+        has_seg = (pred_masks_all is not None) and ("gt_mask" in batch)
+
+        if pred_boxes_all.shape[1] > 1 and "bbox_scores" in outputs:
+            bbox_scores = outputs["bbox_scores"]  # [B, Q]
+            best_idx = bbox_scores.argmax(dim=1)  # [B]
+            pred_bbox_norm = pred_boxes_all[torch.arange(B), best_idx]
+            if has_seg:
+                pred_masks = pred_masks_all[torch.arange(B), best_idx].detach().cpu().numpy()
+        else:
+            pred_bbox_norm = pred_boxes_all[:, 0]
+            if has_seg and pred_masks_all is not None:
+                pred_masks = pred_masks_all[:, 0].detach().cpu().numpy()
+
         gt_bbox_xyxy = batch["gt_bbox_xyxy"].numpy().astype(np.float32)
 
         for i in range(B):
@@ -293,27 +376,55 @@ def evaluate(model, loader: DataLoader, img_size: int, device: torch.device):
             iou = bbox_iou_np(pb, gb)
             ious.append(iou)
 
-            per_sample.append(
-                {
-                    "sample_id": int(batch["sample_id"][i]),
-                    "ground_image": batch["ground_image"][i],
-                    "drone_image": batch["drone_image"][i],
-                    "iou": float(iou),
-                    "pred_bbox_xyxy": [float(x) for x in pb.tolist()],
-                    "gt_bbox_xyxy": [float(x) for x in gb.tolist()],
-                }
-            )
+            rec: Dict[str, Any] = {
+                "sample_id": int(batch["sample_id"][i]),
+                "ground_image": batch["ground_image"][i],
+                "drone_image": batch["drone_image"][i],
+                "iou": float(iou),
+                "pred_bbox_xyxy": [float(x) for x in pb.tolist()],
+                "gt_bbox_xyxy": [float(x) for x in gb.tolist()],
+            }
 
-    mean_iou = float(np.mean(ious)) if ious else 0.0
-    acc25 = float(np.mean([1.0 if x > 0.25 else 0.0 for x in ious])) if ious else 0.0
-    acc50 = float(np.mean([1.0 if x > 0.50 else 0.0 for x in ious])) if ious else 0.0
+            if has_seg:
+                gm = batch["gt_mask"][i].numpy()
+                pm = pred_masks[i]
+                if pm.shape != gm.shape:
+                    pm = cv2.resize(pm, (gm.shape[1], gm.shape[0]), interpolation=cv2.INTER_LINEAR)
+                pm_bin = (pm > 0.5).astype(np.uint8)
+                gm_bin = (gm > 0.5).astype(np.uint8)
+                mv = SegMetrics.all(pm_bin, gm_bin)
+                seg_values.append(mv)
+                rec["seg_model_miou"] = float(mv[0])
+                rec["seg_model_mdice"] = float(mv[1])
+                rec["seg_model_aae"] = float(mv[2])
+                rec["seg_model_me"] = float(mv[3])
 
-    metrics = {
+            per_sample.append(rec)
+
+    avg_acc_50_95 = float(
+        np.mean([np.mean([1.0 if x >= t else 0.0 for t in DET_THRESHOLDS]) for x in ious])
+    ) if ious else 0.0
+    acc50 = float(np.mean([1.0 if x >= 0.50 else 0.0 for x in ious])) if ious else 0.0
+    acc75 = float(np.mean([1.0 if x >= 0.75 else 0.0 for x in ious])) if ious else 0.0
+
+    metrics: Dict[str, Any] = {
         "count": len(ious),
-        "mean_iou": mean_iou,
-        "acc25": acc25,
+        "avg_acc_50_95": avg_acc_50_95,
         "acc50": acc50,
+        "acc75": acc75,
     }
+
+    if seg_values:
+        seg_arr = np.asarray(seg_values, dtype=np.float32)
+        metrics.update(
+            {
+                "seg_model_miou": float(seg_arr[:, 0].mean()),
+                "seg_model_mdice": float(seg_arr[:, 1].mean()),
+                "seg_model_aae": float(seg_arr[:, 2].mean()),
+                "seg_model_me": float(seg_arr[:, 3].mean()),
+            }
+        )
+
     return metrics, per_sample
 
 
@@ -393,9 +504,9 @@ def main():
     print("Zero-shot Ground->Drone (point prompt) Metrics")
     print("=" * 72)
     print(f"Count    : {metrics['count']}")
-    print(f"mean IoU : {metrics['mean_iou']:.4f}")
-    print(f"ACC@25   : {metrics['acc25']:.4f}")
-    print(f"ACC@50   : {metrics['acc50']:.4f}")
+    print(f"A@0.5:0.95: {metrics['avg_acc_50_95']:.4f}")
+    print(f"ACC@0.5  : {metrics['acc50']:.4f}")
+    print(f"ACC@0.75 : {metrics['acc75']:.4f}")
     print("=" * 72)
 
     if args.save_json:

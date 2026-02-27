@@ -51,6 +51,8 @@ class CrossViewLocalizerV2(nn.Module):
         patch_size: int = 14,
         decoder_size: str = 'large',
         num_learnable_tokens: int = 2,
+        num_bbox_mask_queries: Optional[int] = None,
+        num_heatmap_queries: int = 1,
         supervision_layers: List[int] = None,
         supervision_weights: List[float] = None,
         dropout: float = 0.1,
@@ -71,6 +73,19 @@ class CrossViewLocalizerV2(nn.Module):
         self.supervision_layers = [4, 11, 17] if supervision_layers is None else list(supervision_layers)
         self.supervision_weights = [0.1, 0.3, 0.6] if supervision_weights is None else list(supervision_weights)
         self.extra_supervision_layers = sorted(self.supervision_layers)[:-1]
+        _ = num_mask_tokens  # backward compatibility: legacy config key is accepted but ignored
+        self.num_heatmap_queries = int(num_heatmap_queries)
+
+        if num_bbox_mask_queries is None:
+            inferred_bbox_mask_queries = int(num_learnable_tokens) - self.num_heatmap_queries
+            self.num_bbox_mask_queries = max(inferred_bbox_mask_queries, 1)
+        else:
+            self.num_bbox_mask_queries = int(num_bbox_mask_queries)
+        if self.num_bbox_mask_queries <= 0:
+            raise ValueError(f"num_bbox_mask_queries must be > 0, got {self.num_bbox_mask_queries}")
+        if self.num_heatmap_queries <= 0:
+            raise ValueError(f"num_heatmap_queries must be > 0, got {self.num_heatmap_queries}")
+        self.num_learnable_tokens = self.num_bbox_mask_queries + self.num_heatmap_queries
         
         # ============ 1. Pi3 Backbone V2 ============
         self.backbone = Pi3BackboneV2(
@@ -78,7 +93,7 @@ class CrossViewLocalizerV2(nn.Module):
             decoder_size=decoder_size,
             img_size=img_size,
             patch_size=patch_size,
-            num_learnable_tokens=num_learnable_tokens,
+            num_learnable_tokens=self.num_learnable_tokens,
             supervision_layers=self.supervision_layers,
         )
         self.output_dim = self.backbone.output_dim  # 2048 for large
@@ -107,11 +122,10 @@ class CrossViewLocalizerV2(nn.Module):
             num_classes=1,
         )
         
-        # Mask Head (uses learnable query 0 + sate spatial features)
+        # Mask Head (uses bbox/mask learnable queries + sate spatial features)
         self.mask_head = SAMMaskHead(
             hidden_dim=self.output_dim,
             output_size=img_size,
-            num_mask_tokens=num_mask_tokens,
         )
         
         # Heatmap Head (uses learnable query 1 + sate spatial features)
@@ -153,7 +167,6 @@ class CrossViewLocalizerV2(nn.Module):
             self.inter_mask_heads[str(layer_idx)] = SAMMaskHead(
                 hidden_dim=self.output_dim,
                 output_size=img_size,
-                num_mask_tokens=num_mask_tokens,
             )
     
     def _freeze_backbone(self):
@@ -233,19 +246,22 @@ class CrossViewLocalizerV2(nn.Module):
         
         sate_features = backbone_out['sate_features']     # [B, 1369, 2048]
         front_features = backbone_out['front_features']    # [B, 1369, 2048]
-        learnable_out = backbone_out['learnable_out']      # [B, 2, 2048]
+        learnable_out = backbone_out['learnable_out']      # [B, N_learnable, 2048]
         
-        # Split learnable queries
-        bbox_query = learnable_out[:, 0]   # [B, 2048] - for bbox + mask
-        heatmap_query = learnable_out[:, 1]  # [B, 2048] - for heatmap
+        # Split learnable queries:
+        # [0:num_bbox_mask_queries] for DETR bbox + mask branch,
+        # [num_bbox_mask_queries:] for heatmap branch.
+        bbox_queries = learnable_out[:, :self.num_bbox_mask_queries]   # [B, Q_bbox_mask, C]
+        heatmap_queries = learnable_out[:, self.num_bbox_mask_queries:]  # [B, Q_heat, C]
+        heatmap_query = heatmap_queries.mean(dim=1)  # [B, C]
         
         # ============ Step 3: Final Task Heads ============
         # BBox prediction
-        bbox_outputs = self.bbox_head(bbox_query.unsqueeze(1))  # expects [B, N, C]
+        bbox_outputs = self.bbox_head(bbox_queries)  # [B, Q_bbox_mask, ...]
         
         # Mask prediction (SAM-style)
         mask_outputs = self.mask_head(
-            query_token=bbox_query,
+            query_tokens=bbox_queries,
             spatial_features=sate_features,
             spatial_size=(self.num_patches_per_side, self.num_patches_per_side),
         )
@@ -277,18 +293,18 @@ class CrossViewLocalizerV2(nn.Module):
         # ============ Step 4: Intermediate Deep Supervision ============
         intermediate_preds = {}
         for layer_idx, inter_data in backbone_out['intermediate'].items():
-            inter_learn = inter_data['learnable']     # [B, 2, 2048]
+            inter_learn = inter_data['learnable']     # [B, N_learnable, 2048]
             inter_sate = inter_data['sate_patches']   # [B, 1369, 2048]
             inter_front = inter_data.get('front_patches', None)  # [B, 1369, 2048]
             
-            inter_bbox_query = inter_learn[:, 0]  # [B, 2048]
+            inter_bbox_queries = inter_learn[:, :self.num_bbox_mask_queries]  # [B, Q_bbox_mask, C]
             
             # Intermediate BBox
-            inter_bbox = self.inter_bbox_heads[str(layer_idx)](inter_bbox_query.unsqueeze(1))
+            inter_bbox = self.inter_bbox_heads[str(layer_idx)](inter_bbox_queries)
             
             # Intermediate Mask
             inter_mask = self.inter_mask_heads[str(layer_idx)](
-                query_token=inter_bbox_query,
+                query_tokens=inter_bbox_queries,
                 spatial_features=inter_sate,
                 spatial_size=(self.num_patches_per_side, self.num_patches_per_side),
             )
@@ -303,7 +319,7 @@ class CrossViewLocalizerV2(nn.Module):
 
             # Extra supervision for stage 4/11: heatmap + rotation
             if layer_idx in self.extra_supervision_layers and inter_front is not None:
-                inter_heat_query = inter_learn[:, 1]  # [B, 2048]
+                inter_heat_query = inter_learn[:, self.num_bbox_mask_queries:].mean(dim=1)  # [B, C]
                 inter_heatmap = self.heatmap_head(
                     query_features=inter_heat_query.unsqueeze(1),
                     spatial_features=inter_sate,
