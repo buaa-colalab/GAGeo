@@ -623,9 +623,9 @@ def parse_args():
     p.add_argument("--json_path", type=str, default="/data/home/scxi704/run/xhj/data/json/unseen_test.json")
     p.add_argument("--image_root", type=str, default="/data/home/scxi704/run/xhj/data")
 
-    p.add_argument("--v3_root", type=str, default="/data/home/scxi704/run/xhj/location_v3")
-    p.add_argument("--v3_config", type=str, default="/data/home/scxi704/run/xhj/location_v3/output_v3/ablation_4_all_on/config.yaml")
-    p.add_argument("--v3_checkpoint", type=str, default="/data/home/scxi704/run/xhj/location_v3/output_v3/ablation_4_all_on/best")
+    p.add_argument("--v3_root", type=str, default="/data/home/scxi704/run/xhj/location_v4")
+    p.add_argument("--v3_config", type=str, default="/data/home/scxi704/run/xhj/location_v4/output_v3/ablation_4_all_on/config.yaml")
+    p.add_argument("--v3_checkpoint", type=str, default="/data/home/scxi704/run/xhj/location_v4/output_v3/ablation_4_all_on/best")
 
     p.add_argument("--cvos_root", type=str, default="/data/home/scxi704/run/baseline/CVOS-Code")
     p.add_argument("--cvos_checkpoint", type=str, required=True)
@@ -648,7 +648,7 @@ def parse_args():
     p.add_argument("--cvos_img_size", type=int, default=512)
     p.add_argument("--detgeo_img_size", type=int, default=512)
     p.add_argument("--panel_size", type=int, default=512)
-    p.add_argument("--output_root", type=str, default="/data/home/scxi704/run/xhj/location_v3/vis")
+    p.add_argument("--output_root", type=str, default="/data/home/scxi704/run/xhj/location_v4/vis")
     p.add_argument("--gpu", type=str, default="0")
     p.add_argument("--save_summary_json", type=str, default="")
     return p.parse_args()

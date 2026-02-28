@@ -18,14 +18,14 @@ set -euo pipefail
 #
 # Example:
 #   sbatch scripts/slurm_qualitative_compare_v3_baselines.sh \
-#     /data/home/scxi704/run/xhj/location_v3/output_v3/ablation_4_all_on/best \
+#     /data/home/scxi704/run/xhj/location_v4/output_v3/ablation_4_all_on/best \
 #     /data/home/scxi704/run/baseline/CVOS-Code/saved_models/customdata_model_best.pth.tar \
 #     /data/home/scxi704/run/baseline/DetGeo/saved_models/customdata_model_best.pth.tar \
 #     /data/home/scxi704/run/baseline/CVOS-Code/segment_anything/weights/sam_vit_h_4b8939.pth \
 #     200 20 abs 0
 
 RUN_ROOT="/data/home/scxi704/run"
-WORKSPACE_DIR="${RUN_ROOT}/xhj/location_v3"
+WORKSPACE_DIR="${RUN_ROOT}/xhj/location_v4"
 PY="${RUN_ROOT}/miniconda3/envs/filtre/bin/python"
 
 V3_CONFIG="${WORKSPACE_DIR}/output_v3/ablation_4_all_on/config.yaml"

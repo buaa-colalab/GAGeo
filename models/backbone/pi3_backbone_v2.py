@@ -211,9 +211,12 @@ class Pi3BackboneV2(nn.Module):
     3. Intermediate layer output for deep supervision (layers 4, 11, 17)
     4. Mask prompt via element-wise addition to front view tokens
     
-    Token layout per view:
-    - View 0 (Sate): [register(5) | sate_patches(1369)]
-    - View 1 (Front): [register(5) | front_patches(1369) | learnable(2) | prompt(K)]
+    Token layout:
+    - Local stage (frame-wise):
+      - Satellite stream: [register(5) | sate_patches(1369) | learnable(Q)]
+      - Front stream: [register(5) | front_patches(1369) | prompt(K)]
+    - Global stage:
+      - [sate | front | learnable | prompt]
     
     Args:
         pos_type: Positional encoding type (default 'rope100')
@@ -419,6 +422,7 @@ class Pi3BackboneV2(nn.Module):
         Rules:
         - Prompt tokens cannot see sate tokens (and vice versa)
         - Prompt tokens cannot see each other
+        - Learnable queries and prompt tokens are mutually invisible
         - Everything else is allowed
         
         Returns:
@@ -444,6 +448,11 @@ class Pi3BackboneV2(nn.Module):
         # Each prompt can see itself
         for i in range(N_prompt):
             mask[:, :, prompt_start + i, prompt_start + i] = True
+
+        if N_learn > 0:
+            # Learnable <-> Prompt: mutual block
+            mask[:, :, front_end:learn_end, prompt_start:] = False
+            mask[:, :, prompt_start:, front_end:learn_end] = False
         
         return mask
     
@@ -529,22 +538,21 @@ class Pi3BackboneV2(nn.Module):
         # NOTE (V3): dense mask embedding is NOT directly added to front_hidden.
         # It is only injected into K during global attention.
         
-        # Add learnable query tokens to front view
-        learnable = self.learnable_queries.expand(B, -1, -1).to(hidden.dtype)  # [B, 2, C]
-        front_hidden = torch.cat([front_hidden, learnable], dim=1)  # [B, 1374+2, C]
+        # Prepare learnable query tokens (for front local stream)
+        learnable_hidden = self.learnable_queries.expand(B, -1, -1).to(hidden.dtype)  # [B, N_learn, C]
         N_learn = self.num_learnable_tokens
-        
-        # Add prompt tokens to front view
+
+        # Prepare prompt tokens (for satellite local stream)
         N_prompt = 0
+        prompt_hidden = None
+        prompt_pos = None
         if sparse_embeddings is not None and sparse_embeddings.shape[1] > 0:
             prompt_tokens = sparse_embeddings.to(hidden.dtype)  # [B, K, C]
             # Project if dimensions don't match
             if self.prompt_proj is not None:
                 prompt_tokens = self.prompt_proj(prompt_tokens)
             N_prompt = prompt_tokens.shape[1]
-            front_hidden = torch.cat([front_hidden, prompt_tokens], dim=1)  # [B, 1374+2+K, C]
-        
-        N_front_total = front_hidden.shape[1]
+            prompt_hidden = prompt_tokens
         
         # Build RoPE positions
         base_pos = self.position_getter(B, patch_h, patch_w, hidden.device)  # [B, hw, 2]
@@ -559,20 +567,16 @@ class Pi3BackboneV2(nn.Module):
         
         sate_pos = base_pos_with_reg  # [B, 1374, 2]
         
-        # Front pos = base pos + learnable pos (0,0) + prompt pos
+        # Front pos = base pos + learnable pos (0,0)
         learnable_pos = torch.zeros(B, N_learn, 2, device=hidden.device, dtype=base_pos.dtype)
-        front_pos = torch.cat([base_pos_with_reg, learnable_pos], dim=1)  # [B, 1376, 2]
+        front_pos = base_pos_with_reg
         
         if N_prompt > 0:
             prompt_pos = self._build_prompt_positions(
                 sparse_embeddings, prompt_coords, B, hidden.device, base_pos.dtype
             )
-            front_pos = torch.cat([front_pos, prompt_pos], dim=1)  # [B, 1376+K, 2]
         
-        # Pre-compute attention masks
-        local_mask = self._build_local_attn_mask(
-            N_sate, N_front_base, N_learn, N_prompt, hidden.device, hidden.dtype
-        )
+        # Pre-compute global attention mask
         global_mask = self._build_global_attn_mask(
             N_sate, N_front_base, N_learn, N_prompt, hidden.device, hidden.dtype
         )
@@ -587,19 +591,35 @@ class Pi3BackboneV2(nn.Module):
         
         for i in range(len(self.decoder)):
             if i % 2 == 0:
-                # ---- Local stage (V3): masked GLOBAL self-attention over all tokens ----
-                global_hidden = torch.cat([sate_hidden, front_hidden], dim=1)
-                global_pos = torch.cat([sate_pos, front_pos], dim=1)
-                global_hidden = self.masked_blocks[i](global_hidden, xpos=global_pos, attn_mask=local_mask)
+                # ---- Local stage (Pi3 frame attention style): self-attention per frame ----
+                sate_local = torch.cat([sate_hidden, learnable_hidden], dim=1)
+                sate_local_pos = torch.cat([sate_pos, learnable_pos], dim=1)
+                sate_local = self.masked_blocks[i](sate_local, xpos=sate_local_pos)
 
-                # Split back
-                sate_hidden = global_hidden[:, :N_sate]
-                front_hidden = global_hidden[:, N_sate:]
+                front_local = front_hidden
+                front_local_pos = front_pos
+                if prompt_hidden is not None:
+                    front_local = torch.cat([front_local, prompt_hidden], dim=1)
+                    front_local_pos = torch.cat([front_local_pos, prompt_pos], dim=1)
+                front_local = self.masked_blocks[i](front_local, xpos=front_local_pos)
+
+                # Split back to base/frame-specific token sets
+                sate_hidden = sate_local[:, :N_sate]
+                learnable_hidden = sate_local[:, N_sate:]
+
+                front_hidden = front_local[:, :N_front_base]
+                if prompt_hidden is not None:
+                    prompt_hidden = front_local[:, N_front_base:]
             else:
-                # ---- Global attention (V3):
-                # Q,V = (sate, front, learnable, prompt)
-                # K   = (sate, front_with_mask, learnable, prompt)
-                global_qv = torch.cat([sate_hidden, front_hidden], dim=1)
+                # ---- Global attention (V4):
+                # Q,V,K token layout = (sate, front, learnable, prompt)
+                global_qv_tokens = [sate_hidden, front_hidden, learnable_hidden]
+                global_pos_tokens = [sate_pos, front_pos, learnable_pos]
+                if prompt_hidden is not None:
+                    global_qv_tokens.append(prompt_hidden)
+                    global_pos_tokens.append(prompt_pos)
+                global_qv = torch.cat(global_qv_tokens, dim=1)
+
                 if dense_flat is not None:
                     # Only clone when we need to inject dense mask into K
                     global_k = global_qv.clone()
@@ -609,7 +629,7 @@ class Pi3BackboneV2(nn.Module):
                 else:
                     global_k = global_qv  # No mask prompt → K == QV, skip clone
 
-                global_pos = torch.cat([sate_pos, front_pos], dim=1)
+                global_pos = torch.cat(global_pos_tokens, dim=1)
                 global_hidden = self.masked_blocks[i].forward_qkv(
                     global_qv,
                     global_k,
@@ -619,8 +639,13 @@ class Pi3BackboneV2(nn.Module):
                 )
                 
                 # Split back
+                g_front_end = N_sate + N_front_base
+                g_learn_end = g_front_end + N_learn
                 sate_hidden = global_hidden[:, :N_sate]
-                front_hidden = global_hidden[:, N_sate:]
+                front_hidden = global_hidden[:, N_sate:g_front_end]
+                learnable_hidden = global_hidden[:, g_front_end:g_learn_end]
+                if prompt_hidden is not None:
+                    prompt_hidden = global_hidden[:, g_learn_end:]
             
             # Collect intermediate outputs for deep supervision
             # One supervision layer = (local + global), so collect after global block.
@@ -628,9 +653,7 @@ class Pi3BackboneV2(nn.Module):
                 stage_idx = self.supervision_block_indices[i]
 
                 # Extract learnable query outputs from this stage
-                learn_start = N_front_base
-                learn_end = N_front_base + N_learn
-                inter_learn = front_hidden[:, learn_start:learn_end]  # [B, 2, C]
+                inter_learn = learnable_hidden  # [B, N_learn, C]
                 inter_sate = sate_hidden[:, self.patch_start_idx:]   # [B, 1369, C]
                 
                 # Project from single-layer C to output_dim (2*C)
@@ -661,9 +684,7 @@ class Pi3BackboneV2(nn.Module):
         features = torch.cat([final_output[0], final_output[1]], dim=-1)
         
         # Extract final learnable query outputs
-        learn_start = N_front_base
-        learn_end = N_front_base + N_learn
-        learnable_final = self.final_proj(front_hidden[:, learn_start:learn_end])
+        learnable_final = self.final_proj(learnable_hidden)
         
         return {
             'features': features,           # [B, 2, 1374, 2*C]

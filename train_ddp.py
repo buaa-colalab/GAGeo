@@ -58,7 +58,7 @@ def parse_args():
 def load_config(config_path: str) -> dict:
     defaults = {
         "ROOT_DIR": os.environ.get("ROOT_DIR", "/data/home/scxi704/run/xhj"),
-        "WORKSPACE_NAME": os.environ.get("WORKSPACE_NAME", "location_v3"),
+        "WORKSPACE_NAME": os.environ.get("WORKSPACE_NAME", "location_v4"),
     }
     defaults["WORKSPACE_DIR"] = f"{defaults['ROOT_DIR']}/{defaults['WORKSPACE_NAME']}"
 

@@ -107,7 +107,7 @@ try:
     import sys
     import os
     _root_dir = os.environ.get("ROOT_DIR", "/data/home/scxi704/run/xhj")
-    _workspace_name = os.environ.get("WORKSPACE_NAME", "location_v3")
+    _workspace_name = os.environ.get("WORKSPACE_NAME", "location_v4")
     sys.path.insert(0, f"{_root_dir}/{_workspace_name}")
     from curope import cuRoPE2D
     RoPE2D = cuRoPE2D

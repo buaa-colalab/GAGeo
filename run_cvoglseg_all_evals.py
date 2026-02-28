@@ -24,7 +24,7 @@ def _safe_load_json(path):
 
 
 def main():
-    ws = Path("/data/home/scxi704/run/xhj/location_v3")
+    ws = Path("/data/home/scxi704/run/xhj/location_v4")
     p = argparse.ArgumentParser("Run v3 + baselines on CVOGL-Seg (online)")
     p.add_argument("--output_dir", type=str, default=str(ws / "output_v3" / "cvoglseg_eval"))
     p.add_argument("--gpu", type=str, default="0")

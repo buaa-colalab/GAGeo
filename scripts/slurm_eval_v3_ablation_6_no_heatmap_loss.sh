@@ -12,7 +12,7 @@
 set -euo pipefail
 
 ROOT_DIR=${ROOT_DIR:-"/data/home/scxi704/run/xhj"}
-WORKSPACE_NAME=${WORKSPACE_NAME:-"location_v3"}
+WORKSPACE_NAME=${WORKSPACE_NAME:-"location_v4"}
 WORKSPACE_DIR="${ROOT_DIR}/${WORKSPACE_NAME}"
 
 SAM_CKPT="${1:-}"

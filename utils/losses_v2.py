@@ -3,7 +3,7 @@
 Changes from V1:
 1. Added Mask Loss (BCE + Dice, SAM-style)
 2. Added Deep Supervision support (intermediate layer predictions)
-3. Heatmap Loss simplified to position MSE only (no distribution)
+3. Heatmap Loss uses CornerNet-style pixel-wise focal loss
 4. Fixed classification focal loss normalization
 5. Added intermediate loss weighting
 """
@@ -46,7 +46,10 @@ class HungarianMatcher(nn.Module):
         for b in range(B):
             pred_b = outputs['pred_boxes'][b]  # [N, 4]
             tgt_b = tgt_boxes[b:b+1]  # [1, 4]
-            logits_b = outputs['class_logits'][b].sigmoid()  # [N, num_classes]
+            # Defensive sanitization: avoid NaN/Inf breaking GIoU assertion.
+            pred_b = torch.nan_to_num(pred_b, nan=0.5, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
+            tgt_b = torch.nan_to_num(tgt_b, nan=0.5, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
+            logits_b = torch.nan_to_num(outputs['class_logits'][b], nan=0.0, posinf=30.0, neginf=-30.0).sigmoid()
             
             cost_class = -logits_b[:, 0:1]
             cost_bbox = torch.cdist(pred_b.float(), tgt_b.float(), p=1)
@@ -125,7 +128,7 @@ class DETRCriterionV2(nn.Module):
     1. BBox: L1 + GIoU loss for matched predictions
     2. Classification: Focal loss for object vs no-object
     3. Mask: BCE + Dice loss (SAM-style)
-    4. Heatmap: Position MSE only (simplified)
+    4. Heatmap: CornerNet-style pixel-wise focal loss
     5. Rotation: Geodesic/smooth distance on SO(3)
     6. Contrastive: MoCo cross-view loss
     7. Deep Supervision: weighted sum of intermediate losses
@@ -152,6 +155,9 @@ class DETRCriterionV2(nn.Module):
         use_contrastive_loss: bool = True,
         use_rot_pos_supervision: bool = True,
         use_heatmap_loss: bool = True,
+        heatmap_sigma: float = 0.05,
+        heatmap_focal_alpha: float = 2.0,
+        heatmap_focal_beta: float = 4.0,
     ):
         super().__init__()
         self.weight_bbox = weight_bbox
@@ -168,6 +174,9 @@ class DETRCriterionV2(nn.Module):
         self.use_contrastive_loss = use_contrastive_loss
         self.use_rot_pos_supervision = use_rot_pos_supervision
         self.use_heatmap_loss = use_heatmap_loss
+        self.heatmap_sigma = heatmap_sigma
+        self.heatmap_focal_alpha = heatmap_focal_alpha
+        self.heatmap_focal_beta = heatmap_focal_beta
         
         self.supervision_layers = [4, 11, 17] if supervision_layers is None else list(supervision_layers)
         self.supervision_weights = [0.1, 0.3, 0.6] if supervision_weights is None else list(supervision_weights)
@@ -188,8 +197,8 @@ class DETRCriterionV2(nn.Module):
         
         if indices is None:
             indices = self.matcher(outputs, targets)
-        pred_boxes = outputs['pred_boxes']
-        target_boxes = targets['sat_bbox']
+        pred_boxes = torch.nan_to_num(outputs['pred_boxes'], nan=0.5, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
+        target_boxes = torch.nan_to_num(targets['sat_bbox'], nan=0.5, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
         B = pred_boxes.shape[0]
         
         src_idx = torch.cat([src for (src, _) in indices])
@@ -219,7 +228,7 @@ class DETRCriterionV2(nn.Module):
         
         # Classification loss
         if 'class_logits' in outputs and self.weight_class > 0:
-            pred_logits = outputs['class_logits']
+            pred_logits = torch.nan_to_num(outputs['class_logits'], nan=0.0, posinf=30.0, neginf=-30.0)
             target_classes = torch.zeros_like(pred_logits)
             for b_idx, (src, _) in enumerate(indices):
                 target_classes[b_idx, src, :] = 1.0
@@ -291,21 +300,69 @@ class DETRCriterionV2(nn.Module):
         return losses
     
     def _compute_heatmap_loss(self, outputs, targets):
-        """Compute Heatmap loss (position MSE only)."""
+        """Compute Heatmap loss using CornerNet-style pixel-wise focal loss."""
         losses = {}
         
-        if 'position' not in outputs or 'camera_position' not in targets:
+        if 'heatmap_logits' not in outputs or 'camera_position' not in targets:
             return losses
-        
-        pred_pos = outputs['position']          # [B, 2]
-        target_pos = targets['camera_position']  # [B, 2]
-        
-        # Simple MSE loss on position
-        loss_heatmap = F.mse_loss(pred_pos, target_pos)
+
+        # Compute in FP32 for numerical stability under bf16 mixed precision.
+        heatmap_logits = outputs['heatmap_logits'].float()  # [B, H, W]
+        if heatmap_logits.dim() != 3:
+            raise ValueError(f"Expected heatmap_logits [B, H, W], got {tuple(heatmap_logits.shape)}")
+
+        target_pos = targets['camera_position'].to(heatmap_logits.dtype)  # [B, 2], normalized [0, 1]
+        B, H, W = heatmap_logits.shape
+
+        y_coords = torch.linspace(0, 1, H, device=heatmap_logits.device, dtype=heatmap_logits.dtype)
+        x_coords = torch.linspace(0, 1, W, device=heatmap_logits.device, dtype=heatmap_logits.dtype)
+        grid_y, grid_x = torch.meshgrid(y_coords, x_coords, indexing='ij')
+        grid_x = grid_x.unsqueeze(0)  # [1, H, W]
+        grid_y = grid_y.unsqueeze(0)  # [1, H, W]
+
+        target_x = target_pos[:, 0].view(B, 1, 1)
+        target_y = target_pos[:, 1].view(B, 1, 1)
+        sigma = max(float(self.heatmap_sigma), 1e-6)
+        dist_sq = (grid_x - target_x) ** 2 + (grid_y - target_y) ** 2
+        target_heatmap = torch.exp(-dist_sq / (2.0 * sigma * sigma)).clamp_(0.0, 1.0)
+
+        # Ensure at least one positive pixel per sample (CornerNet-style center).
+        center_x = torch.round(target_pos[:, 0] * (W - 1)).long().clamp_(0, W - 1)
+        center_y = torch.round(target_pos[:, 1] * (H - 1)).long().clamp_(0, H - 1)
+        target_heatmap[torch.arange(B, device=heatmap_logits.device), center_y, center_x] = 1.0
+
+        pred = torch.sigmoid(heatmap_logits)
+        pos_inds = (target_heatmap >= 1.0).float()
+        neg_inds = (target_heatmap < 1.0).float()
+        neg_weights = torch.pow(1.0 - target_heatmap, self.heatmap_focal_beta)
+
+        # Logits-stable focal terms:
+        # log(sigmoid(x)) = -softplus(-x), log(1-sigmoid(x)) = -softplus(x)
+        log_p = -F.softplus(-heatmap_logits)
+        log_not_p = -F.softplus(heatmap_logits)
+        pos_loss = log_p * torch.pow(1.0 - pred, self.heatmap_focal_alpha) * pos_inds
+        neg_loss = log_not_p * torch.pow(pred, self.heatmap_focal_alpha) * neg_weights * neg_inds
+
+        num_pos = pos_inds.sum()
+        if num_pos > 0:
+            loss_heatmap = -(pos_loss.sum() + neg_loss.sum()) / num_pos
+        else:
+            loss_heatmap = -neg_loss.sum()
         losses['loss_heatmap'] = loss_heatmap
+
+        with torch.no_grad():
+            center_prob = pred[torch.arange(B, device=pred.device), center_y, center_x].mean()
+            losses['heatmap_center_prob'] = center_prob.detach()
         
         # Position error metric (normalized distance)
         with torch.no_grad():
+            if 'position' in outputs:
+                pred_pos = outputs['position']
+            else:
+                flat_idx = heatmap_logits.flatten(1).argmax(dim=1)
+                pred_y = (flat_idx // W).to(heatmap_logits.dtype) / max(H - 1, 1)
+                pred_x = (flat_idx % W).to(heatmap_logits.dtype) / max(W - 1, 1)
+                pred_pos = torch.stack([pred_x, pred_y], dim=1)
             pos_error = (pred_pos - target_pos).norm(dim=-1).mean()
             losses['pos_error'] = pos_error.detach()
         

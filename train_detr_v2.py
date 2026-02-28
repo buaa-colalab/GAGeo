@@ -66,7 +66,7 @@ def parse_args():
 def load_config(config_path: str) -> dict:
     defaults = {
         "ROOT_DIR": os.environ.get("ROOT_DIR", "/data/home/scxi704/run/xhj"),
-        "WORKSPACE_NAME": os.environ.get("WORKSPACE_NAME", "location_v3"),
+        "WORKSPACE_NAME": os.environ.get("WORKSPACE_NAME", "location_v4"),
     }
     defaults["WORKSPACE_DIR"] = f"{defaults['ROOT_DIR']}/{defaults['WORKSPACE_NAME']}"
 
@@ -261,7 +261,7 @@ def train_one_epoch(
         if accelerator.is_main_process:
             postfix = {}
             for k, v in losses.items():
-                if k.startswith('loss') or k in ('rotation_error_deg', 'bbox_iou', 'pos_error', 'mask_iou'):
+                if k.startswith('loss') or k in ('rotation_error_deg', 'bbox_iou', 'pos_error', 'mask_iou', 'heatmap_center_prob'):
                     val = v.item() if isinstance(v, torch.Tensor) else v
                     postfix[k.replace('loss_', '')] = f'{val:.4f}'
             pbar.set_postfix(postfix)

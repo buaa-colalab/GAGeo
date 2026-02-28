@@ -8,7 +8,7 @@ import os
 import shutil
 from pathlib import Path
 
-LOCAL_BASE_DIR = Path("/data/home/scxi704/run/xhj/location_v3/output_v3")
+LOCAL_BASE_DIR = Path("/data/home/scxi704/run/xhj/location_v4/output_v3")
 
 FOLDERS = [
     "ablation_1_ds_only",

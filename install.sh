@@ -3,7 +3,7 @@
 echo "=== Installing Cross-View Localization Dependencies ==="
 
 ROOT_DIR="${ROOT_DIR:-/data/home/scxi704/run/xhj}"
-WORKSPACE_NAME="${WORKSPACE_NAME:-location_v3}"
+WORKSPACE_NAME="${WORKSPACE_NAME:-location_v4}"
 WORKSPACE_DIR="${ROOT_DIR}/${WORKSPACE_NAME}"
 
 # 检测 CUDA 版本

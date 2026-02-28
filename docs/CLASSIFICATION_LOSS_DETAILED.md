@@ -396,10 +396,10 @@ loss_class = sigmoid_focal_loss(
 
 ### 7.2 关键代码位置
 
-- **模型输出**：`xhj/location_v3/models/heads/bbox_head.py:53`
-- **Target 生成**：`xhj/location_v3/utils/losses_v2.py:223-225`
-- **Loss 计算**：`xhj/location_v3/utils/losses_v2.py:227-231`
-- **Focal Loss 实现**：`xhj/location_v3/utils/losses_v2.py:72-81`
+- **模型输出**：`xhj/location_v4/models/heads/bbox_head.py:53`
+- **Target 生成**：`xhj/location_v4/utils/losses_v2.py:223-225`
+- **Loss 计算**：`xhj/location_v4/utils/losses_v2.py:227-231`
+- **Focal Loss 实现**：`xhj/location_v4/utils/losses_v2.py:72-81`
 
 ---
 

@@ -224,7 +224,7 @@ def generate_table(split_name, prompt_type):
 
 def main():
     """主函数"""
-    output_file = Path('/data/home/scxi704/run/xhj/location_v3/ablation_tables.txt')
+    output_file = Path('/data/home/scxi704/run/xhj/location_v4/ablation_tables.txt')
     
     # 重定向输出到文件
     import sys

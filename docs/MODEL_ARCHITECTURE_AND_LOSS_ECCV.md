@@ -2,7 +2,7 @@
 
 ## Abstract
 
-We present a unified architecture for cross-view drone localization that simultaneously predicts object bounding boxes, segmentation masks, camera position, and rotation from a monocular front-view image to a satellite map. Our approach leverages a unified Pi3 backbone with learnable queries, deep supervision, and a comprehensive multi-task loss function. The model supports flexible geometric prompts (points, bounding boxes, or masks) to specify the target object in the front view, enabling accurate localization in the satellite view.
+We present a unified architecture for cross-view drone localization that simultaneously predicts object bounding boxes, segmentation masks, camera position, and rotation from a monocular front-view image to a satellite map. Our approach leverages a unified Pi3 backbone with learnable queries, prompt tokens, deep supervision, and a comprehensive multi-task loss function. For camera position supervision, we adopt a CornerNet-style pixel-wise focal heatmap loss instead of position-only MSE. The model supports flexible geometric prompts (points, bounding boxes, or masks) to specify the target object in the front view, enabling accurate localization in the satellite view.
 
 ---
 
@@ -26,7 +26,7 @@ Input: Front-view image I_f, Satellite image I_s, Geometric prompts P
 [Task Heads] → BBox, Mask, Position, Rotation
 ```
 
-### 2.2 Unified Backbone
+### 2.2 Unified Backbone (V4 Token Routing)
 
 The backbone is based on the Pi3 (Pose-conditioned Image-to-Image-to-Image) architecture, which consists of:
 
@@ -34,10 +34,28 @@ The backbone is based on the Pi3 (Pose-conditioned Image-to-Image-to-Image) arch
   - Front view: \(F_f \in \mathbb{R}^{B \times N_p \times D}\) where \(N_p = 37 \times 37 = 1369\) patches
   - Satellite view: \(F_s \in \mathbb{R}^{B \times N_p \times D}\) with \(D = 2048\) for large decoder
 
-- **Pi3 Decoder**: Processes cross-view features with learnable queries
-  - Learnable queries: \(Q \in \mathbb{R}^{B \times N_q \times D}\) where \(N_q = N_{bbox} + N_{heatmap}\)
-  - Custom attention masks control token interactions between views
+- **Pi3 Decoder**: Processes cross-view features with learnable queries and prompt tokens
+  - Learnable queries: \(Q \in \mathbb{R}^{B \times N_q \times D}\), \(N_q = N_{bbox} + N_{heatmap}\)
+  - Prompt tokens: \(P \in \mathbb{R}^{B \times K \times D}\) (projected from prompt encoder)
   - RoPE (Rotary Position Embedding) for spatial awareness
+  - Local/global attention use different token layouts and visibility rules
+
+**Local stage (frame-wise self-attention)**:
+
+- Satellite stream: \([F_s \,|\, Q]\)
+- Front stream: \([F_f \,|\, P]\)
+
+Both streams pass through the same local block (shared parameters, two forward passes), matching Pi3-style frame attention.
+
+**Global stage (cross-stream interaction)**:
+
+- Unified layout: \([F_s \,|\, F_f \,|\, Q \,|\, P]\)
+- Mask rules:
+  - \(P \leftrightarrow F_s\): not visible
+  - \(P \leftrightarrow P\): not visible except self
+  - \(Q \leftrightarrow P\): not visible (new in V4)
+
+This design preserves prompt guidance for front-view understanding while preventing direct query-prompt shortcut coupling.
 
 The backbone outputs:
 - Front view features: \(F_f \in \mathbb{R}^{B \times N_p \times D}\)
@@ -51,7 +69,7 @@ We split learnable queries into two groups:
 - **BBox/Mask Queries** (\(Q_{bbox} \in \mathbb{R}^{B \times N_{bbox} \times D}\)): Used for object detection and segmentation
 - **Heatmap Queries** (\(Q_{heat} \in \mathbb{R}^{B \times N_{heat} \times D}\)): Used for camera position prediction
 
-The queries are initialized as learnable parameters and updated through the decoder layers via cross-attention with spatial features.
+The queries are initialized as learnable parameters and updated through alternating local/global attention with spatial features. In V4, learnable queries are attached to the satellite local stream (instead of front stream in earlier variants), while prompt tokens are attached to the front local stream.
 
 ### 2.4 Task-Specific Heads
 
@@ -232,17 +250,56 @@ where \(\hat{m}_b = \sigma(\text{mask\_logits}_b)\) and \(\epsilon = 1.0\) is a 
 
 **Mask Selection**: Only the mask corresponding to the Hungarian-matched bbox query is used for loss computation.
 
-### 3.5 Heatmap Loss
+### 3.5 Heatmap Loss (CornerNet-style Pixel-wise Focal)
 
-The heatmap loss is a simple MSE on the extracted position:
+Instead of regressing only the final position, we supervise the full heatmap with a CornerNet-style focal objective.
 
+Given target position \(p_b=(x_b,y_b)\) and predicted logits \(Z_b \in \mathbb{R}^{H \times W}\):
+
+1) **Gaussian target heatmap**
 \[
-\mathcal{L}_{heatmap} = \lambda_{heat} \cdot \|\hat{p} - p_{gt}\|_2^2
+Y_b(i,j)=\exp\left(-\frac{(u_i-x_b)^2+(v_j-y_b)^2}{2\sigma^2}\right),
+\]
+where \(u_i=\frac{i}{W-1}\), \(v_j=\frac{j}{H-1}\).
+
+2) **Prediction probability**
+\[
+\hat{P}_b(i,j)=\mathrm{clip}(\sigma(Z_b(i,j)), \epsilon, 1-\epsilon).
 \]
 
-where:
-- \(\hat{p} \in \mathbb{R}^2\): Predicted position from soft-argmax
-- \(p_{gt} \in \mathbb{R}^2\): Ground truth camera position (normalized to [0, 1])
+3) **Positive/negative definitions**
+\[
+\mathbf{1}^{+}_{b,i,j}=\mathbf{1}[Y_b(i,j)=1],\quad
+\mathbf{1}^{-}_{b,i,j}=\mathbf{1}[Y_b(i,j)<1],\quad
+w^{-}_{b,i,j}=(1-Y_b(i,j))^{\beta}.
+\]
+
+4) **Focal loss terms**
+\[
+\mathcal{L}_{pos}=
+\sum_{b,i,j}\log\hat{P}_b(i,j)\,(1-\hat{P}_b(i,j))^{\alpha}\,\mathbf{1}^{+}_{b,i,j},
+\]
+\[
+\mathcal{L}_{neg}=
+\sum_{b,i,j}\log(1-\hat{P}_b(i,j))\,\hat{P}_b(i,j)^{\alpha}\,w^{-}_{b,i,j}\,\mathbf{1}^{-}_{b,i,j}.
+\]
+
+5) **Final heatmap objective**
+\[
+\mathcal{L}_{heatmap}=
+\lambda_{heat}\cdot
+\begin{cases}
+-\dfrac{\mathcal{L}_{pos}+\mathcal{L}_{neg}}{N_{pos}}, & N_{pos}>0,\\[6pt]
+-\mathcal{L}_{neg}, & N_{pos}=0.
+\end{cases}
+\]
+
+where \(N_{pos}=\sum \mathbf{1}^{+}\), and default hyperparameters are \(\alpha=2\), \(\beta=4\), \(\sigma=0.05\).
+
+**Implementation details for stability**:
+- Heatmap focal loss is computed in FP32 under mixed-precision training.
+- The center pixel nearest to \(p_b\) is explicitly set to 1 in \(Y_b\), ensuring at least one positive per sample.
+- Position regression metric (\(pos\_error\)) is still reported for interpretability, but optimization is heatmap-distribution driven.
 
 ### 3.6 Rotation Loss
 
@@ -383,6 +440,13 @@ Focal loss addresses class imbalance in single-target detection:
 - Many negative queries (unmatched) vs. one positive query (matched)
 - Automatically focuses on hard examples
 - Prevents negative samples from dominating the loss
+
+### 5.5 Heatmap Distribution Supervision
+
+Compared with position-only MSE, pixel-wise focal heatmap supervision provides:
+- Dense gradients over the full spatial map (not only a 2D coordinate)
+- Better robustness under multi-modal uncertainty
+- More stable early-stage optimization when combined with deep supervision
 
 ---
 
