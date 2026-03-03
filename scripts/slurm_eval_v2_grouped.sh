@@ -38,6 +38,8 @@ EXPRIMENT_NAME="${3:-ablation_4_all_on}"
 MODEL_DIR="${4:-output_v3/${EXPRIMENT_NAME}}"
 PROMPT_TYPES=(point bbox mask)
 
+CHECKPOINT_NAME="${5:-best}"
+
 if [[ -z "$SAM_CKPT" ]]; then
   echo "[ERROR] Please provide SAM checkpoint path as first argument."
   echo "Usage: sbatch scripts/slurm_eval_v2_grouped.sh <sam_checkpoint> [gpu_id]"
@@ -106,7 +108,7 @@ launch_eval() {
   "${RUN_ROOT}/miniconda3/bin/conda" run -n filtre --no-capture-output \
     python "${WORKSPACE_DIR}/evaluate_custom_v2.py" \
       --config "${WORKSPACE_DIR}/${MODEL_DIR}/config.yaml" \
-      --checkpoint "${WORKSPACE_DIR}/${MODEL_DIR}/best" \
+      --checkpoint "${WORKSPACE_DIR}/${MODEL_DIR}/${CHECKPOINT_NAME}" \
       --splits test unseen_test \
       --prompt_types "$prompt_type" \
       --batch_size 8 \

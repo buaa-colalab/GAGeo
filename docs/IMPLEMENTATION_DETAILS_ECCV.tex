@@ -1,0 +1,78 @@
+\section{Implementation Details}
+\label{sec:impl}
+
+\paragraph{Hardware and training framework.}
+All experiments are trained on a single node with 8 GPUs (SLURM: \texttt{--gres=gpu:8}), 64 CPU cores, and 512\,GB RAM.
+We use HuggingFace Accelerate with DeepSpeed ZeRO-2 for distributed training, and BF16 mixed precision (\texttt{mixed\_precision=bf16}).
+The random seed is fixed to 42.
+
+\paragraph{Dataset and preprocessing.}
+We train on \texttt{train\_all.json} and validate on \texttt{val\_all.json}, with image root at \texttt{\$\{ROOT\_DIR\}/data/urban}.
+Both front-view and satellite crops are resized/cropped to $518\times518$.
+The dataloader uses per-GPU batch size 3, 24 workers, pinned memory, and prefetch factor 4.
+Training uses \texttt{drop\_last=True}.
+With gradient accumulation of 4 and 8 GPUs, the effective global batch size is $3\times4\times8=96$.
+
+\paragraph{Prompt sampling protocol.}
+During training, we randomly sample exactly one prompt type per batch from \{point, bbox, mask\}.
+Bounding-box prompts are converted to pixel-space \texttt{xywh}.
+Validation uses a deterministic single prompt mode (point prompt).
+
+\paragraph{Model configuration.}
+We use a unified Pi3 backbone with \texttt{decoder\_size=large}.
+The number of learnable queries is split as:
+\[
+N_q = N_{\text{bbox/mask}} + N_{\text{heatmap}} = 1 + 1.
+\]
+Deep supervision is applied at stages $\{4,11,17\}$ with weights $\{0.1,0.3,0.6\}$.
+SAM prompt encoder uses \texttt{sam\_embed\_dim=256} and is initialized from \texttt{sam2.1\_hiera\_large.pt}.
+MoCo-style contrastive learning is enabled by default with projection dim 256, queue size 16384, momentum 0.999, and temperature 0.07.
+
+\paragraph{Freezing strategy.}
+We freeze the DINOv2 encoder, freeze the main SAM prompt encoder (while keeping prompt projection layers trainable), and freeze SAM mask downscaling convolutions.
+The Pi3 decoder remains trainable.
+
+\paragraph{Optimization.}
+We use AdamW with weight decay $10^{-4}$ and a three-group learning-rate policy:
+\begin{itemize}
+  \item backbone parameters: $1\times10^{-5}$,
+  \item new-token parameters (learnable queries and projection layers): $5\times10^{-4}$,
+  \item task heads: $1\times10^{-4}$.
+\end{itemize}
+Gradients are clipped to max norm 1.0.
+The scheduler is cosine with 5 warmup epochs over a total of 30 epochs.
+
+\paragraph{Loss weights.}
+The final multi-task loss combines:
+\[
+\lambda_{\text{bbox}}=5.0,\;
+\lambda_{\text{giou}}=2.0,\;
+\lambda_{\text{class}}=2.0,\;
+\lambda_{\text{bce}}=2.0,\;
+\lambda_{\text{dice}}=5.0,\;
+\lambda_{\text{heat}}=0.1,\;
+\lambda_{\text{rot}}=0.1,\;
+\lambda_{\text{contrast}}=0.1.
+\]
+Intermediate deep-supervision losses are first weighted by stage factors \{0.1, 0.3, 0.6\}, then aggregated with the corresponding task weights.
+
+\paragraph{Heatmap supervision (stable focal implementation).}
+We supervise camera position with a CornerNet-style pixel-wise focal heatmap loss (instead of position-only MSE).
+Under BF16 training, heatmap loss is computed in FP32 for stability.
+We use a logits-stable formulation:
+\[
+\log(\sigma(x))=-\mathrm{softplus}(-x),\qquad
+\log(1-\sigma(x))=-\mathrm{softplus}(x),
+\]
+with default hyperparameters
+\[
+\alpha=2.0,\quad \beta=4.0,\quad \sigma=0.05.
+\]
+For each sample, the nearest grid center to the ground-truth position is explicitly set as a positive pixel to guarantee at least one positive target.
+In addition to \texttt{pos\_error}, we monitor \texttt{heatmap\_center\_prob} during training.
+
+\paragraph{Training schedule and checkpointing.}
+We validate every epoch (\texttt{val\_freq=1}) and save checkpoints every 5 epochs.
+Best-model selection uses globally reduced validation loss across distributed ranks to avoid rank-wise divergence.
+For the ``all-on'' setting, we enable deep supervision, contrastive loss, and rotation/position supervision simultaneously.
+

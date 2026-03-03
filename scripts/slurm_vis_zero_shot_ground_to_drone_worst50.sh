@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=cvloc_zs_g2d
-#SBATCH --output=/data/home/scxi704/run/eval_logs/slurm_zs_g2d_%j.out
-#SBATCH --error=/data/home/scxi704/run/eval_logs/slurm_zs_g2d_%j.err
+#SBATCH --job-name=cvloc_vis_zs_g2d
+#SBATCH --output=/data/home/scxi704/run/eval_logs/slurm_vis_zs_g2d_%j.out
+#SBATCH --error=/data/home/scxi704/run/eval_logs/slurm_vis_zs_g2d_%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
@@ -10,19 +10,21 @@
 #SBATCH --partition=vip_gpu_5090_scxi704
 
 # ============================================
-# SLURM Zero-shot Eval: ground -> drone (point prompt)
-# Metrics: mean IoU / ACC@25 / ACC@50
+# SLURM Visualization: worst-K zero-shot ground -> drone
+# Visualize pred/gt bbox on drone image + point prompt on ground image
 # ============================================
 # Usage:
-#   sbatch scripts/slurm_eval_zero_shot_ground_to_drone.sh \
-#       [triplet_json] [root_dir] [checkpoint_dir] [gpu_id]
+#   sbatch scripts/slurm_vis_zero_shot_ground_to_drone_worst50.sh \
+#       [triplet_json] [root_dir] [checkpoint_dir] [gpu_id] [checkpoint_name] [worst_k]
 #
 # Example:
-#   sbatch scripts/slurm_eval_zero_shot_ground_to_drone.sh \
-#       ${ROOT_DIR}/University-Release/verified_triplets.json \
+#   sbatch scripts/slurm_vis_zero_shot_ground_to_drone_worst50.sh \
+#       ${ROOT_DIR}/University-Release/verified_triplets_sam2_masks.json \
 #       ${ROOT_DIR}/University-Release \
-#       ${ROOT_DIR}/${WORKSPACE_NAME}/output_v2/best \
-#       0
+#       ${ROOT_DIR}/${WORKSPACE_NAME}/output_v3/ablation_4_all_on/best \
+#       0 \
+#       best \
+#       50
 # ============================================
 
 set -euo pipefail
@@ -39,10 +41,12 @@ TRIPLET_JSON="${1:-${ROOT_DIR}/University-Release/verified_triplets_sam2_masks.j
 ROOT_DIR_DATA="${2:-${ROOT_DIR}/University-Release}"
 CKPT_DIR="${3:-${WORKSPACE_DIR}/output_v3/${EXPRIMENT_NAME}/${CHECKPOINT_NAME}}"
 GPU_ID="${4:-0}"
+WORST_K="${6:-50}"
 
 CONFIG_PATH="${WORKSPACE_DIR}/output_v3/${EXPRIMENT_NAME}/config.yaml"
-OUT_JSON="${WORKSPACE_DIR}/output_v3/${EXPRIMENT_NAME}/eval_zero_shot_ground_to_drone_$(date +%Y%m%d_%H%M%S).json"
-
+STAMP="$(date +%Y%m%d_%H%M%S)"
+OUT_DIR="${WORKSPACE_DIR}/output_v3/${EXPRIMENT_NAME}/vis_worst_${WORST_K}_${STAMP}"
+OUT_JSON="${OUT_DIR}/worst_samples_summary.json"
 
 if [[ ! -f "$TRIPLET_JSON" ]]; then
   echo "[ERROR] triplet json not found: $TRIPLET_JSON"
@@ -68,10 +72,10 @@ export TRITON_CACHE_DIR="${CACHE_ROOT}/triton"
 mkdir -p "$HF_HOME" "$TORCH_HOME" "$TMPDIR" "$TRITON_CACHE_DIR"
 
 cd "$WORKSPACE_DIR"
-mkdir -p logs output_v3
+mkdir -p logs output_v3 "$OUT_DIR"
 
 echo "=========================================="
-echo "Zero-shot Ground->Drone Evaluation"
+echo "Visualize Worst Zero-shot Ground->Drone"
 echo "=========================================="
 echo "Job ID: $SLURM_JOB_ID"
 echo "Experiment name: $EXPRIMENT_NAME"
@@ -83,12 +87,13 @@ echo "Config: $CONFIG_PATH"
 echo "Checkpoint: $CKPT_DIR"
 echo "GPU: $GPU_ID"
 echo "Image size: 518"
-echo "Output JSON: $OUT_JSON"
+echo "Worst K: $WORST_K"
+echo "Output dir: $OUT_DIR"
 echo "=========================================="
 
 CUDA_VISIBLE_DEVICES="$GPU_ID" \
 "${RUN_ROOT}/miniconda3/bin/conda" run -n filtre --no-capture-output \
-  python "${WORKSPACE_DIR}/evaluate_zero_shot_ground_to_drone.py" \
+  python "${WORKSPACE_DIR}/visualize_zero_shot_ground_to_drone_worst50.py" \
     --triplet_json "$TRIPLET_JSON" \
     --root_dir "$ROOT_DIR_DATA" \
     --config "$CONFIG_PATH" \
@@ -97,6 +102,10 @@ CUDA_VISIBLE_DEVICES="$GPU_ID" \
     --batch_size 8 \
     --num_workers 8 \
     --gpu 0 \
+    --worst_k "$WORST_K" \
+    --out_dir "$OUT_DIR" \
     --save_json "$OUT_JSON"
 
-echo "Done. Result JSON: $OUT_JSON"
+echo "Done. Visualization dir: $OUT_DIR"
+echo "Summary JSON: $OUT_JSON"
+

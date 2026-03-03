@@ -343,11 +343,16 @@ class DETRCriterionV2(nn.Module):
         pos_loss = log_p * torch.pow(1.0 - pred, self.heatmap_focal_alpha) * pos_inds
         neg_loss = log_not_p * torch.pow(pred, self.heatmap_focal_alpha) * neg_weights * neg_inds
 
-        num_pos = pos_inds.sum()
+        num_pos = pos_inds.sum().clamp_min(1.0)
         if num_pos > 0:
-            loss_heatmap = -(pos_loss.sum() + neg_loss.sum()) / num_pos
+            focal_loss = -(pos_loss.sum() + neg_loss.sum()) / num_pos
         else:
-            loss_heatmap = -neg_loss.sum()
+            focal_loss = -neg_loss.sum()
+        # Log-space dampening: compress large initial loss while preserving
+        # gradients (gradient = 1/(1+loss), always non-zero).
+        # This avoids destroying pretrained weights at the start, and keeps
+        # meaningful gradients when the loss is small in later training.
+        loss_heatmap = torch.log1p(focal_loss)
         losses['loss_heatmap'] = loss_heatmap
 
         with torch.no_grad():

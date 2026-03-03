@@ -74,7 +74,7 @@ training:
   weight_giou: 2.0
   weight_mask_bce: 2.0    # SAM-style mask BCE loss
   weight_mask_dice: 5.0   # SAM-style mask Dice loss
-  weight_heatmap: 0.1    # MSE position loss
+  weight_heatmap: 0.1    
   weight_rotation: 0.1
   weight_contrastive: 0.1
   weight_class: 2.0
@@ -114,7 +114,7 @@ training:
 # Checkpointing
 checkpoint:
   output_dir: "${ROOT_DIR}/${WORKSPACE_NAME}/output_v3"
-  save_freq: 5
+  save_freq: 2
   resume: "${ROOT_DIR}/${WORKSPACE_NAME}/output_v3/${EXPRIMENT_NAME}/best"  # Path to checkpoint to resume from (set to null to train from scratch)
   # resume: null
 

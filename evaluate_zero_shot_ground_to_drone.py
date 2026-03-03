@@ -171,6 +171,28 @@ def extract_state_dict(obj: Dict[str, Any]) -> Dict[str, torch.Tensor]:
     raise ValueError("Unrecognized checkpoint format")
 
 
+def remap_legacy_mask_head_keys(state_dict: Dict[str, torch.Tensor]) -> Tuple[Dict[str, torch.Tensor], int]:
+    """
+    Backward-compat key remap for old checkpoints:
+      *.output_hypernetworks_mlps.0.*  ->  *.output_hypernetwork_mlp.*
+
+    参考 evaluate_custom_v2.py:
+    我们将 mask head 从 ModuleList(single token) 改成了共享 MLP，对于旧 checkpoint，
+    如果不做 key 映射，mask head 会以随机初始化加载，导致分割指标异常。
+    """
+    remapped: Dict[str, torch.Tensor] = {}
+    num_renamed = 0
+    needle = ".output_hypernetworks_mlps.0."
+    repl = ".output_hypernetwork_mlp."
+    for k, v in state_dict.items():
+        if needle in k:
+            remapped[k.replace(needle, repl)] = v
+            num_renamed += 1
+        else:
+            remapped[k] = v
+    return remapped, num_renamed
+
+
 def build_model_from_cfg(cfg: Dict[str, Any], device: torch.device):
     mc = cfg["model"]
     dc = cfg["data"]
@@ -478,6 +500,10 @@ def main():
     print(f"Checkpoint file: {ckpt_file}")
     obj = torch.load(str(ckpt_file), map_location="cpu")
     sd = extract_state_dict(obj)
+    # 适配旧的 mask head key（与 evaluate_custom_v2 保持一致）
+    sd, renamed = remap_legacy_mask_head_keys(sd)
+    if renamed > 0:
+        print(f"Applied legacy mask-head key remap: {renamed} tensors")
     missing, unexpected = model.load_state_dict(sd, strict=False)
     print(f"Loaded state_dict keys: {len(sd)}")
     print(f"Missing: {len(missing)}, Unexpected: {len(unexpected)}")
@@ -507,6 +533,15 @@ def main():
     print(f"A@0.5:0.95: {metrics['avg_acc_50_95']:.4f}")
     print(f"ACC@0.5  : {metrics['acc50']:.4f}")
     print(f"ACC@0.75 : {metrics['acc75']:.4f}")
+    if "seg_model_miou" in metrics:
+        print("-" * 72)
+        print("Segmentation (model mask — mask_pred vs drone_segmentation)")
+        print(
+            f"mIoU={metrics['seg_model_miou']:.4f}, "
+            f"mDice={metrics['seg_model_mdice']:.4f}, "
+            f"AAE={metrics['seg_model_aae']:.2f}, "
+            f"ME={metrics['seg_model_me']:.2f}"
+        )
     print("=" * 72)
 
     if args.save_json:
