@@ -32,7 +32,7 @@ WORKSPACE_NAME=${WORKSPACE_NAME:-"location_v4"}
 WORKSPACE_DIR="${ROOT_DIR}/${WORKSPACE_NAME}"
 RUN_ROOT="$(dirname "$ROOT_DIR")"
 CACHE_ROOT=${CACHE_ROOT:-"${ROOT_DIR}/.cache"}
-EXPRIMENT_NAME="ablation_4_all_on"
+EXPRIMENT_NAME="ablation_11_g2s_only"
 CHECKPOINT_NAME="${5:-best}"
 
 TRIPLET_JSON="${1:-${ROOT_DIR}/University-Release/verified_triplets_sam2_masks.json}"

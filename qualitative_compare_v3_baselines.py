@@ -4,8 +4,9 @@
 Qualitative comparison for V3 vs baselines (point prompt).
 
 Workflow:
-1) Run V3 on unseen_test (point prompt), select top-K samples per task by V3 mask mIoU.
+1) Run V3 + SPS on unseen_test (point prompt), select top-K samples per task by V3 mask mIoU.
 2) Evaluate selected candidates with:
+   - V3 + SPS (SAM Prompt Stage)
    - CVOS + SPS (SAM Prompt Stage)
    - DetGeo + SPS (SAM Prompt Stage)
 3) For each task, pick top-N samples with largest (configurable) gap between CVOS and V3.
@@ -18,6 +19,7 @@ import argparse
 import importlib
 import json
 import os
+import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +35,17 @@ from torch.utils.data import DataLoader, Dataset
 from torchvision.transforms import Compose, Normalize, ToTensor
 from torchvision.transforms.functional import to_tensor
 from tqdm import tqdm
+
+
+def parse_rgb_color(s: str) -> Tuple[int, int, int]:
+    parts = [x.strip() for x in s.split(",")]
+    if len(parts) != 3:
+        raise ValueError(f"Invalid RGB color string: {s}")
+    vals = tuple(int(x) for x in parts)
+    for v in vals:
+        if v < 0 or v > 255:
+            raise ValueError(f"RGB value out of range [0,255]: {s}")
+    return vals
 
 
 def decode_segmentation(segmentation: Any, h: int, w: int) -> np.ndarray:
@@ -83,6 +96,65 @@ def bbox_xywh_to_xyxy(b: np.ndarray) -> np.ndarray:
     return np.array([x, y, x + w, y + h], dtype=np.float32)
 
 
+def bbox_cxcywh_norm_to_xyxy_abs(b: torch.Tensor, img_size: int) -> np.ndarray:
+    cx, cy, w, h = b.detach().cpu().numpy().astype(np.float32)
+    x1 = (cx - w / 2.0) * img_size
+    y1 = (cy - h / 2.0) * img_size
+    x2 = (cx + w / 2.0) * img_size
+    y2 = (cy + h / 2.0) * img_size
+    return np.array([x1, y1, x2, y2], dtype=np.float32)
+
+
+def sanitize_bbox_xyxy(b: np.ndarray, size: int) -> np.ndarray:
+    out = b.copy().astype(np.float32)
+    out[0::2] = np.clip(out[0::2], 0, size - 1)
+    out[1::2] = np.clip(out[1::2], 0, size - 1)
+    x1, y1, x2, y2 = [float(v) for v in out]
+    if x2 < x1:
+        x1, x2 = x2, x1
+    if y2 < y1:
+        y1, y2 = y2, y1
+    if x2 <= x1:
+        x2 = min(float(size - 1), x1 + 1.0)
+    if y2 <= y1:
+        y2 = min(float(size - 1), y1 + 1.0)
+    return np.array([x1, y1, x2, y2], dtype=np.float32)
+
+
+def rotation_matrix_to_yaw_np(rotation_matrix: np.ndarray) -> float:
+    rot = rotation_matrix
+    if rot.shape == (4, 4):
+        rot = rot[:3, :3]
+    return float(np.arctan2(rot[1, 0], rot[0, 0]))
+
+
+def euler_to_rotation_matrix_np(yaw: float, pitch: float, roll: float) -> np.ndarray:
+    cy, sy = np.cos(yaw), np.sin(yaw)
+    cp, sp = np.cos(pitch), np.sin(pitch)
+    cr, sr = np.cos(roll), np.sin(roll)
+    return np.array(
+        [
+            [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+            [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+            [-sp, cp * sr, cp * cr],
+        ],
+        dtype=np.float32,
+    )
+
+
+def build_gt_rotation_matrix(item: Dict[str, Any]) -> Tuple[np.ndarray, bool]:
+    if "relative_yaw" in item:
+        yaw = np.deg2rad(float(item.get("relative_yaw", 0.0)))
+        default_pitch = 45.0 if "drone" in str(item.get("mono_filename", "")).lower() else 90.0
+        pitch = np.deg2rad(float(item.get("relative_pitch", default_pitch)))
+        roll = np.deg2rad(float(item.get("relative_roll", 0.0)))
+        return euler_to_rotation_matrix_np(yaw, pitch, roll), True
+    if "rotation" in item and item.get("rotation") is not None:
+        yaw = np.deg2rad(float(item["rotation"]))
+        return euler_to_rotation_matrix_np(yaw, 0.0, 0.0), True
+    return np.eye(3, dtype=np.float32), False
+
+
 def bbox_to_mask(bbox_xyxy: np.ndarray, size: int) -> np.ndarray:
     x1, y1, x2, y2 = bbox_xyxy.astype(np.float32)
     x1 = int(np.clip(np.floor(x1), 0, size - 1))
@@ -125,6 +197,13 @@ def resize_sample_for_size(item: Dict[str, Any], image_root: str, size: int) -> 
     mono_mask = decode_segmentation(item.get("mono_segmentation"), h_m, w_m)
     gt_mask = decode_segmentation(item.get("sate_segmentation"), h_s, w_s)
     gt_bbox_xywh = np.array(item["sate_bbox"][:4], dtype=np.float32)
+    gt_rotation_matrix, has_gt_rotation = build_gt_rotation_matrix(item)
+    gt_pos_raw = item.get("camera_position", None)
+    has_gt_position = (gt_pos_raw is not None) and (len(gt_pos_raw) >= 2)
+    if has_gt_position:
+        gt_pos = np.array(gt_pos_raw[:2], dtype=np.float32)
+    else:
+        gt_pos = np.zeros((2,), dtype=np.float32)
 
     if (h_m, w_m) != (size, size):
         sx_m, sy_m = size / w_m, size / h_m
@@ -154,6 +233,14 @@ def resize_sample_for_size(item: Dict[str, Any], image_root: str, size: int) -> 
             ],
             dtype=np.float32,
         )
+        if has_gt_position and np.max(np.abs(gt_pos)) > 1.5:
+            gt_pos = np.array([gt_pos[0] * sx_s, gt_pos[1] * sy_s], dtype=np.float32)
+
+    if has_gt_position:
+        # Normalize position to [0,1] to align with V3 model output convention.
+        if np.max(np.abs(gt_pos)) > 1.5:
+            gt_pos = np.array([gt_pos[0] / float(size), gt_pos[1] / float(size)], dtype=np.float32)
+        gt_pos = np.clip(gt_pos, 0.0, 1.0).astype(np.float32)
 
     return {
         "mono_rgb": mono,
@@ -163,6 +250,10 @@ def resize_sample_for_size(item: Dict[str, Any], image_root: str, size: int) -> 
         "mono_mask": (mono_mask > 0).astype(np.uint8),
         "gt_mask": (gt_mask > 0).astype(np.uint8),
         "gt_bbox_xyxy": bbox_xywh_to_xyxy(gt_bbox_xywh),
+        "gt_position": gt_pos,
+        "gt_rotation_matrix": gt_rotation_matrix,
+        "has_gt_position": bool(has_gt_position),
+        "has_gt_rotation": bool(has_gt_rotation),
     }
 
 
@@ -359,6 +450,7 @@ def collate_v3_point(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
 @torch.no_grad()
 def run_v3_point_all(
     model,
+    sam,
     data_list: List[Dict[str, Any]],
     image_root: str,
     img_size: int,
@@ -376,7 +468,7 @@ def run_v3_point_all(
         collate_fn=collate_v3_point,
     )
     out: Dict[int, Dict[str, Any]] = {}
-    for batch in tqdm(loader, desc="V3 point on full unseen_test"):
+    for batch in tqdm(loader, desc="V3+SPS on full unseen_test"):
         front = batch["front"].to(device, non_blocking=True)
         sat = batch["sat"].to(device, non_blocking=True)
         point = batch["point"].to(device, non_blocking=True)
@@ -391,10 +483,18 @@ def run_v3_point_all(
             mono_mask=None,
             sat_mask=None,
         )
-        pred = outputs["mask_pred"][:, 0].detach().cpu().numpy()
+        pred_boxes = outputs["pred_boxes"]  # [B, Q, 4]
+        bbox_scores = outputs.get("bbox_scores", None)
         gt = batch["gt_mask"].numpy().astype(np.uint8)
+        bsz = front.shape[0]
         for i, idx in enumerate(batch["index"]):
-            pred_bin = (pred[i] > 0.5).astype(np.uint8)
+            if pred_boxes.shape[1] > 1 and bbox_scores is not None:
+                q_idx = int(bbox_scores[i].argmax().item())
+            else:
+                q_idx = 0
+            pb = sanitize_bbox_xyxy(bbox_cxcywh_norm_to_xyxy_abs(pred_boxes[i, q_idx], img_size), img_size)
+            bb = torch.from_numpy(pb).to(device=device, dtype=torch.float32).unsqueeze(0)
+            pred_bin = sam_sps_from_bbox(sam=sam, ref_img=sat[i:i + 1], bb=bb, size=img_size, device=device)
             miou = iou_np(pred_bin, gt[i])
             out[int(idx)] = {
                 "task_type": batch["task_type"][i],
@@ -404,7 +504,9 @@ def run_v3_point_all(
 
 
 @torch.no_grad()
-def infer_v3_one(model, item: Dict[str, Any], image_root: str, size: int, device: torch.device) -> Tuple[np.ndarray, float, Dict[str, Any]]:
+def infer_v3_one(
+    model, sam, item: Dict[str, Any], image_root: str, size: int, device: torch.device
+) -> Tuple[np.ndarray, float, Dict[str, Any], Dict[str, Any]]:
     prep = resize_sample_for_size(item, image_root, size)
     front = to_tensor(Image.fromarray(prep["mono_rgb"])).unsqueeze(0).to(device)
     sat = to_tensor(Image.fromarray(prep["sat_rgb"])).unsqueeze(0).to(device)
@@ -420,10 +522,27 @@ def infer_v3_one(model, item: Dict[str, Any], image_root: str, size: int, device
         mono_mask=None,
         sat_mask=None,
     )
-    pred = outputs["mask_pred"][0, 0].detach().cpu().numpy()
-    pred_bin = (pred > 0.5).astype(np.uint8)
+    pred_boxes = outputs["pred_boxes"]  # [1, Q, 4]
+    bbox_scores = outputs.get("bbox_scores", None)
+    if pred_boxes.shape[1] > 1 and bbox_scores is not None:
+        q_idx = int(bbox_scores[0].argmax().item())
+    else:
+        q_idx = 0
+    pb = sanitize_bbox_xyxy(bbox_cxcywh_norm_to_xyxy_abs(pred_boxes[0, q_idx], size), size)
+    bb = torch.from_numpy(pb).to(device=device, dtype=torch.float32).unsqueeze(0)
+    pred_bin = sam_sps_from_bbox(sam=sam, ref_img=sat, bb=bb, size=size, device=device)
     miou = iou_np(pred_bin, prep["gt_mask"])
-    return pred_bin, miou, prep
+    pred_pos = outputs.get("position", None)
+    pred_rot = outputs.get("rotation_matrix", None)
+    pose = {
+        "pred_position": None if pred_pos is None else pred_pos[0].detach().cpu().numpy().astype(np.float32),
+        "pred_rotation_matrix": None if pred_rot is None else pred_rot[0].detach().cpu().numpy().astype(np.float32),
+        "gt_position": prep["gt_position"].astype(np.float32),
+        "gt_rotation_matrix": prep["gt_rotation_matrix"].astype(np.float32),
+        "has_gt_position": prep["has_gt_position"],
+        "has_gt_rotation": prep["has_gt_rotation"],
+    }
+    return pred_bin, miou, prep, pose
 
 
 @torch.no_grad()
@@ -546,18 +665,59 @@ def blend_mask(base_rgb: np.ndarray, mask: np.ndarray, color: Tuple[int, int, in
     return np.clip(out, 0, 255).astype(np.uint8)
 
 
-def overlay_gt_pred(base_rgb: np.ndarray, gt: np.ndarray, pred: np.ndarray) -> np.ndarray:
-    gt_b = gt.astype(bool)
-    pred_b = pred.astype(bool)
-    overlap = np.logical_and(gt_b, pred_b)
-    gt_only = np.logical_and(gt_b, ~pred_b)
-    pred_only = np.logical_and(pred_b, ~gt_b)
-
+def overlay_pred_mask_like_visualize(
+    base_rgb: np.ndarray,
+    pred_mask: np.ndarray,
+    color: Tuple[int, int, int],
+    alpha: float = 0.55,
+    threshold: float = 0.5,
+) -> np.ndarray:
+    """
+    Follow visualize.py style:
+    1) threshold prediction to binary mask first
+    2) overlay only on masked pixels
+    This avoids visually amplifying interpolation artifacts from soft masks.
+    """
+    pred_bin = (pred_mask > threshold).astype(np.uint8)
     out = base_rgb.copy().astype(np.float32)
-    out[gt_only] = out[gt_only] * 0.45 + np.array([255, 0, 0], dtype=np.float32) * 0.55
-    out[pred_only] = out[pred_only] * 0.45 + np.array([0, 255, 0], dtype=np.float32) * 0.55
-    out[overlap] = out[overlap] * 0.35 + np.array([0, 0, 255], dtype=np.float32) * 0.65
+    m = pred_bin.astype(bool)
+    c = np.array(color, dtype=np.float32).reshape(1, 1, 3)
+    out[m] = out[m] * (1.0 - alpha) + c * alpha
     return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def draw_pose_on_satellite(
+    sat_rgb: np.ndarray,
+    pos_norm: np.ndarray | None,
+    yaw_rad: float | None,
+    point_color: Tuple[int, int, int],
+    arrow_color: Tuple[int, int, int],
+    point_radius: int = 6,
+    arrow_len_ratio: float = 0.08,
+    arrow_thickness: int = 3,
+) -> np.ndarray:
+    out = sat_rgb.copy()
+    if pos_norm is None:
+        return out
+    h, w = out.shape[:2]
+    px = int(np.clip(round(float(pos_norm[0]) * w), 0, w - 1))
+    py = int(np.clip(round(float(pos_norm[1]) * h), 0, h - 1))
+    cv2.circle(out, (px, py), point_radius, point_color, thickness=-1, lineType=cv2.LINE_AA)
+    if yaw_rad is None:
+        return out
+    arrow_len = int(round(min(h, w) * arrow_len_ratio))
+    dx = int(round(np.cos(float(yaw_rad)) * arrow_len))
+    dy = int(round(np.sin(float(yaw_rad)) * arrow_len))
+    cv2.arrowedLine(
+        out,
+        (px, py),
+        (int(np.clip(px + dx, 0, w - 1)), int(np.clip(py + dy, 0, h - 1))),
+        arrow_color,
+        thickness=arrow_thickness,
+        line_type=cv2.LINE_AA,
+        tipLength=0.28,
+    )
+    return out
 
 
 def draw_point(rgb: np.ndarray, point_xy: np.ndarray, radius: int = 6) -> np.ndarray:
@@ -584,12 +744,22 @@ def ensure_dirs(base_vis_root: Path):
             f"{prompt_prefix}withPoint",
             f"{prompt_prefix}withBbox",
             f"{prompt_prefix}withMask",
+            "gtSate",
             "detgeoSate",
             "cvosSate",
             "v3Sate",
+            "v3Pose",
+            "gtPose",
             "combine",
         ]:
             (base_vis_root / task_root / name).mkdir(parents=True, exist_ok=True)
+
+
+def clear_vis_outputs(base_vis_root: Path):
+    for task_root in ["D2S", "G2S"]:
+        task_dir = base_vis_root / task_root
+        if task_dir.exists():
+            shutil.rmtree(task_dir)
 
 
 def combine_row(images: List[np.ndarray], panel_size: int) -> np.ndarray:
@@ -649,6 +819,24 @@ def parse_args():
     p.add_argument("--detgeo_img_size", type=int, default=512)
     p.add_argument("--panel_size", type=int, default=512)
     p.add_argument("--output_root", type=str, default="/data/home/scxi704/run/xhj/location_v4/vis")
+    p.add_argument("--gt_mask_color", type=str, default="255,0,0")
+    p.add_argument("--gt_mask_alpha", type=float, default=0.55)
+    # Legacy shared prediction mask style (kept for backward compatibility).
+    p.add_argument("--pred_mask_color", type=str, default="0,255,0")
+    p.add_argument("--pred_mask_alpha", type=float, default=0.55)
+    # Per-model prediction mask style (if omitted, fallback to legacy shared style above).
+    p.add_argument("--v3_mask_color", type=str, default="")
+    p.add_argument("--v3_mask_alpha", type=float, default=-1.0)
+    p.add_argument("--cvos_mask_color", type=str, default="")
+    p.add_argument("--cvos_mask_alpha", type=float, default=-1.0)
+    p.add_argument("--detgeo_mask_color", type=str, default="")
+    p.add_argument("--detgeo_mask_alpha", type=float, default=-1.0)
+    p.add_argument("--pose_point_color_pred", type=str, default="0,255,0")
+    p.add_argument("--pose_arrow_color_pred", type=str, default="0,255,0")
+    p.add_argument("--pose_point_color_gt", type=str, default="255,0,0")
+    p.add_argument("--pose_arrow_color_gt", type=str, default="255,0,0")
+    p.add_argument("--clean_output_each_run", action="store_true", default=True)
+    p.add_argument("--no_clean_output_each_run", action="store_false", dest="clean_output_each_run")
     p.add_argument("--gpu", type=str, default="0")
     p.add_argument("--save_summary_json", type=str, default="")
     return p.parse_args()
@@ -656,6 +844,18 @@ def parse_args():
 
 def main():
     args = parse_args()
+    gt_mask_color = parse_rgb_color(args.gt_mask_color)
+    pred_mask_color = parse_rgb_color(args.pred_mask_color)
+    v3_mask_color = parse_rgb_color(args.v3_mask_color) if args.v3_mask_color else pred_mask_color
+    cvos_mask_color = parse_rgb_color(args.cvos_mask_color) if args.cvos_mask_color else pred_mask_color
+    detgeo_mask_color = parse_rgb_color(args.detgeo_mask_color) if args.detgeo_mask_color else pred_mask_color
+    v3_mask_alpha = args.v3_mask_alpha if args.v3_mask_alpha >= 0.0 else args.pred_mask_alpha
+    cvos_mask_alpha = args.cvos_mask_alpha if args.cvos_mask_alpha >= 0.0 else args.pred_mask_alpha
+    detgeo_mask_alpha = args.detgeo_mask_alpha if args.detgeo_mask_alpha >= 0.0 else args.pred_mask_alpha
+    pose_point_color_pred = parse_rgb_color(args.pose_point_color_pred)
+    pose_arrow_color_pred = parse_rgb_color(args.pose_arrow_color_pred)
+    pose_point_color_gt = parse_rgb_color(args.pose_point_color_gt)
+    pose_arrow_color_gt = parse_rgb_color(args.pose_arrow_color_gt)
     os.environ.setdefault("CUDA_VISIBLE_DEVICES", args.gpu)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device} | CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', '')}")
@@ -676,6 +876,7 @@ def main():
     print("[2/5] Running V3 on full unseen_test (point prompt) ...")
     v3_full = run_v3_point_all(
         model=v3_model,
+        sam=sam_model,
         data_list=data_list,
         image_root=args.image_root,
         img_size=v3_img_size,
@@ -727,6 +928,8 @@ def main():
         print(f"Selected vis samples | task={tt}: {len(selected_for_vis[tt])}")
 
     vis_root = Path(args.output_root)
+    if args.clean_output_each_run:
+        clear_vis_outputs(vis_root)
     ensure_dirs(vis_root)
 
     print("[4/5] Saving visualizations ...")
@@ -739,7 +942,9 @@ def main():
         for rank, m in enumerate(tqdm(selected_for_vis[tt], desc=f"Visualize {tt}"), start=1):
             item = data_list[m.idx]
 
-            v3_pred, v3_miou_check, prep_v3 = infer_v3_one(v3_model, item, args.image_root, v3_img_size, device)
+            v3_pred, v3_miou_check, prep_v3, pose_info = infer_v3_one(
+                v3_model, sam_model, item, args.image_root, v3_img_size, device
+            )
             cvos_pred, cvos_miou_check = infer_cvos_sps_one(
                 cvos_model, sam_model, item, args.image_root, args.cvos_img_size, device
             )
@@ -753,34 +958,64 @@ def main():
             bbox_img = draw_bbox_xywh(front_rgb, prep_v3["mono_bbox_xywh"])
             mask_img = blend_mask(front_rgb, prep_v3["mono_mask"], (255, 0, 0), alpha=0.45)
 
-            # Satellite overlays per method (GT red, pred green, overlap blue).
-            v3_sat = overlay_gt_pred(prep_v3["sat_rgb"], prep_v3["gt_mask"], v3_pred)
+            # Satellite visualizations: GT mask saved independently; each model panel uses prediction-only overlay.
+            # For V3, use threshold-first overlay (visualize.py style) to reduce soft-mask artifacts.
+            gt_sat = blend_mask(prep_v3["sat_rgb"], prep_v3["gt_mask"], gt_mask_color, alpha=args.gt_mask_alpha)
+            v3_sat = overlay_pred_mask_like_visualize(
+                prep_v3["sat_rgb"], v3_pred, v3_mask_color, alpha=v3_mask_alpha, threshold=0.5
+            )
             prep_cvos = resize_sample_for_size(item, args.image_root, args.cvos_img_size)
-            cvos_sat = overlay_gt_pred(prep_cvos["sat_rgb"], prep_cvos["gt_mask"], cvos_pred)
+            cvos_sat = blend_mask(prep_cvos["sat_rgb"], cvos_pred, cvos_mask_color, alpha=cvos_mask_alpha)
             prep_det = resize_sample_for_size(item, args.image_root, args.detgeo_img_size)
-            detgeo_sat = overlay_gt_pred(prep_det["sat_rgb"], prep_det["gt_mask"], detgeo_pred)
+            detgeo_sat = blend_mask(prep_det["sat_rgb"], detgeo_pred, detgeo_mask_color, alpha=detgeo_mask_alpha)
+
+            pred_pose_yaw = None
+            if pose_info["pred_rotation_matrix"] is not None:
+                pred_pose_yaw = rotation_matrix_to_yaw_np(pose_info["pred_rotation_matrix"])
+            gt_pose_yaw = None
+            if pose_info["has_gt_rotation"]:
+                gt_pose_yaw = rotation_matrix_to_yaw_np(pose_info["gt_rotation_matrix"])
+            pred_pose_pos = pose_info["pred_position"]
+            gt_pose_pos = pose_info["gt_position"] if pose_info["has_gt_position"] else None
+            v3_pose_img = draw_pose_on_satellite(
+                prep_v3["sat_rgb"],
+                pred_pose_pos,
+                pred_pose_yaw,
+                point_color=pose_point_color_pred,
+                arrow_color=pose_arrow_color_pred,
+            )
+            gt_pose_img = draw_pose_on_satellite(
+                prep_v3["sat_rgb"],
+                gt_pose_pos,
+                gt_pose_yaw,
+                point_color=pose_point_color_gt,
+                arrow_color=pose_arrow_color_gt,
+            )
 
             key = f"rank{rank:03d}_idx{m.idx:05d}_gap{_gap_value(m):.4f}"
 
             p_point = vis_root / task_folder / f"{prompt_prefix}withPoint" / f"{key}.png"
             p_bbox = vis_root / task_folder / f"{prompt_prefix}withBbox" / f"{key}.png"
             p_mask = vis_root / task_folder / f"{prompt_prefix}withMask" / f"{key}.png"
+            p_gt = vis_root / task_folder / "gtSate" / f"{key}.png"
             p_det = vis_root / task_folder / "detgeoSate" / f"{key}.png"
             p_cvos = vis_root / task_folder / "cvosSate" / f"{key}.png"
             p_v3 = vis_root / task_folder / "v3Sate" / f"{key}.png"
+            p_v3_pose = vis_root / task_folder / "v3Pose" / f"{key}.png"
+            p_gt_pose = vis_root / task_folder / "gtPose" / f"{key}.png"
             p_combine = vis_root / task_folder / "combine" / f"{key}.png"
 
             Image.fromarray(point_img).save(p_point)
             Image.fromarray(bbox_img).save(p_bbox)
             Image.fromarray(mask_img).save(p_mask)
+            Image.fromarray(gt_sat).save(p_gt)
             Image.fromarray(detgeo_sat).save(p_det)
             Image.fromarray(cvos_sat).save(p_cvos)
             Image.fromarray(v3_sat).save(p_v3)
+            Image.fromarray(v3_pose_img).save(p_v3_pose)
+            Image.fromarray(gt_pose_img).save(p_gt_pose)
 
-            combined = combine_row(
-                [point_img, bbox_img, mask_img, detgeo_sat, cvos_sat, v3_sat],
-                panel_size=args.panel_size,
-            )
+            combined = combine_row([point_img, detgeo_sat, cvos_sat, v3_sat, gt_sat], panel_size=args.panel_size)
             Image.fromarray(combined).save(p_combine)
 
             summary["selected"][tt].append(

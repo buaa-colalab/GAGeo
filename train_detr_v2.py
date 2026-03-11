@@ -60,6 +60,14 @@ def parse_args():
                         help='Override training.use_heatmap_loss for ablation')
     parser.add_argument('--num_bbox_mask_queries', type=int, default=None,
                         help='Override model.num_bbox_mask_queries for ablation')
+    parser.add_argument('--train_subset', type=str, default=None,
+                        help='Dataset split for training: all | drone_to_satellite(d2s) | ground_to_satellite(g2s)')
+    parser.add_argument('--val_subset', type=str, default=None,
+                        help='Dataset split for validation: all | drone_to_satellite(d2s) | ground_to_satellite(g2s)')
+    parser.add_argument('--mask_inject_mode', type=str, default=None,
+                        help='Mask injection mode: global_kv | pre_backbone')
+    parser.add_argument('--use_global_attn_mask', type=str2bool, default=None,
+                        help='Whether to apply global attention mask in backbone')
     return parser.parse_args()
 
 
@@ -370,18 +378,32 @@ def main():
         cfg.setdefault('training', {})['use_heatmap_loss'] = args.use_heatmap_loss
     if args.num_bbox_mask_queries is not None:
         cfg.setdefault('model', {})['num_bbox_mask_queries'] = int(args.num_bbox_mask_queries)
+    if args.train_subset is not None:
+        cfg.setdefault('data', {})['train_subset'] = args.train_subset
+    if args.val_subset is not None:
+        cfg.setdefault('data', {})['val_subset'] = args.val_subset
+    if args.mask_inject_mode is not None:
+        cfg.setdefault('model', {})['mask_inject_mode'] = str(args.mask_inject_mode)
+    if args.use_global_attn_mask is not None:
+        cfg.setdefault('model', {})['use_global_attn_mask'] = bool(args.use_global_attn_mask)
 
     use_deep_supervision = cfg.get('model', {}).get('use_deep_supervision', True)
     use_contrastive_loss = cfg.get('model', {}).get('use_contrastive_loss', cfg.get('model', {}).get('contrastive', True))
     use_rot_pos_supervision = cfg.get('training', {}).get('use_rot_pos_supervision', True)
     use_heatmap_loss = cfg.get('training', {}).get('use_heatmap_loss', use_rot_pos_supervision)
     num_bbox_mask_queries = int(cfg.get('model', {}).get('num_bbox_mask_queries', 1))
+    mask_inject_mode = cfg.get('model', {}).get('mask_inject_mode', 'global_kv')
+    use_global_attn_mask = bool(cfg.get('model', {}).get('use_global_attn_mask', True))
 
     if not use_deep_supervision:
         cfg['model']['supervision_layers'] = []
         cfg['model']['supervision_weights'] = []
 
     cfg['model']['contrastive'] = use_contrastive_loss
+    train_subset = cfg.get('data', {}).get('train_subset', cfg.get('data', {}).get('train_direction', 'all'))
+    val_subset = cfg.get('data', {}).get('val_subset', cfg.get('data', {}).get('val_direction', 'all'))
+    cfg.setdefault('data', {})['train_subset'] = train_subset
+    cfg.setdefault('data', {})['val_subset'] = val_subset
 
     gradient_accumulation_steps = cfg['training'].get('gradient_accumulation_steps', 1)
     mixed_precision = cfg['training'].get('mixed_precision', 'bf16') if cfg['training'].get('use_amp', True) else "no"
@@ -412,8 +434,10 @@ def main():
         accelerator.print(
             f"Ablation switches -> deep_supervision={use_deep_supervision}, "
             f"contrastive={use_contrastive_loss}, rot_pos_supervision={use_rot_pos_supervision}, "
-            f"heatmap_loss={use_heatmap_loss}, num_bbox_mask_queries={num_bbox_mask_queries}"
+            f"heatmap_loss={use_heatmap_loss}, num_bbox_mask_queries={num_bbox_mask_queries}, "
+            f"mask_inject_mode={mask_inject_mode}, use_global_attn_mask={use_global_attn_mask}"
         )
+        accelerator.print(f"Dataset subset -> train_subset={train_subset}, val_subset={val_subset}")
 
     if accelerator.is_main_process and cfg['logging'].get('use_tensorboard', True):
         accelerator.init_trackers(
@@ -433,6 +457,7 @@ def main():
         data_root=cfg['data']['data_root'],
         crop_size=cfg['data']['crop_size'],
         crop_sat=True,
+        view_subset=train_subset,
     )
 
     val_dataset = CrossViewDataset(
@@ -440,6 +465,7 @@ def main():
         data_root=cfg['data']['data_root'],
         crop_size=cfg['data']['crop_size'],
         crop_sat=False,
+        view_subset=val_subset,
     )
 
     num_workers = int(cfg['data']['num_workers'])
@@ -485,6 +511,8 @@ def main():
         num_heatmap_queries=cfg['model'].get('num_heatmap_queries', 1),
         supervision_layers=cfg['model'].get('supervision_layers', [4, 11, 17]),
         supervision_weights=cfg['model'].get('supervision_weights', [0.1, 0.3, 0.6]),
+        mask_inject_mode=mask_inject_mode,
+        use_global_attn_mask=use_global_attn_mask,
         dropout=cfg['model'].get('dropout', 0.1),
         contrastive=use_contrastive_loss,
         contrastive_proj_dim=cfg['model'].get('contrastive_proj_dim', 256),

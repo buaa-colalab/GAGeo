@@ -64,6 +64,8 @@ class CrossViewLocalizerV2(nn.Module):
         contrastive_temperature: float = 0.07,
         sam_embed_dim: int = None,
         num_mask_tokens: int = 1,
+        mask_inject_mode: str = "global_kv",
+        use_global_attn_mask: bool = True,
     ):
         super().__init__()
         
@@ -95,6 +97,8 @@ class CrossViewLocalizerV2(nn.Module):
             patch_size=patch_size,
             num_learnable_tokens=self.num_learnable_tokens,
             supervision_layers=self.supervision_layers,
+            mask_inject_mode=mask_inject_mode,
+            use_global_attn_mask=use_global_attn_mask,
         )
         self.output_dim = self.backbone.output_dim  # 2048 for large
         self.dec_embed_dim = self.backbone.dec_embed_dim  # 1024 for large

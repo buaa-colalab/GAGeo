@@ -45,6 +45,7 @@ class CrossViewDataset(Dataset):
         sat_size: int = 1280,
         crop_sat: bool = True,
         crop_size: int = 518,
+        view_subset: str = "all",
         transform: Optional[callable] = None,
     ):
         """
@@ -57,6 +58,10 @@ class CrossViewDataset(Dataset):
                      True: 训练模式，从sate/目录加载1280x1280图像并随机crop
                      False: 验证/测试模式，从crop_sate/目录加载已crop好的518x518图像
             crop_size: crop后的尺寸
+            view_subset: 子数据集过滤，可选:
+                        - "all" (默认): 全部样本
+                        - "drone_to_satellite"/"d2s"/"drone": 仅无人机到卫星
+                        - "ground_to_satellite"/"g2s"/"ground": 仅地面到卫星
             transform: 额外的数据增强
         """
         self.data_root = Path(data_root)
@@ -64,16 +69,68 @@ class CrossViewDataset(Dataset):
         self.sat_size = sat_size
         self.crop_sat = crop_sat
         self.crop_size = crop_size
+        self.view_subset = self._normalize_view_subset(view_subset)
         self.transform = transform
         
         # 加载数据
         with open(json_path, 'r') as f:
             self.data = json.load(f)
-        
-        print(f"Loaded {len(self.data)} samples from {json_path}")
+        total_before_filter = len(self.data)
+        if self.view_subset != "all":
+            self.data = [item for item in self.data if self._sample_matches_subset(item, self.view_subset)]
+
+        if len(self.data) == 0:
+            raise ValueError(
+                f"No samples left after filtering with view_subset={self.view_subset!r} "
+                f"from {json_path}. Please check dataset annotations and filter settings."
+            )
+
+        print(
+            f"Loaded {len(self.data)} / {total_before_filter} samples from {json_path} "
+            f"(view_subset={self.view_subset})"
+        )
     
     def __len__(self):
         return len(self.data)
+
+    @staticmethod
+    def _normalize_view_subset(view_subset: str) -> str:
+        key = str(view_subset).strip().lower().replace("-", "_")
+        alias = {
+            "all": "all",
+            "both": "all",
+            "mono_to_sat": "all",
+            "drone": "drone_to_satellite",
+            "d2s": "drone_to_satellite",
+            "drone_to_sat": "drone_to_satellite",
+            "drone_to_satellite": "drone_to_satellite",
+            "ground": "ground_to_satellite",
+            "g2s": "ground_to_satellite",
+            "ground_to_sat": "ground_to_satellite",
+            "ground_to_satellite": "ground_to_satellite",
+        }
+        if key not in alias:
+            raise ValueError(
+                f"Unsupported view_subset={view_subset!r}. "
+                f"Use one of: all, drone_to_satellite (d2s), ground_to_satellite (g2s)."
+            )
+        return alias[key]
+
+    @staticmethod
+    def _is_drone_sample(item: Dict) -> bool:
+        mono_filename = str(item.get('mono_filename', '')).lower()
+        return 'drone' in mono_filename
+
+    @classmethod
+    def _sample_matches_subset(cls, item: Dict, view_subset: str) -> bool:
+        if view_subset == "all":
+            return True
+        is_drone = cls._is_drone_sample(item)
+        if view_subset == "drone_to_satellite":
+            return is_drone
+        if view_subset == "ground_to_satellite":
+            return not is_drone
+        return True
     
     def __getitem__(self, idx: int) -> Dict:
         item = self.data[idx]

@@ -9,6 +9,11 @@ data:
   img_size: 518
   crop_size: 518
   num_workers: 24
+  # Dataset split for ablations:
+  # all | drone_to_satellite (d2s) | ground_to_satellite (g2s)
+  train_subset: all
+  val_subset: all
+  # Legacy fields kept for backward compatibility with older scripts.
   train_direction: 'mono_to_sat'
   val_direction: 'mono_to_sat'
 
@@ -56,6 +61,12 @@ model:
 
   # Dropout
   dropout: 0.1
+  # Mask injection strategy:
+  # - global_kv: inject dense mask embedding only into global-attn K (default)
+  # - pre_backbone: inject dense mask embedding to front tokens before decoder
+  mask_inject_mode: global_kv
+  # Global attention mask switch (for ablation)
+  use_global_attn_mask: true
 
 # Training
 training:
@@ -114,7 +125,7 @@ training:
 # Checkpointing
 checkpoint:
   output_dir: "${ROOT_DIR}/${WORKSPACE_NAME}/output_v3"
-  save_freq: 2
+  save_freq: 5
   resume: "${ROOT_DIR}/${WORKSPACE_NAME}/output_v3/${EXPRIMENT_NAME}/best"  # Path to checkpoint to resume from (set to null to train from scratch)
   # resume: null
 

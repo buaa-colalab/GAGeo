@@ -1,0 +1,63 @@
+#!/bin/bash
+#SBATCH --job-name=vis_cam_prompt
+#SBATCH --output=/data/home/scxi704/run/eval_logs/slurm_vis_cam_prompt_%j.out
+#SBATCH --error=/data/home/scxi704/run/eval_logs/slurm_vis_cam_prompt_%j.err
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=16
+#SBATCH --gres=gpu:1
+#SBATCH --mem=64G
+#SBATCH --partition=vip_gpu_5090_scxi704
+
+set -euo pipefail
+
+ROOT_DIR=${ROOT_DIR:-"/data/home/scxi704/run/xhj"}
+WORKSPACE_NAME=${WORKSPACE_NAME:-"location_v4"}
+WORKSPACE_DIR="${ROOT_DIR}/${WORKSPACE_NAME}"
+
+# ---------- Configurable arguments ----------
+EXPERIMENT_NAME="${1:-ablation_4_all_on}"
+SPLIT="${2:-unseen_test}"
+NUM_SAMPLES="${3:-20}"
+GPU_ID="${4:-0}"
+
+MODEL_DIR="output_v3/${EXPERIMENT_NAME}"
+CONFIG="${WORKSPACE_DIR}/${MODEL_DIR}/config.yaml"
+CHECKPOINT="${WORKSPACE_DIR}/${MODEL_DIR}/best"
+OUTPUT_DIR="${WORKSPACE_DIR}/vis_results/camera_prompt_compare/${EXPERIMENT_NAME}_${SPLIT}"
+
+export ROOT_DIR WORKSPACE_NAME
+export CUDA_VISIBLE_DEVICES="${GPU_ID}"
+
+echo "============================================================"
+echo " Prompt Camera (Position + Rotation) Visualisation"
+echo " Experiment : ${EXPERIMENT_NAME}"
+echo " Split      : ${SPLIT}"
+echo " Num samples: ${NUM_SAMPLES}"
+echo " Output dir : ${OUTPUT_DIR}"
+echo "============================================================"
+
+"${ROOT_DIR}/../miniconda3/bin/conda" run -n filtre --no-capture-output \
+  python "${WORKSPACE_DIR}/visualize_prompt_camera.py" \
+    --config "${CONFIG}" \
+    --checkpoint "${CHECKPOINT}" \
+    --split "${SPLIT}" \
+    --num_samples "${NUM_SAMPLES}" \
+    --output_dir "${OUTPUT_DIR}" \
+    --gpu "${GPU_ID}" \
+    --view_subsets drone_to_satellite ground_to_satellite \
+    --heatmap_alpha 0.55 \
+    --gt_sigma 0.05 \
+    --arrow_length 55 \
+    --arrow_thickness 3 \
+    --arrow_tip_length 0.35 \
+    --color_point "0,255,0" \
+    --color_bbox "0,128,255" \
+    --color_mask "255,0,128" \
+    --color_gt "255,255,0" \
+    --arrow_color_point "0,255,0" \
+    --arrow_color_bbox "0,128,255" \
+    --arrow_color_mask "255,0,128" \
+    --arrow_color_gt "255,255,0"
+
+echo "Done. Results in: ${OUTPUT_DIR}"

@@ -47,3 +47,5 @@ datasets/*
 ckpt
 *.json
 vis/
+vis_*/
+visualizations

@@ -237,6 +237,8 @@ class Pi3BackboneV2(nn.Module):
         patch_size: int = 14,
         num_learnable_tokens: int = 2,
         supervision_layers: List[int] = None,
+        mask_inject_mode: str = "global_kv",
+        use_global_attn_mask: bool = True,
     ):
         super().__init__()
         
@@ -246,6 +248,13 @@ class Pi3BackboneV2(nn.Module):
         self.num_patches = self.num_patches_per_side ** 2   # 1369
         self.num_learnable_tokens = num_learnable_tokens
         self.supervision_layers = [4, 11, 17] if supervision_layers is None else list(supervision_layers)
+        self.mask_inject_mode = str(mask_inject_mode).strip().lower()
+        if self.mask_inject_mode not in {"global_kv", "global_qkv", "pre_backbone"}:
+            raise ValueError(
+                f"Unsupported mask_inject_mode={mask_inject_mode!r}. "
+                f"Use one of: global_kv, global_qkv, pre_backbone."
+            )
+        self.use_global_attn_mask = bool(use_global_attn_mask)
         
         # ----------------------
         #        Encoder
@@ -535,8 +544,10 @@ class Pi3BackboneV2(nn.Module):
         N_sate = sate_hidden.shape[1]  # 5 + 1369 = 1374
         N_front_base = front_hidden.shape[1]  # 1374
         
-        # NOTE (V3): dense mask embedding is NOT directly added to front_hidden.
-        # It is only injected into K during global attention.
+        # NOTE:
+        # - global_kv: dense mask embedding is injected into K during global attention.
+        # - pre_backbone: dense mask embedding is injected once to front patch tokens
+        #   before entering decoder local/global stages.
         
         # Prepare learnable query tokens (for front local stream)
         learnable_hidden = self.learnable_queries.expand(B, -1, -1).to(hidden.dtype)  # [B, N_learn, C]
@@ -576,18 +587,25 @@ class Pi3BackboneV2(nn.Module):
                 sparse_embeddings, prompt_coords, B, hidden.device, base_pos.dtype
             )
         
-        # Pre-compute global attention mask
-        global_mask = self._build_global_attn_mask(
-            N_sate, N_front_base, N_learn, N_prompt, hidden.device, hidden.dtype
-        )
+        dense_flat = None
+        if dense_embeddings is not None:
+            dense_flat = dense_embeddings.flatten(2).transpose(1, 2).to(hidden.dtype)  # [B,1369,C]
+            if self.mask_inject_mode == "pre_backbone":
+                # Inject dense mask before backbone decoder attention.
+                f_patch_start = self.patch_start_idx
+                f_patch_end = f_patch_start + self.num_patches
+                front_hidden[:, f_patch_start:f_patch_end] += dense_flat
+
+        # Pre-compute global attention mask (optional ablation: no global mask).
+        global_mask = None
+        if self.use_global_attn_mask:
+            global_mask = self._build_global_attn_mask(
+                N_sate, N_front_base, N_learn, N_prompt, hidden.device, hidden.dtype
+            )
         
         # Decoder loop
         final_output = []
         intermediate_outputs = {}
-        
-        dense_flat = None
-        if dense_embeddings is not None:
-            dense_flat = dense_embeddings.flatten(2).transpose(1, 2).to(hidden.dtype)  # [B,1369,C]
         
         for i in range(len(self.decoder)):
             if i % 2 == 0:
@@ -620,12 +638,17 @@ class Pi3BackboneV2(nn.Module):
                     global_pos_tokens.append(prompt_pos)
                 global_qv = torch.cat(global_qv_tokens, dim=1)
 
-                if dense_flat is not None:
-                    # Only clone when we need to inject dense mask into K
-                    global_k = global_qv.clone()
+                if dense_flat is not None and self.mask_inject_mode in ("global_kv", "global_qkv"):
                     g_front_patch_start = N_sate + self.patch_start_idx
                     g_front_patch_end = g_front_patch_start + self.num_patches
-                    global_k[:, g_front_patch_start:g_front_patch_end] += dense_flat
+                    if self.mask_inject_mode == "global_qkv":
+                        # Inject dense mask into Q/K/V: add to the shared QV tensor
+                        global_qv[:, g_front_patch_start:g_front_patch_end] += dense_flat
+                        global_k = global_qv  # K == QV (both already contain mask)
+                    else:
+                        # global_kv: inject dense mask into K only
+                        global_k = global_qv.clone()
+                        global_k[:, g_front_patch_start:g_front_patch_end] += dense_flat
                 else:
                     global_k = global_qv  # No mask prompt → K == QV, skip clone
 

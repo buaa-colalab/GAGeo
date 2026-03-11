@@ -49,6 +49,44 @@ def get_workspace_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
+def normalize_view_subset(view_subset: str) -> str:
+    key = str(view_subset).strip().lower().replace("-", "_")
+    alias = {
+        "all": "all",
+        "both": "all",
+        "drone": "drone_to_satellite",
+        "d2s": "drone_to_satellite",
+        "drone_to_sat": "drone_to_satellite",
+        "drone_to_satellite": "drone_to_satellite",
+        "ground": "ground_to_satellite",
+        "g2s": "ground_to_satellite",
+        "ground_to_sat": "ground_to_satellite",
+        "ground_to_satellite": "ground_to_satellite",
+    }
+    if key not in alias:
+        raise ValueError(
+            f"Unsupported view_subset={view_subset!r}. "
+            f"Use one of: all, drone_to_satellite (d2s), ground_to_satellite (g2s)."
+        )
+    return alias[key]
+
+
+def _is_drone_item(item: Dict[str, Any]) -> bool:
+    task_type = str(item.get("task_type", "")).lower()
+    if task_type in {"drone", "ground"}:
+        return task_type == "drone"
+    return "drone" in str(item.get("mono_filename", "")).lower()
+
+
+def filter_eval_subset(data_list: List[Dict[str, Any]], view_subset: str) -> List[Dict[str, Any]]:
+    subset = normalize_view_subset(view_subset)
+    if subset == "all":
+        return data_list
+    if subset == "drone_to_satellite":
+        return [x for x in data_list if _is_drone_item(x)]
+    return [x for x in data_list if not _is_drone_item(x)]
+
+
 def load_cfg_with_env(config_path: str) -> Dict[str, Any]:
     with open(config_path, "r", encoding="utf-8") as f:
         cfg = json.load(f) if config_path.endswith(".json") else __import__("yaml").safe_load(f)
@@ -575,6 +613,8 @@ def build_model_from_cfg(cfg: Dict[str, Any], device: torch.device):
         num_heatmap_queries=mc.get("num_heatmap_queries", 1),
         supervision_layers=mc.get("supervision_layers", [4, 11, 17]),
         supervision_weights=mc.get("supervision_weights", [0.1, 0.3, 0.6]),
+        mask_inject_mode=mc.get("mask_inject_mode", "global_kv"),
+        use_global_attn_mask=mc.get("use_global_attn_mask", True),
         dropout=mc.get("dropout", 0.1),
         contrastive=mc.get("contrastive", True),
         contrastive_proj_dim=mc.get("contrastive_proj_dim", 256),
@@ -821,12 +861,15 @@ def parse_args():
     p.add_argument("--gpu", type=str, default="0")
     p.add_argument("--sam_checkpoint", type=str, required=True, help="segment-anything checkpoint path")
     p.add_argument("--sam_model_type", type=str, default="vit_h", choices=["vit_h", "vit_l", "vit_b"])
+    p.add_argument("--view_subset", type=str, default="all",
+                   help="Evaluation subset: all | drone_to_satellite(d2s) | ground_to_satellite(g2s)")
     p.add_argument("--save_json", type=str, default="")
     return p.parse_args()
 
 
 def main():
     args = parse_args()
+    view_subset = normalize_view_subset(args.view_subset)
     ws_dir = get_workspace_dir()
     os.environ.setdefault("ROOT_DIR", str(ws_dir.parent))
     os.environ.setdefault("WORKSPACE_NAME", ws_dir.name)
@@ -916,6 +959,15 @@ def main():
 
         with open(json_path, "r", encoding="utf-8") as f:
             data_list = json.load(f)
+        total_before_filter = len(data_list)
+        data_list = filter_eval_subset(data_list, view_subset)
+        print(
+            f"Split {split}: filtered {len(data_list)} / {total_before_filter} samples "
+            f"(view_subset={view_subset})"
+        )
+        if len(data_list) == 0:
+            print(f"Skip split {split}: no samples left after subset filter.")
+            continue
 
         ds = EvalDatasetV2(data_list, image_root=image_root, img_size=img_size)
         loader = DataLoader(

@@ -39,6 +39,7 @@ MODEL_DIR="${4:-output_v3/${EXPRIMENT_NAME}}"
 PROMPT_TYPES=(point bbox mask)
 
 CHECKPOINT_NAME="${5:-best}"
+VIEW_SUBSET="${6:-all}"
 
 if [[ -z "$SAM_CKPT" ]]; then
   echo "[ERROR] Please provide SAM checkpoint path as first argument."
@@ -80,6 +81,7 @@ echo "SAM checkpoint: $SAM_CKPT"
 echo "Prompt types: point bbox mask"
 echo "Experiment name: ${EXPRIMENT_NAME}"
 echo "Model dir: ${MODEL_DIR}"
+echo "View subset: ${VIEW_SUBSET}"
 echo "Output JSON: $OUT_JSON"
 echo "=========================================="
 
@@ -116,6 +118,7 @@ launch_eval() {
       --gpu 0 \
       --sam_checkpoint "$SAM_CKPT" \
       --sam_model_type vit_h \
+      --view_subset "$VIEW_SUBSET" \
       --save_json "$out_json" &
 
   pids+=("$!")
