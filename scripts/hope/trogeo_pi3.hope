@@ -6,7 +6,7 @@ usergroup = hadoop-aipnlp
 queue = root.shxs_training_cluster.hadoop-aipnlp.h800_eval
 
 [roles]
-bash -c 'export WORKTREE_ROOT="${WORKTREE_ROOT:-/mnt/data/wrp/CVOS-Code}" && export CHECKPOINT_DIR="${CHECKPOINT_DIR:-${WORKTREE_ROOT}/../location_v4/checkpoints_offline}" && export JSON_ROOT="${JSON_ROOT:-${WORKTREE_ROOT}/../eccv_data/data/json}" && export DATA_ROOT="${DATA_ROOT:-${WORKTREE_ROOT}/../eccv_data/data/urban}" && export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-8,9}" && export NUM_PROCESSES="${NUM_PROCESSES:-2}" && export MASTER_PORT="${MASTER_PORT:-29611}" && export OUTPUT_ROOT="${OUTPUT_ROOT:-${WORKTREE_ROOT}/outputs}" && cd "${WORKTREE_ROOT}" && source "${WORKTREE_ROOT}/../location_v4/.venv/bin/activate" &&  ENV_MANAGER=uv bash scripts/train_trogeo_pi3_offline_terminal.sh'
+worker.script = bash -c 'export WORKTREE_ROOT="${WORKTREE_ROOT:-/mnt/dolphinfs/ssd_pool/docker/user/hadoop-nlp-sh02/hadoop-aipnlp/EVA/yangheqing/workspace/CVOS-Code}" && export CHECKPOINT_DIR="${CHECKPOINT_DIR:-${WORKTREE_ROOT}/../location_v4/checkpoints_offline}" && export JSON_ROOT="${JSON_ROOT:-${WORKTREE_ROOT}/../CMA-Loc/CMA-Loc}" && export DATA_ROOT="${DATA_ROOT:-${WORKTREE_ROOT}/../CMA-Loc/data}" && export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}" && export NUM_PROCESSES="${NUM_PROCESSES:-8}" && export MASTER_PORT="${MASTER_PORT:-29611}" && export OUTPUT_ROOT="${OUTPUT_ROOT:-${WORKTREE_ROOT}/outputs}" && cd "${WORKTREE_ROOT}" && source "${WORKTREE_ROOT}/../location_v4/.venv/bin/activate" &&  ENV_MANAGER=uv bash scripts/train_trogeo_pi3_offline_terminal.sh'
 workers = 1
 worker.memory = 1800000
 worker.vcore = 184
