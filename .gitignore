@@ -27,9 +27,12 @@ wheels/
 *.pth
 *.pt
 ckpt/
+checkpoints/
+checkpoints_*/
 output/
 # Outputs
 output/
+outputs/
 output_*/
 logs/
 

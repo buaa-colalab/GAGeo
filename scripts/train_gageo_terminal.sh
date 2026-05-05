@@ -11,6 +11,9 @@ set -euo pipefail
 WORKSPACE_DIR="${WORKSPACE_DIR:-/mnt/data/wrp/location_v4}"
 CONDA_BIN="${CONDA_BIN:-/mnt/data/wrp/miniconda3/bin/conda}"
 CONDA_ENV="${CONDA_ENV:-gageo}"
+UV_BIN="${UV_BIN:-uv}"
+UV_PROJECT_DIR="${UV_PROJECT_DIR:-${WORKSPACE_DIR}}"
+ENV_MANAGER="${ENV_MANAGER:-auto}"
 CACHE_ROOT="${CACHE_ROOT:-/mnt/data/wrp/.cache}"
 START_TENSORBOARD="${START_TENSORBOARD:-1}"
 TENSORBOARD_HOST="${TENSORBOARD_HOST:-0.0.0.0}"
@@ -42,6 +45,47 @@ mkdir -p "$HF_HOME" "$TORCH_HOME" "$TMPDIR" "$TRITON_CACHE_DIR" "$MPLCONFIGDIR"
 cd "$WORKSPACE_DIR"
 mkdir -p logs output_v3
 
+has_uv_runtime() {
+  command -v "$UV_BIN" >/dev/null 2>&1 && [[ -f "${UV_PROJECT_DIR}/uv.lock" || -d "${UV_PROJECT_DIR}/.venv" ]]
+}
+
+resolve_env_manager() {
+  case "$ENV_MANAGER" in
+    uv|conda) echo "$ENV_MANAGER" ;;
+    auto)
+      if has_uv_runtime; then
+        echo "uv"
+      else
+        echo "conda"
+      fi
+      ;;
+    *)
+      echo "Unsupported ENV_MANAGER=$ENV_MANAGER" >&2
+      exit 1
+      ;;
+  esac
+}
+
+RUNTIME_MANAGER="$(resolve_env_manager)"
+
+run_python_in_env() {
+  if [[ "$RUNTIME_MANAGER" == "uv" ]]; then
+    "$UV_BIN" run --project "$UV_PROJECT_DIR" python "$@"
+  else
+    "$CONDA_BIN" run -n "$CONDA_ENV" --no-capture-output python "$@"
+  fi
+}
+
+run_tool_in_env() {
+  local tool="$1"
+  shift
+  if [[ "$RUNTIME_MANAGER" == "uv" ]]; then
+    "$UV_BIN" run --project "$UV_PROJECT_DIR" "$tool" "$@"
+  else
+    "$CONDA_BIN" run -n "$CONDA_ENV" --no-capture-output "$tool" "$@"
+  fi
+}
+
 get_output_dir_override() {
   local idx=0
   local total="${#EXTRA_ARGS[@]}"
@@ -61,7 +105,7 @@ get_output_dir_override() {
 
 get_config_output_dir() {
   local config_path="$1"
-  "$CONDA_BIN" run -n "$CONDA_ENV" --no-capture-output python - <<'PY' "$config_path"
+  run_python_in_env - <<'PY' "$config_path"
 import os
 import sys
 from pathlib import Path
@@ -123,7 +167,7 @@ count_visible_gpus() {
 
 prefetch_pretrained_weights() {
   local config_path="$1"
-  "$CONDA_BIN" run -n "$CONDA_ENV" --no-capture-output python - <<'PY' "$config_path"
+  run_python_in_env - <<'PY' "$config_path"
 import sys
 from pathlib import Path
 
@@ -234,8 +278,7 @@ start_tensorboard_server() {
   tb_port="$(pick_tensorboard_port "$TENSORBOARD_PORT")"
   mkdir -p "$(dirname "$TENSORBOARD_LOGDIR")" logs
 
-  "$CONDA_BIN" run -n "$CONDA_ENV" --no-capture-output \
-    tensorboard \
+  run_tool_in_env tensorboard \
       --logdir "$TENSORBOARD_LOGDIR" \
       --host "$TENSORBOARD_HOST" \
       --port "$tb_port" \
@@ -284,7 +327,12 @@ echo "=========================================="
 echo "Workspace    : $WORKSPACE_DIR"
 echo "Experiment   : $EXPERIMENT_NAME"
 echo "Config       : $TRAINING_CONFIG"
-echo "Conda env    : $CONDA_ENV"
+echo "Runtime      : $RUNTIME_MANAGER"
+if [[ "$RUNTIME_MANAGER" == "uv" ]]; then
+  echo "UV project   : $UV_PROJECT_DIR"
+else
+  echo "Conda env    : $CONDA_ENV"
+fi
 echo "Output dir   : $RUN_OUTPUT_DIR"
 echo "Extra args   : ${EXTRA_ARGS[*]:-<none>}"
 echo "CUDA devices : ${CUDA_VISIBLE_DEVICES:-all visible}"
@@ -299,8 +347,7 @@ if [[ "$DISTRIBUTED_BACKEND" == "accelerate" ]]; then
   ACCELERATE_CONFIG="${ACCELERATE_CONFIG:-${WORKSPACE_DIR}/configs/accelerate_deepspeed_zero2.yaml}"
   echo "Prefetching pretrained weights into local cache ..."
   PYTHONPATH="$WORKSPACE_DIR" MPLCONFIGDIR="$MPLCONFIGDIR" prefetch_pretrained_weights "$TRAINING_CONFIG"
-  "$CONDA_BIN" run -n "$CONDA_ENV" --no-capture-output \
-    accelerate launch \
+  run_tool_in_env accelerate launch \
       --config_file "$ACCELERATE_CONFIG" \
       --num_processes "$NUM_PROCESSES" \
       "${WORKSPACE_DIR}/train_detr_v2.py" \
@@ -311,16 +358,14 @@ elif [[ "$DISTRIBUTED_BACKEND" == "ddp" ]]; then
   echo "Prefetching pretrained weights into local cache ..."
   PYTHONPATH="$WORKSPACE_DIR" MPLCONFIGDIR="$MPLCONFIGDIR" prefetch_pretrained_weights "$TRAINING_CONFIG"
   echo "DDP master   : 127.0.0.1:${DDP_MASTER_PORT}"
-  "$CONDA_BIN" run -n "$CONDA_ENV" --no-capture-output \
-    torchrun \
+  run_tool_in_env torchrun \
       --nproc_per_node "$NUM_PROCESSES" \
       --master_port "$DDP_MASTER_PORT" \
       "${WORKSPACE_DIR}/train_detr_v2_ddp.py" \
       --config "$TRAINING_CONFIG" \
       "${EXTRA_ARGS[@]}"
 else
-  "$CONDA_BIN" run -n "$CONDA_ENV" --no-capture-output \
-    python "${WORKSPACE_DIR}/train_detr_v2.py" \
+  run_python_in_env "${WORKSPACE_DIR}/train_detr_v2.py" \
       --config "$TRAINING_CONFIG" \
       "${EXTRA_ARGS[@]}"
 fi

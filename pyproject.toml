@@ -1,0 +1,37 @@
+[project]
+name = "location"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "accelerate>=0.25.0",
+    "transformers>=4.35.0",
+    "deepspeed>=0.12.0",
+    "numpy>=1.21.0",
+    "scipy>=1.7.0",
+    "Pillow>=9.0.0",
+    "pycocotools",
+    "pyyaml>=6.0",
+    "tqdm>=4.62.0",
+    "matplotlib>=3.5.0",
+    "tensorboard>=2.14.0",
+    "opencv-python>=4.13.0.92",
+    "albumentations>=2.0.8",
+    "shapely>=2.1.2",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu118"
+url = "https://download.pytorch.org/whl/cu118"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu118" },
+]
+torchvision = [
+    { index = "pytorch-cu118" },
+]
