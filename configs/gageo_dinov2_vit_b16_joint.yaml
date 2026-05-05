@@ -95,7 +95,7 @@ training:
 checkpoint:
   output_dir: "${OUTPUT_ROOT}/gageo_dinov2_vit_b16_joint"
   save_freq: 5
-  resume: null
+  resume: "${OUTPUT_ROOT}/gageo_dinov2_vit_b16_joint/best"
 
 logging:
   log_freq: 10

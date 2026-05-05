@@ -98,6 +98,51 @@ def load_config(config_path: str) -> dict:
         return _expand_env(yaml.safe_load(f))
 
 
+def resolve_resume_path(resume_value, output_dir=None, prefer_file=True):
+    """Resolve a resume hint to an existing checkpoint file or directory."""
+    if not resume_value:
+        return None
+
+    raw = Path(str(resume_value)).expanduser()
+    candidates = []
+
+    def add_candidate(path_like):
+        path = Path(path_like)
+        if path not in candidates:
+            candidates.append(path)
+
+    add_candidate(raw)
+    if raw.is_dir():
+        add_candidate(raw / "best.pth")
+        add_candidate(raw / "best")
+    elif raw.suffix == ".pth":
+        add_candidate(raw.with_suffix(""))
+    else:
+        add_candidate(raw.with_suffix(".pth"))
+        add_candidate(raw / "best.pth")
+        add_candidate(raw / "best")
+
+    if output_dir:
+        out = Path(output_dir)
+        if raw == out:
+            add_candidate(out / "best.pth")
+            add_candidate(out / "best")
+
+    existing = [path for path in candidates if path.exists()]
+    if not existing:
+        return raw
+
+    if prefer_file:
+        for path in existing:
+            if path.is_file():
+                return path
+    else:
+        for path in existing:
+            if path.is_dir():
+                return path
+    return existing[0]
+
+
 def setup_distributed():
     rank = int(os.environ.get("RANK", "0"))
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
@@ -756,7 +801,11 @@ def main():
     start_epoch = 0
     best_loss = float("inf")
     global_step = 0
-    resume_path = cfg["checkpoint"].get("resume")
+    resume_path = resolve_resume_path(
+        cfg["checkpoint"].get("resume"),
+        output_dir=output_dir,
+        prefer_file=True,
+    )
     if resume_path:
         ckpt_path = Path(resume_path)
         if not ckpt_path.exists():

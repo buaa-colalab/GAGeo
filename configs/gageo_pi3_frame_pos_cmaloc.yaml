@@ -97,7 +97,7 @@ training:
 checkpoint:
   output_dir: "${OUTPUT_ROOT}/gageo_pi3_frame_pos_cmaloc"
   save_freq: 5
-  resume: null
+  resume: "${OUTPUT_ROOT}/gageo_pi3_frame_pos_cmaloc/best"
 
 logging:
   log_freq: 10

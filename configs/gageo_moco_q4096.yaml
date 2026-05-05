@@ -126,7 +126,7 @@ training:
 checkpoint:
   output_dir: "${OUTPUT_ROOT}/gageo_moco_q4096"
   save_freq: 5
-  resume: null
+  resume: "${OUTPUT_ROOT}/gageo_moco_q4096/best"
 
 # Logging
 logging:

@@ -107,6 +107,57 @@ def load_config(config_path: str) -> dict:
         return _expand_env(yaml.safe_load(f))
 
 
+def resolve_resume_path(resume_value, output_dir=None, prefer_directory=False):
+    """Resolve a resume hint to an existing checkpoint artifact.
+
+    Supported inputs:
+    - `/path/to/exp/best` for Accelerate checkpoints
+    - `/path/to/exp/best.pth` for DDP checkpoints
+    - `/path/to/exp` to auto-resolve under the experiment output dir
+    """
+    if not resume_value:
+        return None
+
+    raw = Path(str(resume_value)).expanduser()
+    candidates = []
+
+    def add_candidate(path_like):
+        path = Path(path_like)
+        if path not in candidates:
+            candidates.append(path)
+
+    add_candidate(raw)
+    if raw.is_dir():
+        add_candidate(raw / 'best')
+        add_candidate(raw / 'best.pth')
+    elif raw.suffix == '.pth':
+        add_candidate(raw.with_suffix(''))
+    else:
+        add_candidate(raw.with_suffix('.pth'))
+        add_candidate(raw / 'best')
+        add_candidate(raw / 'best.pth')
+
+    if output_dir:
+        out = Path(output_dir)
+        if raw == out:
+            add_candidate(out / 'best')
+            add_candidate(out / 'best.pth')
+
+    existing = [path for path in candidates if path.exists()]
+    if not existing:
+        return raw
+
+    if prefer_directory:
+        for path in existing:
+            if path.is_dir():
+                return path
+    else:
+        for path in existing:
+            if path.is_file():
+                return path
+    return existing[0]
+
+
 def _assert_bbox_prompt_for_forward(boxes: torch.Tensor, front_view: torch.Tensor) -> None:
     """Guard: training-time bbox prompt must be pixel-space [x, y, w, h]."""
     if boxes is None:
@@ -708,7 +759,11 @@ def main():
     start_epoch = 0
     best_loss = float('inf')
     resume_global_step = 0
-    resume_path = cfg['checkpoint'].get('resume')
+    resume_path = resolve_resume_path(
+        cfg['checkpoint'].get('resume'),
+        output_dir=output_dir,
+        prefer_directory=True,
+    )
     if resume_path:
         ckpt_path = Path(resume_path)
         if not ckpt_path.exists():
