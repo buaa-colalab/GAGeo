@@ -24,6 +24,12 @@ SAM2_HIERA_L_URL = (
     "https://dl.fbaipublicfiles.com/segment_anything_2/092824/"
     "sam2.1_hiera_large.pt"
 )
+DEFAULT_PI3_HF_REPO = "yyfz233/Pi3"
+DEFAULT_PI3_HF_CANDIDATES = (
+    "model.safetensors",
+    "pi3_model.safetensors",
+    "pytorch_model.safetensors",
+)
 
 
 def copy_or_download(
@@ -79,16 +85,59 @@ def download_torchvision_vit_h(dst: Path) -> None:
 
 
 def maybe_download_pi3_from_hf(dst: Path, repo_id: str, filename: str) -> bool:
-    if not repo_id:
-        return False
+    """Download Pi3 weights from Hugging Face Hub.
+
+    The Pi3 repo layout may change over time, so we first try the explicitly
+    requested filename, then fall back to common safetensors names, and finally
+    inspect the repo file list to find a suitable `.safetensors` checkpoint.
+    """
     try:
-        from huggingface_hub import hf_hub_download
+        from huggingface_hub import HfApi, hf_hub_download
     except ImportError:
         print("[warn] huggingface_hub is not installed; cannot download Pi3 from HF.")
         return False
 
-    print(f"[download] Pi3 from HF {repo_id}/{filename} -> {dst}")
-    cached = hf_hub_download(repo_id=repo_id, filename=filename)
+    repo = str(repo_id or DEFAULT_PI3_HF_REPO).strip()
+    candidates: list[str] = []
+    if filename:
+        candidates.append(str(filename).strip())
+    for candidate in DEFAULT_PI3_HF_CANDIDATES:
+        if candidate not in candidates:
+            candidates.append(candidate)
+
+    for candidate in candidates:
+        try:
+            print(f"[download] Pi3 from HF {repo}/{candidate} -> {dst}")
+            cached = hf_hub_download(repo_id=repo, filename=candidate)
+            shutil.copy2(cached, dst)
+            return True
+        except Exception as exc:
+            print(f"[warn] Pi3 HF candidate not available: {candidate} ({exc})")
+
+    try:
+        api = HfApi()
+        repo_files = api.list_repo_files(repo_id=repo, repo_type="model")
+    except Exception as exc:
+        print(f"[warn] Failed to inspect HF repo {repo}: {exc}")
+        return False
+
+    safetensor_files = [name for name in repo_files if name.endswith(".safetensors")]
+    preferred = sorted(
+        safetensor_files,
+        key=lambda name: (
+            0 if Path(name).name in DEFAULT_PI3_HF_CANDIDATES else 1,
+            0 if "model" in Path(name).name.lower() else 1,
+            len(name),
+            name,
+        ),
+    )
+    if not preferred:
+        print(f"[warn] No .safetensors checkpoint found in HF repo {repo}.")
+        return False
+
+    chosen = preferred[0]
+    print(f"[download] Pi3 from HF {repo}/{chosen} -> {dst}")
+    cached = hf_hub_download(repo_id=repo, filename=chosen)
     shutil.copy2(cached, dst)
     return True
 
@@ -98,8 +147,16 @@ def main() -> int:
     parser.add_argument("--output_dir", default="/mnt/data/wrp/checkpoints_offline")
     parser.add_argument("--pi3_source", default="/mnt/data/wrp/GaGeo/ckpt/pi3/model.safetensors")
     parser.add_argument("--sam_source", default="/mnt/data/wrp/GaGeo/ckpt/sam2.1_hiera_large.pt")
-    parser.add_argument("--pi3_hf_repo", default="", help="Optional HF repo id for Pi3 if pi3_source is unavailable")
-    parser.add_argument("--pi3_hf_filename", default="model.safetensors")
+    parser.add_argument(
+        "--pi3_hf_repo",
+        default=DEFAULT_PI3_HF_REPO,
+        help="HF repo id for Pi3 checkpoint fallback",
+    )
+    parser.add_argument(
+        "--pi3_hf_filename",
+        default="",
+        help="Optional exact Pi3 filename inside the HF repo; auto-discovered when empty",
+    )
     parser.add_argument("--skip_vit_h", action="store_true", help="Skip the large ViT-H download")
     args = parser.parse_args()
 
