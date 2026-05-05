@@ -1,13 +1,4 @@
 #!/bin/bash
-#SBATCH --job-name=cvloc_zs_g2d
-#SBATCH --output=/data/home/scxi704/run/eval_logs/slurm_zs_g2d_all_%j.out
-#SBATCH --error=/data/home/scxi704/run/eval_logs/slurm_zs_g2d_all_%j.err
-#SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=16
-#SBATCH --gres=gpu:1
-#SBATCH --mem=64G
-#SBATCH --partition=vip_gpu_5090_scxi704
 
 set -euo pipefail
 
@@ -15,10 +6,10 @@ set -euo pipefail
 # Zero-shot Ground -> Drone multi-epoch evaluation
 # =========================================================
 
-ROOT_DIR=${ROOT_DIR:-"/data/home/scxi704/run/xhj"}
+ROOT_DIR=${ROOT_DIR:-"/mnt/data/wrp"}
 WORKSPACE_NAME=${WORKSPACE_NAME:-"location_v4"}
 WORKSPACE_DIR="${ROOT_DIR}/${WORKSPACE_NAME}"
-RUN_ROOT="$(dirname "$ROOT_DIR")"
+RUN_ROOT="${RUN_ROOT:-/mnt/data/wrp}"
 CACHE_ROOT=${CACHE_ROOT:-"${ROOT_DIR}/.cache"}
 
 EXPRIMENT_NAME="ablation_9_wo_contrastive"
@@ -53,10 +44,6 @@ fi
 # ===============================
 # Conda
 # ===============================
-source "${RUN_ROOT}/miniconda3/etc/profile.d/conda.sh"
-conda activate filtre
-
-module load cuda
 
 # ===============================
 # Cache
@@ -73,7 +60,6 @@ mkdir -p logs output_v3
 echo "=========================================="
 echo "Multi-epoch Zero-shot Ground->Drone Eval"
 echo "=========================================="
-echo "Job ID: $SLURM_JOB_ID"
 echo "Experiment: $EXPRIMENT_NAME"
 echo "Epoch range: ${START_EPOCH} -> ${END_EPOCH}"
 echo "Checkpoint root: $CKPT_ROOT"
@@ -103,7 +89,7 @@ for ((EPOCH=$START_EPOCH; EPOCH<=END_EPOCH; EPOCH+=EPOCH_STEP)); do
     echo "------------------------------------------"
 
     CUDA_VISIBLE_DEVICES="$GPU_ID" \
-    "${RUN_ROOT}/miniconda3/bin/conda" run -n filtre --no-capture-output \
+    "${CONDA_BIN:-/mnt/data/wrp/miniconda3/bin/conda}" run -n gageo --no-capture-output \
       python "${WORKSPACE_DIR}/evaluate_zero_shot_ground_to_drone.py" \
         --triplet_json "$TRIPLET_JSON" \
         --root_dir "$ROOT_DIR_DATA" \

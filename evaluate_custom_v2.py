@@ -607,6 +607,7 @@ def build_model_from_cfg(cfg: Dict[str, Any], device: torch.device):
         load_camera_head_weights=False,
         sam_weights=None,
         img_size=dc.get("img_size", 518),
+        patch_size=mc.get("patch_size", 14),
         decoder_size=mc.get("decoder_size", "large"),
         num_learnable_tokens=mc.get("num_learnable_tokens", 2),
         num_bbox_mask_queries=mc.get("num_bbox_mask_queries"),
@@ -623,6 +624,18 @@ def build_model_from_cfg(cfg: Dict[str, Any], device: torch.device):
         contrastive_temperature=mc.get("contrastive_temperature", 0.07),
         sam_embed_dim=mc.get("sam_embed_dim", 256),
         num_mask_tokens=mc.get("num_mask_tokens", 1),
+        backbone_type=mc.get("backbone_type", "pi3"),
+        encoder_name=mc.get("encoder_name", "vit_b16"),
+        # Evaluation immediately loads the experiment checkpoint, so avoid
+        # re-fetching external ImageNet/DINO weights here.
+        encoder_pretrained=False,
+        encoder_weights=mc.get("encoder_weights", "LVD142M"),
+        joint_vit_variant=mc.get("joint_vit_variant"),
+        joint_vit_weights=mc.get("joint_vit_weights"),
+        adapter_dim=mc.get("adapter_dim", 1024),
+        adapter_depth=mc.get("adapter_depth", 36),
+        adapter_num_heads=mc.get("adapter_num_heads", 16),
+        use_frame_pos_embed=mc.get("use_frame_pos_embed", False),
     )
 
     model.to(device)
@@ -859,7 +872,12 @@ def parse_args():
     p.add_argument("--prompt_types", nargs="+", default=["point", "bbox", "mask"],
                    choices=["point", "bbox", "mask"])
     p.add_argument("--gpu", type=str, default="0")
-    p.add_argument("--sam_checkpoint", type=str, required=True, help="segment-anything checkpoint path")
+    p.add_argument(
+        "--sam_checkpoint",
+        type=str,
+        default="/mnt/data/wrp/GaGeo/ckpt/sam2.1_hiera_large.pt",
+        help="segment-anything/SAM2 checkpoint path",
+    )
     p.add_argument("--sam_model_type", type=str, default="vit_h", choices=["vit_h", "vit_l", "vit_b"])
     p.add_argument("--view_subset", type=str, default="all",
                    help="Evaluation subset: all | drone_to_satellite(d2s) | ground_to_satellite(g2s)")

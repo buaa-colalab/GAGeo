@@ -68,15 +68,23 @@ def parse_args():
                         help='Mask injection mode: global_kv | pre_backbone')
     parser.add_argument('--use_global_attn_mask', type=str2bool, default=None,
                         help='Whether to apply global attention mask in backbone')
+    parser.add_argument('--contrastive_queue_size', type=int, default=None,
+                        help='Override model.contrastive_queue_size for MoCo queue ablation')
     return parser.parse_args()
 
 
 def load_config(config_path: str) -> dict:
     defaults = {
-        "ROOT_DIR": os.environ.get("ROOT_DIR", "/data/home/scxi704/run/xhj"),
+        "ROOT_DIR": os.environ.get("ROOT_DIR", "/mnt/data/wrp"),
         "WORKSPACE_NAME": os.environ.get("WORKSPACE_NAME", "location_v4"),
+        "CHECKPOINT_DIR": os.environ.get("CHECKPOINT_DIR", "/mnt/data/wrp/checkpoints_offline"),
+        "DATA_ROOT": os.environ.get("DATA_ROOT", "/mnt/data/wrp/eccv_data/data/urban"),
+        "JSON_ROOT": os.environ.get("JSON_ROOT", "/mnt/data/wrp/eccv_data/data/json"),
     }
-    defaults["WORKSPACE_DIR"] = f"{defaults['ROOT_DIR']}/{defaults['WORKSPACE_NAME']}"
+    defaults["WORKSPACE_DIR"] = os.environ.get(
+        "WORKSPACE_DIR", f"{defaults['ROOT_DIR']}/{defaults['WORKSPACE_NAME']}"
+    )
+    defaults["OUTPUT_ROOT"] = os.environ.get("OUTPUT_ROOT", f"{defaults['WORKSPACE_DIR']}/output_v3")
 
     def _expand_str(s: str) -> str:
         # First pass: normal env expansion
@@ -386,6 +394,8 @@ def main():
         cfg.setdefault('model', {})['mask_inject_mode'] = str(args.mask_inject_mode)
     if args.use_global_attn_mask is not None:
         cfg.setdefault('model', {})['use_global_attn_mask'] = bool(args.use_global_attn_mask)
+    if args.contrastive_queue_size is not None:
+        cfg.setdefault('model', {})['contrastive_queue_size'] = int(args.contrastive_queue_size)
 
     use_deep_supervision = cfg.get('model', {}).get('use_deep_supervision', True)
     use_contrastive_loss = cfg.get('model', {}).get('use_contrastive_loss', cfg.get('model', {}).get('contrastive', True))
@@ -394,6 +404,10 @@ def main():
     num_bbox_mask_queries = int(cfg.get('model', {}).get('num_bbox_mask_queries', 1))
     mask_inject_mode = cfg.get('model', {}).get('mask_inject_mode', 'global_kv')
     use_global_attn_mask = bool(cfg.get('model', {}).get('use_global_attn_mask', True))
+    backbone_type = cfg.get('model', {}).get('backbone_type', 'pi3')
+    use_frame_pos_embed = bool(cfg.get('model', {}).get('use_frame_pos_embed', False))
+    use_spatial_bbox_head = bool(cfg.get('model', {}).get('use_spatial_bbox_head', False))
+    contrastive_queue_size = int(cfg.get('model', {}).get('contrastive_queue_size', 16384))
 
     if not use_deep_supervision:
         cfg['model']['supervision_layers'] = []
@@ -435,13 +449,17 @@ def main():
             f"Ablation switches -> deep_supervision={use_deep_supervision}, "
             f"contrastive={use_contrastive_loss}, rot_pos_supervision={use_rot_pos_supervision}, "
             f"heatmap_loss={use_heatmap_loss}, num_bbox_mask_queries={num_bbox_mask_queries}, "
-            f"mask_inject_mode={mask_inject_mode}, use_global_attn_mask={use_global_attn_mask}"
+            f"mask_inject_mode={mask_inject_mode}, use_global_attn_mask={use_global_attn_mask}, "
+            f"backbone_type={backbone_type}, use_frame_pos_embed={use_frame_pos_embed}, "
+            f"use_spatial_bbox_head={use_spatial_bbox_head}, "
+            f"contrastive_queue_size={contrastive_queue_size}"
         )
         accelerator.print(f"Dataset subset -> train_subset={train_subset}, val_subset={val_subset}")
 
     if accelerator.is_main_process and cfg['logging'].get('use_tensorboard', True):
+        experiment_name = os.environ.get("EXPRIMENT_NAME", "default")
         accelerator.init_trackers(
-            project_name="cross_view_v3",
+            project_name=f"tensorboard/{experiment_name}",
             config={
                 "batch_size": cfg['training']['batch_size'],
                 "num_epochs": cfg['training']['num_epochs'],
@@ -455,6 +473,7 @@ def main():
     train_dataset = CrossViewDataset(
         json_path=cfg['data']['train_json'],
         data_root=cfg['data']['data_root'],
+        mono_size=cfg['data']['img_size'],
         crop_size=cfg['data']['crop_size'],
         crop_sat=True,
         view_subset=train_subset,
@@ -463,6 +482,7 @@ def main():
     val_dataset = CrossViewDataset(
         json_path=cfg['data']['val_json'],
         data_root=cfg['data']['data_root'],
+        mono_size=cfg['data']['img_size'],
         crop_size=cfg['data']['crop_size'],
         crop_sat=False,
         view_subset=val_subset,
@@ -505,6 +525,7 @@ def main():
         load_camera_head_weights=cfg['model'].get('load_camera_head_weights', True),
         sam_weights=cfg['model'].get('sam_weights'),
         img_size=cfg['data']['img_size'],
+        patch_size=cfg['model'].get('patch_size', 14),
         decoder_size=cfg['model'].get('decoder_size', 'large'),
         num_learnable_tokens=cfg['model'].get('num_learnable_tokens', 2),
         num_bbox_mask_queries=num_bbox_mask_queries,
@@ -516,10 +537,21 @@ def main():
         dropout=cfg['model'].get('dropout', 0.1),
         contrastive=use_contrastive_loss,
         contrastive_proj_dim=cfg['model'].get('contrastive_proj_dim', 256),
-        contrastive_queue_size=cfg['model'].get('contrastive_queue_size', 16384),
+        contrastive_queue_size=contrastive_queue_size,
         contrastive_momentum=cfg['model'].get('contrastive_momentum', 0.999),
         contrastive_temperature=cfg['model'].get('contrastive_temperature', 0.07),
         sam_embed_dim=cfg['model'].get('sam_embed_dim'),
+        backbone_type=backbone_type,
+        encoder_name=cfg['model'].get('encoder_name', 'vit_b16'),
+        encoder_pretrained=cfg['model'].get('encoder_pretrained', True),
+        encoder_weights=cfg['model'].get('encoder_weights', 'LVD142M'),
+        joint_vit_variant=cfg['model'].get('joint_vit_variant'),
+        joint_vit_weights=cfg['model'].get('joint_vit_weights'),
+        adapter_dim=cfg['model'].get('adapter_dim', 1024),
+        adapter_depth=cfg['model'].get('adapter_depth', 36),
+        adapter_num_heads=cfg['model'].get('adapter_num_heads', 16),
+        use_frame_pos_embed=use_frame_pos_embed,
+        use_spatial_bbox_head=cfg['model'].get('use_spatial_bbox_head', False),
     )
 
     if cfg['model'].get('pi3_weights'):
@@ -536,11 +568,13 @@ def main():
             f"configured={supervision_layers}, includes_final={final_stage_idx in supervision_layers}"
         )
 
-    # Freeze DINOv2 encoder
-    if cfg['model'].get('freeze_dinov2', True):
+    # Freeze the visual encoder when requested. `freeze_dinov2` is kept for
+    # old Pi3 configs; new 2D-CVA configs may use `freeze_encoder`.
+    freeze_encoder = cfg['model'].get('freeze_encoder', cfg['model'].get('freeze_dinov2', True))
+    if freeze_encoder:
         for param in model.backbone.encoder.parameters():
             param.requires_grad = False
-        accelerator.print('Froze DINOv2 encoder')
+        accelerator.print('Froze visual encoder')
 
     # torch.compile can speed up single-GPU frozen encoder, but it is unstable on some
     # multi-GPU + DeepSpeed setups due to inductor/triton cache races.
@@ -583,7 +617,7 @@ def main():
     if cfg.get('training', {}).get('gradient_checkpointing', False):
         if hasattr(model.backbone, 'encoder') and hasattr(model.backbone.encoder, 'gradient_checkpointing_enable'):
             model.backbone.encoder.gradient_checkpointing_enable()
-            accelerator.print('Enabled gradient checkpointing on DINOv2 encoder')
+            accelerator.print('Enabled gradient checkpointing on visual encoder')
         # For decoder blocks: enable torch gradient checkpointing
         for blk in model.backbone.decoder:
             blk.requires_grad_(True)  # ensure checkpointing works

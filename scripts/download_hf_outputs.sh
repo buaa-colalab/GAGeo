@@ -6,7 +6,7 @@ set -e
 
 REPO_ID="caryK/location"
 REPO_PATH="output_v3"
-LOCAL_BASE_DIR="/data/home/scxi704/run/xhj/location_v4/output_v3"
+LOCAL_BASE_DIR="/mnt/data/wrp/location_v4/output_v3"
 
 # 需要下载的文件夹列表
 FOLDERS=(

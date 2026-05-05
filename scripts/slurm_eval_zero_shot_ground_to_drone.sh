@@ -1,24 +1,15 @@
 #!/bin/bash
-#SBATCH --job-name=cvloc_zs_g2d
-#SBATCH --output=/data/home/scxi704/run/eval_logs/slurm_zs_g2d_%j.out
-#SBATCH --error=/data/home/scxi704/run/eval_logs/slurm_zs_g2d_%j.err
-#SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=16
-#SBATCH --gres=gpu:1
-#SBATCH --mem=64G
-#SBATCH --partition=vip_gpu_5090_scxi704
 
 # ============================================
-# SLURM Zero-shot Eval: ground -> drone (point prompt)
+# terminal Zero-shot Eval: ground -> drone (point prompt)
 # Metrics: mean IoU / ACC@25 / ACC@50
 # ============================================
 # Usage:
-#   sbatch scripts/slurm_eval_zero_shot_ground_to_drone.sh \
+#   bash scripts/slurm_eval_zero_shot_ground_to_drone.sh \
 #       [triplet_json] [root_dir] [checkpoint_dir] [gpu_id]
 #
 # Example:
-#   sbatch scripts/slurm_eval_zero_shot_ground_to_drone.sh \
+#   bash scripts/slurm_eval_zero_shot_ground_to_drone.sh \
 #       ${ROOT_DIR}/University-Release/verified_triplets.json \
 #       ${ROOT_DIR}/University-Release \
 #       ${ROOT_DIR}/${WORKSPACE_NAME}/output_v2/best \
@@ -27,10 +18,10 @@
 
 set -euo pipefail
 
-ROOT_DIR=${ROOT_DIR:-"/data/home/scxi704/run/xhj"}
+ROOT_DIR=${ROOT_DIR:-"/mnt/data/wrp"}
 WORKSPACE_NAME=${WORKSPACE_NAME:-"location_v4"}
 WORKSPACE_DIR="${ROOT_DIR}/${WORKSPACE_NAME}"
-RUN_ROOT="$(dirname "$ROOT_DIR")"
+RUN_ROOT="${RUN_ROOT:-/mnt/data/wrp}"
 CACHE_ROOT=${CACHE_ROOT:-"${ROOT_DIR}/.cache"}
 EXPRIMENT_NAME="ablation_11_g2s_only"
 CHECKPOINT_NAME="${5:-best}"
@@ -55,10 +46,6 @@ if [[ ! -f "$CONFIG_PATH" ]]; then
 fi
 
 # conda env
-source "${RUN_ROOT}/miniconda3/etc/profile.d/conda.sh"
-conda activate filtre
-
-module load cuda
 
 # Cache dirs
 export HF_HOME="${CACHE_ROOT}/huggingface"
@@ -73,10 +60,8 @@ mkdir -p logs output_v3
 echo "=========================================="
 echo "Zero-shot Ground->Drone Evaluation"
 echo "=========================================="
-echo "Job ID: $SLURM_JOB_ID"
 echo "Experiment name: $EXPRIMENT_NAME"
 echo "Checkpoint name: $CHECKPOINT_NAME"
-echo "Node: $SLURM_NODELIST"
 echo "Triplet JSON: $TRIPLET_JSON"
 echo "Root dir: $ROOT_DIR_DATA"
 echo "Config: $CONFIG_PATH"
@@ -87,7 +72,7 @@ echo "Output JSON: $OUT_JSON"
 echo "=========================================="
 
 CUDA_VISIBLE_DEVICES="$GPU_ID" \
-"${RUN_ROOT}/miniconda3/bin/conda" run -n filtre --no-capture-output \
+"${CONDA_BIN:-/mnt/data/wrp/miniconda3/bin/conda}" run -n gageo --no-capture-output \
   python "${WORKSPACE_DIR}/evaluate_zero_shot_ground_to_drone.py" \
     --triplet_json "$TRIPLET_JSON" \
     --root_dir "$ROOT_DIR_DATA" \

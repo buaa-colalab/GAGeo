@@ -239,6 +239,7 @@ class Pi3BackboneV2(nn.Module):
         supervision_layers: List[int] = None,
         mask_inject_mode: str = "global_kv",
         use_global_attn_mask: bool = True,
+        use_frame_pos_embed: bool = False,
     ):
         super().__init__()
         
@@ -255,6 +256,7 @@ class Pi3BackboneV2(nn.Module):
                 f"Use one of: global_kv, global_qkv, pre_backbone."
             )
         self.use_global_attn_mask = bool(use_global_attn_mask)
+        self.use_frame_pos_embed = bool(use_frame_pos_embed)
         
         # ----------------------
         #        Encoder
@@ -345,6 +347,14 @@ class Pi3BackboneV2(nn.Module):
         self.patch_start_idx = num_register_tokens
         self.register_token = nn.Parameter(torch.randn(1, 1, num_register_tokens, self.dec_embed_dim))
         nn.init.normal_(self.register_token, std=1e-6)
+
+        if self.use_frame_pos_embed:
+            # Two learned frame-role embeddings break Pi3's view permutation
+            # invariance while keeping the original patch-grid RoPE unchanged.
+            self.frame_pos_embed = nn.Parameter(torch.zeros(1, 2, 1, self.dec_embed_dim))
+            nn.init.normal_(self.frame_pos_embed, std=0.02)
+        else:
+            self.frame_pos_embed = None
         
         # ----------------------
         #   Learnable Query Tokens (new)
@@ -540,6 +550,13 @@ class Pi3BackboneV2(nn.Module):
         
         sate_hidden = torch.cat([reg_token[:, 0], sate_hidden], dim=1)    # [B, 5+hw, C]
         front_hidden = torch.cat([reg_token[:, 0], front_hidden], dim=1)  # [B, 5+hw, C]
+
+        if self.frame_pos_embed is not None:
+            if N != 2:
+                raise ValueError(f"frame_pos_embed expects exactly 2 views, got {N}")
+            frame_pos = self.frame_pos_embed.to(device=hidden.device, dtype=hidden.dtype)
+            sate_hidden = sate_hidden + frame_pos[:, 0]
+            front_hidden = front_hidden + frame_pos[:, 1]
         
         N_sate = sate_hidden.shape[1]  # 5 + 1369 = 1374
         N_front_base = front_hidden.shape[1]  # 1374

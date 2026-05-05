@@ -3,9 +3,9 @@
 
 # Data
 data:
-  train_json: "${ROOT_DIR}/data/json/train_all.json"
-  val_json: "${ROOT_DIR}/data/json/val_all.json"
-  data_root: "${ROOT_DIR}/data/urban"
+  train_json: "${JSON_ROOT}/train_all.json"
+  val_json: "${JSON_ROOT}/val_all.json"
+  data_root: "${DATA_ROOT}"
   img_size: 518
   crop_size: 518
   num_workers: 24
@@ -41,7 +41,7 @@ model:
   supervision_weights: [0.1, 0.3, 0.6]  # Increasing weights
   
   # Pi3 pretrained weights
-  pi3_weights: "${ROOT_DIR}/ckpt/pi3/model.safetensors"
+  pi3_weights: "${CHECKPOINT_DIR}/pi3_model.safetensors"
   freeze_dinov2: true  # Freeze DINOv2 encoder
   freeze_decoder: false  # Pi3 decoder trainable (with low LR)
   freeze_prompt_encoder: true  # Freeze SAM prompt encoder (keep projections trainable)
@@ -49,7 +49,7 @@ model:
   load_camera_head_weights: true  # Load Pi3 camera head pretrained weights
   
   # SAM2 pretrained weights
-  sam_weights: "${ROOT_DIR}/ckpt/sam2.1_hiera_large.pt"
+  sam_weights: "${CHECKPOINT_DIR}/sam2.1_hiera_large.pt"
   sam_embed_dim: 256  # SAM internal dimension
 
   # Contrastive (MoCo-style)
@@ -124,10 +124,9 @@ training:
 
 # Checkpointing
 checkpoint:
-  output_dir: "${ROOT_DIR}/${WORKSPACE_NAME}/output_v3"
+  output_dir: "${OUTPUT_ROOT}"
   save_freq: 5
-  resume: "${ROOT_DIR}/${WORKSPACE_NAME}/output_v3/${EXPRIMENT_NAME}/best"  # Path to checkpoint to resume from (set to null to train from scratch)
-  # resume: null
+  resume: null
 
 # Logging
 logging:

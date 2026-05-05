@@ -27,7 +27,7 @@ except ImportError:
 # 配置
 REPO_ID = "caryK/location"
 REPO_PATH = "output_v3"
-LOCAL_BASE_DIR = Path("/data/home/scxi704/run/xhj/location_v4/output_v3")
+LOCAL_BASE_DIR = Path("/mnt/data/wrp/location_v4/output_v3")
 
 # 需要下载的文件夹列表（从网页信息中获取）
 FOLDERS = [

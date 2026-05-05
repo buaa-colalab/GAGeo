@@ -137,6 +137,7 @@ def build_model(cfg, device):
         num_mask_tokens=mc.get("num_mask_tokens", 1),
         mask_inject_mode=mc.get("mask_inject_mode", "global_kv"),
         use_global_attn_mask=mc.get("use_global_attn_mask", True),
+        use_frame_pos_embed=mc.get("use_frame_pos_embed", False),
     )
     model.to(device)
     model.eval()

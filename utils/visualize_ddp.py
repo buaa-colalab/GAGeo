@@ -35,8 +35,13 @@ def visualize_validation_samples_ddp(
     """
     if not is_main_process:
         return
-    
-    model.eval()
+
+    # DDP-wrapped forward may issue collectives even in eval mode. Visualization
+    # runs only on rank0, so use the underlying module for single-rank inference.
+    inference_model = model.module if hasattr(model, "module") else model
+
+    was_training = inference_model.training
+    inference_model.eval()
     output_dir = Path(cfg['checkpoint']['output_dir']) / 'vis' / f'epoch_{epoch}'
     output_dir.mkdir(parents=True, exist_ok=True)
     
@@ -57,8 +62,8 @@ def visualize_validation_samples_ddp(
             points, boxes, masks = prepare_single_prompt(batch, device, prompt_type=prompt_type)
             
             # Forward pass
-            with torch.cuda.amp.autocast(enabled=cfg['training']['use_amp']):
-                outputs = model(
+            with torch.amp.autocast('cuda', enabled=cfg['training']['use_amp']):
+                outputs = inference_model(
                     front_view=front_view,
                     satellite_view=sat_view,
                     points=points,
@@ -77,4 +82,5 @@ def visualize_validation_samples_ddp(
                     break
     
     print(f'Saved {samples_saved} visualizations to {output_dir}')
-    model.train()
+    if was_training:
+        inference_model.train()

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Workspace path config
-ROOT_DIR="${ROOT_DIR:-/data/home/scxi704/run/xhj}"
+ROOT_DIR="${ROOT_DIR:-/mnt/data/wrp}"
 WORKSPACE_NAME="${WORKSPACE_NAME:-location_v4}"
 WORKSPACE_DIR="${ROOT_DIR}/${WORKSPACE_NAME}"
 
@@ -11,20 +11,20 @@ WORKSPACE_DIR="${ROOT_DIR}/${WORKSPACE_NAME}"
 # to Hugging Face dataset repo.
 #
 # Default target:
-#   /data/home/scxi704/run/xhj/data  ->  cipual/Urban-CVOGL
+#   /mnt/data/wrp/eccv_data/data  ->  cipual/Urban-CVOGL
 # ========================================================
 
-SRC_DIR="${SRC_DIR:-/data/home/scxi704/run/xhj/data}"
+SRC_DIR="${SRC_DIR:-/mnt/data/wrp/eccv_data/data}"
 REPO_ID="${REPO_ID:-cipual/Urban-CVOGL}"
 REPO_TYPE="${REPO_TYPE:-dataset}"
-WORK_DIR="${WORK_DIR:-/data/home/scxi704/run/xhj/data_hf_pack}"
+WORK_DIR="${WORK_DIR:-/mnt/data/wrp/data_hf_pack}"
 PACK_NAME="${PACK_NAME:-Urban-CVOGL}"
 PART_SIZE="${PART_SIZE:-50G}"   # e.g. 10G / 20G / 50G
 KEEP_PACK="${KEEP_PACK:-1}"     # 1 keep tar parts, 0 remove after upload
 
 # conda env requested by user
-source /data/home/scxi704/run/miniconda3/bin/activate
-conda activate filtre
+source /mnt/data/wrp/miniconda3/bin/activate
+conda activate gageo
 
 mkdir -p "$WORK_DIR"
 PACK_DIR="$WORK_DIR/pack_${PACK_NAME}"

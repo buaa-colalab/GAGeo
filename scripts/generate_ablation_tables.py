@@ -66,7 +66,7 @@ def parse_log_line(line):
 
 def extract_data_from_log(log_file, split_name, prompt_type):
     """从日志文件中提取指定split和prompt的数据"""
-    log_path = Path('/data/home/scxi704/run/eval_logs') / log_file
+    log_path = Path('/mnt/data/wrp/eval_logs') / log_file
     
     if not log_path.exists():
         print(f"Warning: {log_path} not found")
@@ -224,7 +224,7 @@ def generate_table(split_name, prompt_type):
 
 def main():
     """主函数"""
-    output_file = Path('/data/home/scxi704/run/xhj/location_v4/ablation_tables.txt')
+    output_file = Path('/mnt/data/wrp/location_v4/ablation_tables.txt')
     
     # 重定向输出到文件
     import sys

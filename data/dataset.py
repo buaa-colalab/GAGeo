@@ -177,6 +177,7 @@ class CrossViewDataset(Dataset):
         mono_img, mono_point, mono_bbox, mono_mask = self._resize_mono(
             mono_img, mono_point, mono_bbox, mono_mask
         )
+        mono_bbox = self._clip_bbox_xywh(mono_bbox, self.mono_size, self.mono_size)
         
         # Crop卫星图（仅训练模式）
         if self.crop_sat:
@@ -189,6 +190,10 @@ class CrossViewDataset(Dataset):
         else:
             # 验证/测试模式: 图像已经是crop好的，直接使用
             crop_offset = np.array([0, 0], dtype=np.float32)
+            sat_img, sat_bbox, camera_position, sat_mask = self._resize_satellite_eval(
+                sat_img, sat_bbox, camera_position, sat_mask
+            )
+            sat_bbox = self._clip_bbox_xywh(sat_bbox, sat_img.size[0], sat_img.size[1])
         
         # 转换为tensor并归一化
         mono_tensor = self._to_tensor(mono_img)
@@ -256,6 +261,26 @@ class CrossViewDataset(Dataset):
         """Crop 卫星图 mask（与 _crop_satellite 使用相同的 crop_offset）"""
         left, top = int(crop_offset[0]), int(crop_offset[1])
         return mask[top:top+crop_size, left:left+crop_size].astype(np.uint8)
+
+    @staticmethod
+    def _clip_bbox_xywh(bbox: np.ndarray, img_w: int, img_h: int) -> np.ndarray:
+        """Clip an xywh box to the visible image region before normalization."""
+        x, y, w, h = bbox.astype(np.float32)
+        x1 = float(np.clip(x, 0.0, float(img_w)))
+        y1 = float(np.clip(y, 0.0, float(img_h)))
+        x2 = float(np.clip(x + w, 0.0, float(img_w)))
+        y2 = float(np.clip(y + h, 0.0, float(img_h)))
+
+        if x2 <= x1:
+            cx = float(np.clip(x + 0.5 * w, 0.0, float(img_w - 1)))
+            x1 = max(0.0, cx - 0.5)
+            x2 = min(float(img_w), cx + 0.5)
+        if y2 <= y1:
+            cy = float(np.clip(y + 0.5 * h, 0.0, float(img_h - 1)))
+            y1 = max(0.0, cy - 0.5)
+            y2 = min(float(img_h), cy + 0.5)
+
+        return np.array([x1, y1, x2 - x1, y2 - y1], dtype=np.float32)
     
     def _resize_mono(
         self,
@@ -287,6 +312,29 @@ class CrossViewDataset(Dataset):
         adj_bbox = mono_bbox * np.tile(scale, 2)  # [sx, sy, sx, sy]
         
         return resized, adj_point, adj_bbox, resized_mask
+
+    def _resize_satellite_eval(
+        self,
+        sat_img: Image.Image,
+        sat_bbox: np.ndarray,
+        camera_position: np.ndarray,
+        sat_mask: np.ndarray,
+    ) -> Tuple[Image.Image, np.ndarray, np.ndarray, np.ndarray]:
+        """Resize pre-cropped val/test satellite samples to the configured crop size."""
+        W, H = sat_img.size
+        if W == self.crop_size and H == self.crop_size:
+            return sat_img, sat_bbox, camera_position, sat_mask
+
+        resized = sat_img.resize((self.crop_size, self.crop_size), Image.BILINEAR)
+        resized_mask = cv2.resize(
+            sat_mask,
+            (self.crop_size, self.crop_size),
+            interpolation=cv2.INTER_NEAREST,
+        )
+        scale = np.array([self.crop_size / W, self.crop_size / H], dtype=np.float32)
+        adj_bbox = sat_bbox * np.tile(scale, 2)
+        adj_pos = camera_position * scale
+        return resized, adj_bbox, adj_pos, resized_mask
     
     def _crop_satellite(
         self,
@@ -339,6 +387,7 @@ class CrossViewDataset(Dataset):
         offset = np.array([left, top], dtype=np.float32)
         adj_bbox = (sat_bbox - np.concatenate([offset, [0, 0]])) * scale
         adj_pos = (camera_position - offset) * scale
+        adj_bbox = self._clip_bbox_xywh(adj_bbox, self.crop_size, self.crop_size)
         
         return cropped, adj_bbox, adj_pos, offset
     

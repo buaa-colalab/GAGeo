@@ -170,11 +170,22 @@ def get_param_groups(
     # Patterns for "new token" parameters in V2 backbone
     NEW_TOKEN_PATTERNS = (
         'backbone.learnable_queries',
+        'backbone.register_token',
+        'backbone.frame_pos_embed',
         'backbone.intermediate_projs.',
         'backbone.prompt_proj.',
         'prompt_encoder.sparse_proj',
         'prompt_encoder.dense_proj',
     )
+
+    backbone_type = str(getattr(model, "backbone_type", "")).strip().lower()
+    is_2d_cva = backbone_type in {"2d_cva", "cva2d", "vit_b16_cva", "dinov2_g14_cva"}
+    is_dinov2_joint_vit = backbone_type in {
+        "dinov2_joint_vit",
+        "joint_vit",
+        "dinov2_vit",
+        "gageo_dinov2_vit",
+    }
     
     backbone_params = []
     new_token_params = []
@@ -187,6 +198,23 @@ def get_param_groups(
         # Check new-token patterns first (they live inside backbone.*)
         if lr_new_tokens is not None and any(name.startswith(pat) or ('.' + pat) in name for pat in NEW_TOKEN_PATTERNS):
             new_token_params.append(param)
+        # For 2D-CVA ablations, only the visual encoder is pretrained. The
+        # cross-view adapter stack, projection layers, register token and final
+        # projection are randomly initialized and should not be trained with the
+        # tiny backbone LR intended for pretrained weights.
+        elif is_2d_cva and name.startswith('backbone.encoder.'):
+            backbone_params.append(param)
+        elif is_2d_cva and name.startswith('backbone.'):
+            head_params.append(param)
+        elif is_dinov2_joint_vit and (
+            name.startswith('backbone.encoder.')
+            or name.startswith('backbone.decoder.')
+            or name.startswith('backbone.vit_norm.')
+            or name.startswith('backbone.vit_pos_embedding')
+        ):
+            backbone_params.append(param)
+        elif is_dinov2_joint_vit and name.startswith('backbone.'):
+            head_params.append(param)
         elif name.startswith('backbone.') or name.startswith('vggt.'):
             backbone_params.append(param)
         else:

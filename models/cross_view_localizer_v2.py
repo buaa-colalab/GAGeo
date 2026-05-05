@@ -12,6 +12,8 @@ import torch
 import torch.nn as nn
 from typing import Dict, Optional, Tuple, List
 
+from .backbone.cross_view_adapter_2d import CrossViewAdapter2D
+from .backbone.dinov2_joint_vit_backbone import DINOv2JointViTBackbone
 from .backbone.pi3_backbone_v2 import Pi3BackboneV2
 from .backbone import load_pi3_weights
 from .encoder.prompt_encoder import GeometryPromptEncoder, load_sam_prompt_encoder_weights
@@ -66,6 +68,17 @@ class CrossViewLocalizerV2(nn.Module):
         num_mask_tokens: int = 1,
         mask_inject_mode: str = "global_kv",
         use_global_attn_mask: bool = True,
+        backbone_type: str = "pi3",
+        encoder_name: str = "vit_b16",
+        encoder_pretrained: bool = True,
+        encoder_weights: str = "LVD142M",
+        joint_vit_variant: str = None,
+        joint_vit_weights: str = None,
+        adapter_dim: int = 1024,
+        adapter_depth: int = 36,
+        adapter_num_heads: int = 16,
+        use_frame_pos_embed: bool = False,
+        use_spatial_bbox_head: bool = False,
     ):
         super().__init__()
         
@@ -88,18 +101,67 @@ class CrossViewLocalizerV2(nn.Module):
         if self.num_heatmap_queries <= 0:
             raise ValueError(f"num_heatmap_queries must be > 0, got {self.num_heatmap_queries}")
         self.num_learnable_tokens = self.num_bbox_mask_queries + self.num_heatmap_queries
+        self.backbone_type = str(backbone_type).strip().lower()
+        self.use_spatial_bbox_head = bool(use_spatial_bbox_head)
         
-        # ============ 1. Pi3 Backbone V2 ============
-        self.backbone = Pi3BackboneV2(
-            pos_type='rope100',
-            decoder_size=decoder_size,
-            img_size=img_size,
-            patch_size=patch_size,
-            num_learnable_tokens=self.num_learnable_tokens,
-            supervision_layers=self.supervision_layers,
-            mask_inject_mode=mask_inject_mode,
-            use_global_attn_mask=use_global_attn_mask,
-        )
+        # ============ 1. Unified Backbone ============
+        # `pi3` is the original model. The 2D CVA variants preserve the same
+        # cross-view token layout/task-token decoding but swap out Pi3's 3D
+        # pretrained decoder prior for a 2D encoder + randomly initialized
+        # cross-view adapter.
+        if self.backbone_type in {"pi3", "gagéo-pi3", "gageo-pi3"}:
+            self.backbone = Pi3BackboneV2(
+                pos_type='rope100',
+                decoder_size=decoder_size,
+                img_size=img_size,
+                patch_size=patch_size,
+                num_learnable_tokens=self.num_learnable_tokens,
+                supervision_layers=self.supervision_layers,
+                mask_inject_mode=mask_inject_mode,
+                use_global_attn_mask=use_global_attn_mask,
+                use_frame_pos_embed=use_frame_pos_embed,
+            )
+        elif self.backbone_type in {"2d_cva", "cva2d", "vit_b16_cva", "dinov2_g14_cva"}:
+            self.backbone = CrossViewAdapter2D(
+                encoder_name=encoder_name,
+                encoder_pretrained=encoder_pretrained,
+                encoder_weights=encoder_weights,
+                pos_type='rope100',
+                adapter_dim=adapter_dim,
+                adapter_depth=adapter_depth,
+                adapter_num_heads=adapter_num_heads,
+                img_size=img_size,
+                patch_size=patch_size,
+                num_learnable_tokens=self.num_learnable_tokens,
+                supervision_layers=self.supervision_layers,
+                mask_inject_mode=mask_inject_mode,
+                use_global_attn_mask=use_global_attn_mask,
+            )
+        elif self.backbone_type in {
+            "dinov2_joint_vit",
+            "joint_vit",
+            "dinov2_vit",
+            "gageo_dinov2_vit",
+        }:
+            # 2D-GAGeo redesign: keep GAGeo's DINOv2-L encoder, concatenate
+            # cross-view features, then fuse them with pretrained ViT blocks.
+            self.backbone = DINOv2JointViTBackbone(
+                joint_vit_variant=joint_vit_variant or encoder_name,
+                encoder_pretrained=encoder_pretrained,
+                encoder_weights=encoder_weights,
+                joint_vit_weights=joint_vit_weights,
+                img_size=img_size,
+                patch_size=patch_size,
+                num_learnable_tokens=self.num_learnable_tokens,
+                supervision_layers=self.supervision_layers,
+                output_dim=2048,
+                mask_inject_mode=mask_inject_mode,
+            )
+        else:
+            raise ValueError(
+                f"Unsupported backbone_type={backbone_type!r}. "
+                "Use 'pi3', '2d_cva', or 'dinov2_joint_vit'."
+            )
         self.output_dim = self.backbone.output_dim  # 2048 for large
         self.dec_embed_dim = self.backbone.dec_embed_dim  # 1024 for large
         
@@ -124,6 +186,7 @@ class CrossViewLocalizerV2(nn.Module):
         self.bbox_head = BBoxHead(
             hidden_dim=self.output_dim,
             num_classes=1,
+            use_spatial_conditioning=self.use_spatial_bbox_head,
         )
         
         # Mask Head (uses bbox/mask learnable queries + sate spatial features)
@@ -141,8 +204,8 @@ class CrossViewLocalizerV2(nn.Module):
         # Camera Head (uses front + sate patch features)
         self.camera_head = Pi3CameraHead(
             in_dim=self.output_dim,
-            dec_embed_dim=1024,
-            dec_num_heads=16,
+            dec_embed_dim=self.dec_embed_dim,
+            dec_num_heads=max(self.dec_embed_dim // 64, 1),
             out_dim=512,
             depth=5,
             patch_size=patch_size,
@@ -167,6 +230,7 @@ class CrossViewLocalizerV2(nn.Module):
             self.inter_bbox_heads[str(layer_idx)] = BBoxHead(
                 hidden_dim=self.output_dim,
                 num_classes=1,
+                use_spatial_conditioning=self.use_spatial_bbox_head,
             )
             self.inter_mask_heads[str(layer_idx)] = SAMMaskHead(
                 hidden_dim=self.output_dim,
@@ -174,9 +238,14 @@ class CrossViewLocalizerV2(nn.Module):
             )
     
     def _freeze_backbone(self):
-        """Freeze Pi3 backbone (encoder + decoder, but NOT learnable queries or projections)."""
+        """Freeze backbone while keeping GAGeo task tokens/projections trainable."""
         for name, param in self.backbone.named_parameters():
-            if 'learnable_queries' in name or 'intermediate_projs' in name or 'prompt_proj' in name:
+            if (
+                'learnable_queries' in name
+                or 'intermediate_projs' in name
+                or 'prompt_proj' in name
+                or 'frame_pos_embed' in name
+            ):
                 continue  # Keep these trainable
             param.requires_grad = False
     
@@ -261,7 +330,11 @@ class CrossViewLocalizerV2(nn.Module):
         
         # ============ Step 3: Final Task Heads ============
         # BBox prediction
-        bbox_outputs = self.bbox_head(bbox_queries)  # [B, Q_bbox_mask, ...]
+        bbox_outputs = self.bbox_head(
+            bbox_queries,
+            spatial_features=sate_features,
+            spatial_size=(self.num_patches_per_side, self.num_patches_per_side),
+        )  # [B, Q_bbox_mask, ...]
         
         # Mask prediction (SAM-style)
         mask_outputs = self.mask_head(
@@ -304,7 +377,11 @@ class CrossViewLocalizerV2(nn.Module):
             inter_bbox_queries = inter_learn[:, :self.num_bbox_mask_queries]  # [B, Q_bbox_mask, C]
             
             # Intermediate BBox
-            inter_bbox = self.inter_bbox_heads[str(layer_idx)](inter_bbox_queries)
+            inter_bbox = self.inter_bbox_heads[str(layer_idx)](
+                inter_bbox_queries,
+                spatial_features=inter_sate,
+                spatial_size=(self.num_patches_per_side, self.num_patches_per_side),
+            )
             
             # Intermediate Mask
             inter_mask = self.inter_mask_heads[str(layer_idx)](
@@ -454,11 +531,26 @@ def build_cross_view_localizer_v2(
     """
     model = CrossViewLocalizerV2(freeze_backbone=freeze_backbone, **kwargs)
     
-    if pretrained_pi3 is not None:
+    backbone_type = getattr(model, "backbone_type", "pi3")
+    is_pi3_backbone = backbone_type in {"pi3", "gagéo-pi3", "gageo-pi3"}
+    is_dinov2_joint_vit = backbone_type in {
+        "dinov2_joint_vit",
+        "joint_vit",
+        "dinov2_vit",
+        "gageo_dinov2_vit",
+    }
+    if pretrained_pi3 is not None and is_pi3_backbone:
         _load_pi3_weights_v2(model.backbone, pretrained_pi3)
         
         if load_camera_head_weights:
             _load_camera_head_from_pi3(model.camera_head, pretrained_pi3)
+    elif pretrained_pi3 is not None and is_dinov2_joint_vit:
+        model.backbone.load_dinov2_encoder_from_pi3(pretrained_pi3)
+    elif pretrained_pi3 is not None and not is_pi3_backbone:
+        print(
+            f"Skip Pi3 checkpoint loading for backbone_type={model.backbone_type}; "
+            "this backbone uses its own non-Pi3 decoder/fusion weights."
+        )
     
     if sam_weights is not None:
         load_sam_prompt_encoder_weights(model.prompt_encoder, sam_weights)
@@ -493,7 +585,8 @@ def _load_pi3_weights_v2(backbone: Pi3BackboneV2, checkpoint_path: str):
     
     print(f"Loaded Pi3 weights into V2 backbone from {checkpoint_path}")
     print(f"  Loaded keys: {len(filtered)}")
-    # Expected missing: learnable_queries, intermediate_projs, masked_blocks (wrappers)
+    # Expected missing: task tokens/projections, optional frame_pos_embed,
+    # and masked_blocks wrappers that share decoder parameters.
     new_keys = [k for k in missing if not k.startswith('masked_blocks.')]
     if new_keys:
         print(f"  New (uninitialized) keys: {len(new_keys)}")

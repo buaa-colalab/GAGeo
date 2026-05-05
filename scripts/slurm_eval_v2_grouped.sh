@@ -1,88 +1,52 @@
 #!/bin/bash
-#SBATCH --job-name=cvloc_v2_eval
-#SBATCH --output=/data/home/scxi704/run/eval_logs/slurm_v3_eval_%j.out
-#SBATCH --error=/data/home/scxi704/run/eval_logs/slurm_v3_eval_%j.err
-#SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=32
-#SBATCH --gres=gpu:3
-#SBATCH --mem=128G
-#SBATCH --partition=vip_gpu_5090_scxi704
-
-# ============================================
-# SLURM Evaluate Script for Cross-View V2
-# 评估 val + test + unseen_test，按 task/size/shape 分组
-# 并按 prompt 类型(point/bbox/mask)分别评估
-# ============================================
-# Usage:
-#   # 单卡（串行）
-#   sbatch scripts/slurm_eval_v2_grouped.sh <sam_checkpoint> [gpu_ids] [experiment_name] [model_dir]
+# Backward-compatible terminal grouped evaluation wrapper.
 #
-#   # 多卡（并行，建议按 prompt 次数申请）
-#   sbatch --gres=gpu:3 scripts/slurm_eval_v2_grouped.sh <sam_checkpoint> 0,1,2 [experiment_name] [model_dir]
-# Example:
-#   sbatch --gres=gpu:3 scripts/slurm_eval_v2_grouped.sh /data/home/scxi704/run/baseline/CVOS-Code/segment_anything/weights/sam_vit_h_4b8939.pth 0,1,2
-# ============================================
+# This legacy filename now runs directly in the terminal
+# with the `gageo` conda environment and local /mnt/data paths.
 
 set -euo pipefail
 
-ROOT_DIR=${ROOT_DIR:-"/data/home/scxi704/run/xhj"}
-WORKSPACE_NAME=${WORKSPACE_NAME:-"location_v4"}
-WORKSPACE_DIR="${ROOT_DIR}/${WORKSPACE_NAME}"
-RUN_ROOT="$(dirname "$ROOT_DIR")"
-CACHE_ROOT=${CACHE_ROOT:-"${ROOT_DIR}/.cache"}
+ROOT_DIR="${ROOT_DIR:-/mnt/data/wrp}"
+WORKSPACE_NAME="${WORKSPACE_NAME:-location_v4}"
+WORKSPACE_DIR="${WORKSPACE_DIR:-/mnt/data/wrp/location_v4}"
+CONDA_BIN="${CONDA_BIN:-/mnt/data/wrp/miniconda3/bin/conda}"
+CONDA_ENV="${CONDA_ENV:-gageo}"
+CACHE_ROOT="${CACHE_ROOT:-/mnt/data/wrp/.cache}"
 
-SAM_CKPT="${1:-/data/home/scxi704/run/baseline/CVOS-Code/segment_anything/weights/sam_vit_h_4b8939.pth}"
+SAM_CKPT="${1:-/mnt/data/wrp/GaGeo/ckpt/sam2.1_hiera_large.pt}"
 GPU_IDS="${2:-${CUDA_VISIBLE_DEVICES:-0}}"
-EXPRIMENT_NAME="${3:-ablation_4_all_on}"
+EXPRIMENT_NAME="${3:-gageo_pi3}"
 MODEL_DIR="${4:-output_v3/${EXPRIMENT_NAME}}"
-PROMPT_TYPES=(point bbox mask)
-
 CHECKPOINT_NAME="${5:-best}"
 VIEW_SUBSET="${6:-all}"
+PROMPT_TYPES=(point bbox mask)
 
-if [[ -z "$SAM_CKPT" ]]; then
-  echo "[ERROR] Please provide SAM checkpoint path as first argument."
-  echo "Usage: sbatch scripts/slurm_eval_v2_grouped.sh <sam_checkpoint> [gpu_id]"
-  exit 1
-fi
+export ROOT_DIR WORKSPACE_NAME WORKSPACE_DIR
+export HF_HOME="${HF_HOME:-${CACHE_ROOT}/huggingface}"
+export TORCH_HOME="${TORCH_HOME:-${CACHE_ROOT}/torch}"
+export TMPDIR="${TMPDIR:-${CACHE_ROOT}/tmp}"
+export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-${CACHE_ROOT}/triton}"
+export MPLCONFIGDIR="${MPLCONFIGDIR:-${CACHE_ROOT}/matplotlib}"
+mkdir -p "$HF_HOME" "$TORCH_HOME" "$TMPDIR" "$TRITON_CACHE_DIR" "$MPLCONFIGDIR"
 
-# conda env
-source "${RUN_ROOT}/miniconda3/etc/profile.d/conda.sh"
-conda activate filtre
-
-module load cuda
-
-# Cache dirs
-export HF_HOME="${CACHE_ROOT}/huggingface"
-export TORCH_HOME="${CACHE_ROOT}/torch"
-export TMPDIR="${CACHE_ROOT}/tmp"
-export TRITON_CACHE_DIR="${CACHE_ROOT}/triton"
-mkdir -p "$HF_HOME" "$TORCH_HOME" "$TMPDIR" "$TRITON_CACHE_DIR"
-
-cd "$SLURM_SUBMIT_DIR"
-if [[ -d "$WORKSPACE_DIR" ]]; then
-  cd "$WORKSPACE_DIR"
-fi
-mkdir -p logs
-
-
+cd "$WORKSPACE_DIR"
+mkdir -p logs "${MODEL_DIR}"
 
 OUT_JSON="${MODEL_DIR}/eval_grouped_$(date +%Y%m%d_%H%M%S).json"
+TMP_JSON_DIR="${MODEL_DIR}/eval_grouped_parts_manual_$(date +%Y%m%d_%H%M%S)"
+mkdir -p "$TMP_JSON_DIR"
 
 echo "=========================================="
-echo "Cross-View V2 Grouped Evaluation"
+echo "Cross-View grouped evaluation (terminal)"
 echo "=========================================="
-echo "Job ID: $SLURM_JOB_ID"
-echo "Node: $SLURM_NODELIST"
-echo "Allocated CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-N/A}"
-echo "Requested GPU ids: $GPU_IDS"
-echo "SAM checkpoint: $SAM_CKPT"
-echo "Prompt types: point bbox mask"
-echo "Experiment name: ${EXPRIMENT_NAME}"
-echo "Model dir: ${MODEL_DIR}"
-echo "View subset: ${VIEW_SUBSET}"
-echo "Output JSON: $OUT_JSON"
+echo "Workspace    : $WORKSPACE_DIR"
+echo "Experiment   : $EXPRIMENT_NAME"
+echo "Model dir    : $MODEL_DIR"
+echo "Checkpoint   : $CHECKPOINT_NAME"
+echo "SAM ckpt     : $SAM_CKPT"
+echo "GPU ids      : $GPU_IDS"
+echo "View subset  : $VIEW_SUBSET"
+echo "Output JSON  : $OUT_JSON"
 echo "=========================================="
 
 IFS=',' read -r -a GPU_LIST <<< "$GPU_IDS"
@@ -92,11 +56,6 @@ if [[ $NUM_GPUS -lt 1 ]]; then
   exit 1
 fi
 
-TMP_JSON_DIR="${MODEL_DIR}/eval_grouped_parts_${SLURM_JOB_ID:-manual}_$(date +%Y%m%d_%H%M%S)"
-mkdir -p "$TMP_JSON_DIR"
-
-echo "Run mode: ${#PROMPT_TYPES[@]} prompt(s) over $NUM_GPUS GPU(s)"
-
 pids=()
 
 launch_eval() {
@@ -105,9 +64,7 @@ launch_eval() {
   local out_json="$3"
 
   echo "[Launch] prompt=${prompt_type} on GPU ${gpu_id} -> ${out_json}"
-
-  CUDA_VISIBLE_DEVICES="$gpu_id" \
-  "${RUN_ROOT}/miniconda3/bin/conda" run -n filtre --no-capture-output \
+  CUDA_VISIBLE_DEVICES="$gpu_id" "$CONDA_BIN" run -n "$CONDA_ENV" --no-capture-output \
     python "${WORKSPACE_DIR}/evaluate_custom_v2.py" \
       --config "${WORKSPACE_DIR}/${MODEL_DIR}/config.yaml" \
       --checkpoint "${WORKSPACE_DIR}/${MODEL_DIR}/${CHECKPOINT_NAME}" \
@@ -129,40 +86,34 @@ for i in "${!PROMPT_TYPES[@]}"; do
   gpu="${GPU_LIST[$((i % NUM_GPUS))]}"
   prompt_json="$TMP_JSON_DIR/${prompt}.json"
 
-  # 若 prompt 数超过 GPU 数，限流到 NUM_GPUS 并发
   while [[ $(jobs -rp | wc -l) -ge $NUM_GPUS ]]; do
     wait -n
   done
-
   launch_eval "$prompt" "$gpu" "$prompt_json"
 done
 
-echo "Waiting all prompt evaluations to finish ..."
+echo "Waiting for prompt evaluations ..."
 for pid in "${pids[@]}"; do
   wait "$pid"
 done
 
-echo "Merging prompt JSONs -> $OUT_JSON"
-python - <<PY
+"$CONDA_BIN" run -n "$CONDA_ENV" --no-capture-output python - <<PY
 import json
 from pathlib import Path
 
 tmp_dir = Path("${TMP_JSON_DIR}")
 out_path = Path("${OUT_JSON}")
-
 merged = {}
 for jf in sorted(tmp_dir.glob("*.json")):
     with jf.open("r", encoding="utf-8") as f:
         data = json.load(f)
     for split, prompt_dict in data.items():
         merged.setdefault(split, {})
-        for prompt_type, groups in prompt_dict.items():
-            merged[split][prompt_type] = groups
+        merged[split].update(prompt_dict)
 
 with out_path.open("w", encoding="utf-8") as f:
     json.dump(merged, f, indent=2, ensure_ascii=False)
-
 print(f"Merged result saved to: {out_path}")
 PY
 
-echo "Evaluation completed!"
+echo "Evaluation completed."

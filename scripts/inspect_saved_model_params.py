@@ -20,7 +20,7 @@ import os
 import torch
 
 
-ROOT_DIR = os.environ.get("ROOT_DIR", "/data/home/scxi704/run/xhj")
+ROOT_DIR = os.environ.get("ROOT_DIR", "/mnt/data/wrp")
 WORKSPACE_NAME = os.environ.get("WORKSPACE_NAME", "location_v4")
 WORKSPACE_DIR = Path(ROOT_DIR) / WORKSPACE_NAME
 

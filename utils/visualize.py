@@ -8,11 +8,22 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.patches import FancyArrowPatch
 from pathlib import Path
+from PIL import Image
 
 
 def to_numpy_img(img_tensor):
     """Convert tensor to numpy image [H, W, 3]"""
     return img_tensor.cpu().clamp(0, 1).permute(1, 2, 0).numpy()
+
+
+def resize_mask_nearest(mask: np.ndarray, target_hw):
+    """Resize binary/soft mask with nearest-neighbor to align visualization shapes."""
+    target_h, target_w = target_hw
+    if mask.shape[:2] == (target_h, target_w):
+        return mask
+    pil_mask = Image.fromarray(mask.astype(np.float32), mode="F")
+    resized = pil_mask.resize((target_w, target_h), resample=Image.NEAREST)
+    return np.array(resized, dtype=np.float32)
 
 
 def draw_bbox(ax, bbox, img_size, color, linestyle, linewidth, label):
@@ -133,6 +144,8 @@ def visualize_batch_sample(batch, outputs, idx, img_size, save_path, prompt_type
     if gt_mask is not None:
         axes[3].imshow(gt_mask, cmap='Greens', alpha=0.25)
     if pred_mask is not None:
+        if gt_mask is not None and gt_mask.shape != pred_mask.shape:
+            gt_mask = resize_mask_nearest(gt_mask, pred_mask.shape)
         pred_bin = (pred_mask > 0.5).astype(np.uint8)
         axes[3].imshow(pred_bin, cmap='Reds', alpha=0.25)
 

@@ -183,6 +183,7 @@ def load_v3_model(v3_root, cfg, checkpoint, device):
         load_camera_head_weights=False,
         sam_weights=None,
         img_size=dc.get("img_size", 518),
+        patch_size=mc.get("patch_size", 14),
         decoder_size=mc.get("decoder_size", "large"),
         num_learnable_tokens=mc.get("num_learnable_tokens", 2),
         supervision_layers=mc.get("supervision_layers", [4, 11, 17]),
@@ -195,6 +196,16 @@ def load_v3_model(v3_root, cfg, checkpoint, device):
         contrastive_temperature=mc.get("contrastive_temperature", 0.07),
         sam_embed_dim=mc.get("sam_embed_dim", 256),
         num_mask_tokens=mc.get("num_mask_tokens", 1),
+        backbone_type=mc.get("backbone_type", "pi3"),
+        encoder_name=mc.get("encoder_name", "vit_b16"),
+        encoder_pretrained=False,
+        encoder_weights=mc.get("encoder_weights", "LVD142M"),
+        joint_vit_variant=mc.get("joint_vit_variant"),
+        joint_vit_weights=mc.get("joint_vit_weights"),
+        adapter_dim=mc.get("adapter_dim", 1024),
+        adapter_depth=mc.get("adapter_depth", 36),
+        adapter_num_heads=mc.get("adapter_num_heads", 16),
+        use_frame_pos_embed=mc.get("use_frame_pos_embed", False),
     )
     ckpt = resolve_checkpoint(Path(checkpoint).resolve())
     sd = extract_state_dict(torch.load(str(ckpt), map_location="cpu"))

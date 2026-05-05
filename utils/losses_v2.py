@@ -13,7 +13,27 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Tuple, Dict, List, Optional
 
-from .box_ops import box_cxcywh_to_xyxy, generalized_box_iou
+from .box_ops import box_cxcywh_to_xyxy, box_iou, generalized_box_iou
+
+
+def _sanitize_pred_boxes(boxes: torch.Tensor) -> torch.Tensor:
+    """Keep predicted cxcywh boxes finite and inside the normalized image range."""
+    return torch.nan_to_num(boxes, nan=0.5, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
+
+
+def _sanitize_target_boxes(boxes: torch.Tensor, name: str = "sat_bbox") -> torch.Tensor:
+    """Validate target cxcywh boxes instead of silently hiding dataset bugs."""
+    boxes = torch.nan_to_num(boxes, nan=0.5, posinf=1.0, neginf=0.0)
+    min_val = float(boxes.min().detach().cpu())
+    max_val = float(boxes.max().detach().cpu())
+    min_wh = float(boxes[..., 2:].min().detach().cpu())
+    if min_val < -1e-4 or max_val > 1.0 + 1e-4 or min_wh <= 0.0:
+        raise ValueError(
+            f"Invalid {name}: expected normalized cxcywh boxes in [0, 1] with positive w/h; "
+            f"got min={min_val:.6f}, max={max_val:.6f}, min_wh={min_wh:.6f}. "
+            "Check dataset crop/resize bbox clipping."
+        )
+    return boxes.clamp(0.0, 1.0)
 
 
 class HungarianMatcher(nn.Module):
@@ -46,9 +66,8 @@ class HungarianMatcher(nn.Module):
         for b in range(B):
             pred_b = outputs['pred_boxes'][b]  # [N, 4]
             tgt_b = tgt_boxes[b:b+1]  # [1, 4]
-            # Defensive sanitization: avoid NaN/Inf breaking GIoU assertion.
-            pred_b = torch.nan_to_num(pred_b, nan=0.5, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
-            tgt_b = torch.nan_to_num(tgt_b, nan=0.5, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
+            pred_b = _sanitize_pred_boxes(pred_b)
+            tgt_b = _sanitize_target_boxes(tgt_b)
             logits_b = torch.nan_to_num(outputs['class_logits'][b], nan=0.0, posinf=30.0, neginf=-30.0).sigmoid()
             
             cost_class = -logits_b[:, 0:1]
@@ -197,8 +216,8 @@ class DETRCriterionV2(nn.Module):
         
         if indices is None:
             indices = self.matcher(outputs, targets)
-        pred_boxes = torch.nan_to_num(outputs['pred_boxes'], nan=0.5, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
-        target_boxes = torch.nan_to_num(targets['sat_bbox'], nan=0.5, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
+        pred_boxes = _sanitize_pred_boxes(outputs['pred_boxes'])
+        target_boxes = _sanitize_target_boxes(targets['sat_bbox'])
         B = pred_boxes.shape[0]
         
         src_idx = torch.cat([src for (src, _) in indices])
@@ -224,7 +243,15 @@ class DETRCriterionV2(nn.Module):
         
         # IoU metric
         with torch.no_grad():
-            losses['bbox_iou'] = torch.diag(giou_matrix).clamp(min=0).mean().detach()
+            iou_matrix, _ = box_iou(src_xyxy, tgt_xyxy)
+            losses['bbox_iou'] = torch.diag(iou_matrix).mean().detach()
+            losses['bbox_giou'] = torch.diag(giou_matrix).mean().detach()
+            losses['bbox_center_l1'] = F.l1_loss(src_boxes[:, :2], tgt_boxes[:, :2], reduction='none').sum(-1).mean().detach()
+            losses['bbox_size_l1'] = F.l1_loss(src_boxes[:, 2:], tgt_boxes[:, 2:], reduction='none').sum(-1).mean().detach()
+            losses['bbox_pred_w_mean'] = src_boxes[:, 2].mean().detach()
+            losses['bbox_pred_h_mean'] = src_boxes[:, 3].mean().detach()
+            losses['bbox_tgt_w_mean'] = tgt_boxes[:, 2].mean().detach()
+            losses['bbox_tgt_h_mean'] = tgt_boxes[:, 3].mean().detach()
         
         # Classification loss
         if 'class_logits' in outputs and self.weight_class > 0:

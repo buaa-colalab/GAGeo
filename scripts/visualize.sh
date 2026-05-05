@@ -5,7 +5,7 @@
 set -e
 
 # Workspace path config
-ROOT_DIR="${ROOT_DIR:-/data/home/scxi704/run/xhj}"
+ROOT_DIR="${ROOT_DIR:-/mnt/data/wrp}"
 WORKSPACE_NAME="${WORKSPACE_NAME:-location_v4}"
 WORKSPACE_DIR="${ROOT_DIR}/${WORKSPACE_NAME}"
 

@@ -1,17 +1,8 @@
 #!/bin/bash
-#SBATCH --job-name=vis_cam_prompt
-#SBATCH --output=/data/home/scxi704/run/eval_logs/slurm_vis_cam_prompt_%j.out
-#SBATCH --error=/data/home/scxi704/run/eval_logs/slurm_vis_cam_prompt_%j.err
-#SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=16
-#SBATCH --gres=gpu:1
-#SBATCH --mem=64G
-#SBATCH --partition=vip_gpu_5090_scxi704
 
 set -euo pipefail
 
-ROOT_DIR=${ROOT_DIR:-"/data/home/scxi704/run/xhj"}
+ROOT_DIR=${ROOT_DIR:-"/mnt/data/wrp"}
 WORKSPACE_NAME=${WORKSPACE_NAME:-"location_v4"}
 WORKSPACE_DIR="${ROOT_DIR}/${WORKSPACE_NAME}"
 
@@ -37,14 +28,14 @@ echo " Num samples: ${NUM_SAMPLES}"
 echo " Output dir : ${OUTPUT_DIR}"
 echo "============================================================"
 
-"${ROOT_DIR}/../miniconda3/bin/conda" run -n filtre --no-capture-output \
+"${CONDA_BIN:-/mnt/data/wrp/miniconda3/bin/conda}" run -n gageo --no-capture-output \
   python "${WORKSPACE_DIR}/visualize_prompt_camera.py" \
     --config "${CONFIG}" \
     --checkpoint "${CHECKPOINT}" \
     --split "${SPLIT}" \
     --num_samples "${NUM_SAMPLES}" \
     --output_dir "${OUTPUT_DIR}" \
-    --gpu "${GPU_ID}" \
+    --gpu 0 \
     --view_subsets drone_to_satellite ground_to_satellite \
     --heatmap_alpha 0.55 \
     --gt_sigma 0.05 \

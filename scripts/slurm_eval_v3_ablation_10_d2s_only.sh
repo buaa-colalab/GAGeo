@@ -1,29 +1,14 @@
 #!/bin/bash
-#SBATCH --job-name=cvloc_eval_ab10_d2s
-#SBATCH --output=/data/home/scxi704/run/eval_logs/slurm_v3_eval_ab10_d2s_%j.out
-#SBATCH --error=/data/home/scxi704/run/eval_logs/slurm_v3_eval_ab10_d2s_%j.err
-#SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=32
-#SBATCH --gres=gpu:3
-#SBATCH --mem=128G
-#SBATCH --partition=vip_gpu_5090_scxi704
+# Terminal grouped evaluation wrapper for ablation_10_d2s_only.
 
 set -euo pipefail
 
-ROOT_DIR=${ROOT_DIR:-"/data/home/scxi704/run/xhj"}
-WORKSPACE_NAME=${WORKSPACE_NAME:-"location_v4"}
-WORKSPACE_DIR="${ROOT_DIR}/${WORKSPACE_NAME}"
+WORKSPACE_DIR="${WORKSPACE_DIR:-/mnt/data/wrp/location_v4}"
+SAM_CKPT="${1:-/mnt/data/wrp/GaGeo/ckpt/sam2.1_hiera_large.pt}"
+GPU_IDS="${2:-${CUDA_VISIBLE_DEVICES:-0}}"
+EXPERIMENT_NAME="${3:-ablation_10_d2s_only}"
+MODEL_DIR="${4:-output_v3/ablation_10_d2s_only}"
+CHECKPOINT_NAME="${5:-best}"
+VIEW_SUBSET="${6:-all}"
 
-SAM_CKPT="${1:-}"
-GPU_IDS="${2:-${CUDA_VISIBLE_DEVICES:-0,1,2}}"
-EXPRIMENT_NAME="${3:-ablation_10_d2s_only}"
-
-bash "${WORKSPACE_DIR}/scripts/slurm_eval_v2_grouped.sh" \
-  "$SAM_CKPT" \
-  "$GPU_IDS" \
-  "$EXPRIMENT_NAME" \
-  "output_v3/${EXPRIMENT_NAME}" \
-  "best" \
-  "drone_to_satellite"
-
+"${WORKSPACE_DIR}/scripts/slurm_eval_v2_grouped.sh"   "$SAM_CKPT"   "$GPU_IDS"   "$EXPERIMENT_NAME"   "$MODEL_DIR"   "$CHECKPOINT_NAME"   "$VIEW_SUBSET"

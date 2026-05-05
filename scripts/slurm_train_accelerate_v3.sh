@@ -1,69 +1,25 @@
 #!/bin/bash
-#SBATCH --job-name=cvloc_v3_${1:-default}
-#SBATCH --output=logs/slurm_v3_${1:-default}_%j.out
-#SBATCH --error=logs/slurm_v3_${1:-default}_%j.err
-#SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=64
-#SBATCH --gres=gpu:8
-#SBATCH --mem=512G
-#SBATCH --partition=vip_gpu_5090_scxi704
+# Backward-compatible terminal training wrapper.
+# Accepts either: <experiment_name> <config_path> [extra args...]
+# or the historical form: <config_path> [extra args...].
 
-# ============================================
-# SLURM Accelerate Training Script for Cross-View Localization V3
-# Usage: sbatch scripts/slurm_train_accelerate_v3.sh [experiment_name] [config_file]
-# Example: sbatch scripts/slurm_train_accelerate_v3.sh configs/default_v3.yaml
-# ============================================
+set -euo pipefail
 
-set -e
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_CONFIG="/mnt/data/wrp/location_v4/configs/default_v3.yaml"
 
-# Workspace path config
-ROOT_DIR="${ROOT_DIR:-/data/home/scxi704/run/xhj}"
-WORKSPACE_NAME="${WORKSPACE_NAME:-location_v4}"
-WORKSPACE_DIR="${ROOT_DIR}/${WORKSPACE_NAME}"
-export ROOT_DIR WORKSPACE_NAME WORKSPACE_DIR
+if [[ $# -ge 2 && "$2" == *.yaml ]]; then
+  EXPERIMENT_NAME="$1"
+  CONFIG_PATH="$2"
+  shift 2
+elif [[ $# -ge 1 && "$1" == *.yaml ]]; then
+  CONFIG_PATH="$1"
+  EXPERIMENT_NAME="${EXPRIMENT_NAME:-$(basename "${CONFIG_PATH%.yaml}")}"
+  shift 1
+else
+  EXPERIMENT_NAME="${1:-default_v3}"
+  CONFIG_PATH="${2:-$DEFAULT_CONFIG}"
+  shift $(( $# >= 2 ? 2 : $# ))
+fi
 
-# Conda env: filtre
-source ~/run/miniconda3/etc/profile.d/conda.sh
-conda activate filtre
-
-# CUDA module
-module load cuda
-
-# Cache dirs (avoid home quota pressure)
-export HF_HOME="${ROOT_DIR}/.cache/huggingface"
-export TORCH_HOME="${ROOT_DIR}/.cache/torch"
-export TMPDIR="${ROOT_DIR}/.cache/tmp"
-export TRITON_CACHE_DIR="${ROOT_DIR}/.cache/triton"
-mkdir -p "$HF_HOME" "$TORCH_HOME" "$TMPDIR" "$TRITON_CACHE_DIR"
-
-# Configuration
-EXPRIMENT_NAME="${1:-default}"
-export EXPRIMENT_NAME
-TRAINING_CONFIG=${2:-"${WORKSPACE_DIR}/configs/default_v3.yaml"}
-ACCELERATE_CONFIG="${WORKSPACE_DIR}/configs/accelerate_deepspeed_zero2.yaml"
-NUM_GPUS=${SLURM_GPUS_ON_NODE:-1}
-EXTRA_ARGS=("${@:3}")
-
-echo "=========================================="
-echo "SLURM Accelerate Training (V3)"
-echo "=========================================="
-echo "Job ID: $SLURM_JOB_ID"
-echo "Node: $SLURM_NODELIST"
-echo "Training Config: $TRAINING_CONFIG"
-echo "Extra Args: ${EXTRA_ARGS[*]}"
-echo "GPUs: $NUM_GPUS"
-echo "Accelerate Config: $ACCELERATE_CONFIG"
-echo "Conda Env: filtre"
-echo "=========================================="
-
-cd "$WORKSPACE_DIR"
-mkdir -p logs
-
-srun accelerate launch \
-    --config_file "$ACCELERATE_CONFIG" \
-    "${WORKSPACE_DIR}/train_detr_v2.py" \
-    --config "$TRAINING_CONFIG" \
-    "${EXTRA_ARGS[@]}"
-
-echo "Training completed!"
+"${SCRIPT_DIR}/train_gageo_terminal.sh" "$EXPERIMENT_NAME" "$CONFIG_PATH" "$@"

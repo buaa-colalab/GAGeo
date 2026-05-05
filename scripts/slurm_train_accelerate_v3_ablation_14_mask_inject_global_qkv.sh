@@ -1,31 +1,13 @@
 #!/bin/bash
-#SBATCH --job-name=cvloc_v3_ab14_mqkv
-#SBATCH --output=logs/slurm_v3_ab14_mqkv_%j.out
-#SBATCH --error=logs/slurm_v3_ab14_mqkv_%j.err
-#SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=64
-#SBATCH --gres=gpu:8
-#SBATCH --mem=512G
-#SBATCH --partition=vip_gpu_5090_scxi704
+# Terminal wrapper for ablation_14_mask_inject_global_qkv. This keeps the old filename but runs locally.
 
-set -e
+set -euo pipefail
 
-ROOT_DIR="${ROOT_DIR:-/data/home/scxi704/run/xhj}"
-WORKSPACE_NAME="${WORKSPACE_NAME:-location_v4}"
-WORKSPACE_DIR="${ROOT_DIR}/${WORKSPACE_NAME}"
-
-TRAINING_CONFIG=${1:-"${WORKSPACE_DIR}/configs/default_v3.yaml"}
+WORKSPACE_DIR="${WORKSPACE_DIR:-/mnt/data/wrp/location_v4}"
+TRAINING_CONFIG="${1:-${WORKSPACE_DIR}/configs/default_v3.yaml}"
+shift $(( $# >= 1 ? 1 : 0 ))
+EXTRA_ARGS=("$@")
+EXPERIMENT_NAME="ablation_14_mask_inject_global_qkv"
 OUTPUT_DIR="${WORKSPACE_DIR}/output_v3/ablation_14_mask_inject_global_qkv"
 
-EXPRIMENT_NAME="ablation_14_mask_inject_global_qkv"
-
-bash "${WORKSPACE_DIR}/scripts/slurm_train_accelerate_v3.sh" \
-  "$EXPRIMENT_NAME" \
-  "$TRAINING_CONFIG" \
-  --output_dir "$OUTPUT_DIR" \
-  --use_deep_supervision true \
-  --use_contrastive_loss true \
-  --use_rot_pos_supervision true \
-  --mask_inject_mode global_qkv \
-  --use_global_attn_mask true
+"${WORKSPACE_DIR}/scripts/train_gageo_terminal.sh"   "$EXPERIMENT_NAME"   "$TRAINING_CONFIG"   --output_dir "$OUTPUT_DIR"   "--use_deep_supervision" "true" "--use_contrastive_loss" "true" "--use_rot_pos_supervision" "true" "--mask_inject_mode" "global_qkv" "--use_global_attn_mask" "true"   "${EXTRA_ARGS[@]}"
