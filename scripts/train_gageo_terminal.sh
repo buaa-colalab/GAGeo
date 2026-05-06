@@ -25,6 +25,7 @@ EXPERIMENT_NAME="${1:?Usage: scripts/train_gageo_terminal.sh <experiment_name> <
 TRAINING_CONFIG="${2:?Usage: scripts/train_gageo_terminal.sh <experiment_name> <config_path> [extra train args...]}"
 shift 2
 EXTRA_ARGS=("$@")
+EXTRA_ARG_COUNT="$#"
 DEFAULT_OUTPUT_ROOT="${DEFAULT_OUTPUT_ROOT:-${WORKSPACE_DIR}/output_v3}"
 RUN_OUTPUT_DIR="${RUN_OUTPUT_DIR:-}"
 
@@ -134,7 +135,7 @@ run_tool_in_env() {
 
 get_output_dir_override() {
   local idx=0
-  local total="${#EXTRA_ARGS[@]}"
+  local total="$EXTRA_ARG_COUNT"
   while [[ "$idx" -lt "$total" ]]; do
     if [[ "${EXTRA_ARGS[$idx]}" == "--output_dir" ]]; then
       if [[ $((idx + 1)) -ge "$total" ]]; then
@@ -158,12 +159,22 @@ OUTPUT_DIR_OVERRIDE="$(get_output_dir_override || true)"
 if [[ -n "$OUTPUT_DIR_OVERRIDE" ]]; then
   RUN_OUTPUT_DIR="$OUTPUT_DIR_OVERRIDE"
 elif [[ -n "$RUN_OUTPUT_DIR" ]]; then
-  EXTRA_ARGS=(--output_dir "$RUN_OUTPUT_DIR" "${EXTRA_ARGS[@]}")
+  if [[ "$EXTRA_ARG_COUNT" -gt 0 ]]; then
+    EXTRA_ARGS=(--output_dir "$RUN_OUTPUT_DIR" "${EXTRA_ARGS[@]}")
+  else
+    EXTRA_ARGS=(--output_dir "$RUN_OUTPUT_DIR")
+  fi
+  EXTRA_ARG_COUNT="${#EXTRA_ARGS[@]}"
 else
   RUN_OUTPUT_DIR="$(get_config_output_dir "$TRAINING_CONFIG")"
   if [[ -z "$RUN_OUTPUT_DIR" ]]; then
     RUN_OUTPUT_DIR="${DEFAULT_OUTPUT_ROOT}/${EXPERIMENT_NAME}"
-    EXTRA_ARGS=(--output_dir "$RUN_OUTPUT_DIR" "${EXTRA_ARGS[@]}")
+    if [[ "$EXTRA_ARG_COUNT" -gt 0 ]]; then
+      EXTRA_ARGS=(--output_dir "$RUN_OUTPUT_DIR" "${EXTRA_ARGS[@]}")
+    else
+      EXTRA_ARGS=(--output_dir "$RUN_OUTPUT_DIR")
+    fi
+    EXTRA_ARG_COUNT="${#EXTRA_ARGS[@]}"
   fi
 fi
 LOG_DIR="${WORKSPACE_DIR}/logs"
@@ -182,8 +193,12 @@ exec > >(tee -a "$RUN_LOG_FILE") 2>&1
 count_visible_gpus() {
   if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
     local visible_devices="${CUDA_VISIBLE_DEVICES//[[:space:]]/}"
-    local commas="${visible_devices//[^,]/}"
-    echo $(( ${#commas} + 1 ))
+    if [[ -z "$visible_devices" ]]; then
+      echo "1"
+      return
+    fi
+    local without_commas="${visible_devices//,/}"
+    echo $(( ${#visible_devices} - ${#without_commas} + 1 ))
     return
   fi
   if command -v nvidia-smi >/dev/null 2>&1; then
@@ -273,7 +288,11 @@ if [[ -n "${WANDB_API_KEY:-}" ]]; then
 else
   echo "W&B auth     : not configured (training will auto-disable W&B logging)"
 fi
-echo "Extra args   : ${EXTRA_ARGS[*]:-<none>}"
+if [[ "$EXTRA_ARG_COUNT" -gt 0 ]]; then
+  echo "Extra args   : ${EXTRA_ARGS[*]}"
+else
+  echo "Extra args   : <none>"
+fi
 echo "CUDA devices : ${CUDA_VISIBLE_DEVICES:-all visible}"
 echo "GPUs         : $VISIBLE_GPU_COUNT visible, $NUM_PROCESSES process(es)"
 echo "Launch mode  : $DISTRIBUTED_BACKEND"
@@ -286,27 +305,48 @@ if [[ "$DISTRIBUTED_BACKEND" == "accelerate" ]]; then
   ACCELERATE_CONFIG="${ACCELERATE_CONFIG:-${WORKSPACE_DIR}/configs/accelerate_deepspeed_zero2.yaml}"
   echo "Prefetching pretrained weights into local cache ..."
   PYTHONPATH="$WORKSPACE_DIR" MPLCONFIGDIR="$MPLCONFIGDIR" prefetch_pretrained_weights "$TRAINING_CONFIG"
-  run_tool_in_env accelerate launch \
-      --config_file "$ACCELERATE_CONFIG" \
-      --num_processes "$NUM_PROCESSES" \
-      "${WORKSPACE_DIR}/train_detr_v2.py" \
-      --config "$TRAINING_CONFIG" \
-      "${EXTRA_ARGS[@]}"
+  if [[ "$EXTRA_ARG_COUNT" -gt 0 ]]; then
+    run_tool_in_env accelerate launch \
+        --config_file "$ACCELERATE_CONFIG" \
+        --num_processes "$NUM_PROCESSES" \
+        "${WORKSPACE_DIR}/train_detr_v2.py" \
+        --config "$TRAINING_CONFIG" \
+        "${EXTRA_ARGS[@]}"
+  else
+    run_tool_in_env accelerate launch \
+        --config_file "$ACCELERATE_CONFIG" \
+        --num_processes "$NUM_PROCESSES" \
+        "${WORKSPACE_DIR}/train_detr_v2.py" \
+        --config "$TRAINING_CONFIG"
+  fi
 elif [[ "$DISTRIBUTED_BACKEND" == "ddp" ]]; then
   DDP_MASTER_PORT="$(pick_master_port "$MASTER_PORT")"
   echo "Prefetching pretrained weights into local cache ..."
   PYTHONPATH="$WORKSPACE_DIR" MPLCONFIGDIR="$MPLCONFIGDIR" prefetch_pretrained_weights "$TRAINING_CONFIG"
   echo "DDP master   : 127.0.0.1:${DDP_MASTER_PORT}"
-  run_tool_in_env torchrun \
-      --nproc_per_node "$NUM_PROCESSES" \
-      --master_port "$DDP_MASTER_PORT" \
-      "${WORKSPACE_DIR}/train_detr_v2_ddp.py" \
-      --config "$TRAINING_CONFIG" \
-      "${EXTRA_ARGS[@]}"
+  if [[ "$EXTRA_ARG_COUNT" -gt 0 ]]; then
+    run_tool_in_env torchrun \
+        --nproc_per_node "$NUM_PROCESSES" \
+        --master_port "$DDP_MASTER_PORT" \
+        "${WORKSPACE_DIR}/train_detr_v2_ddp.py" \
+        --config "$TRAINING_CONFIG" \
+        "${EXTRA_ARGS[@]}"
+  else
+    run_tool_in_env torchrun \
+        --nproc_per_node "$NUM_PROCESSES" \
+        --master_port "$DDP_MASTER_PORT" \
+        "${WORKSPACE_DIR}/train_detr_v2_ddp.py" \
+        --config "$TRAINING_CONFIG"
+  fi
 else
-  run_python_in_env "${WORKSPACE_DIR}/train_detr_v2.py" \
-      --config "$TRAINING_CONFIG" \
-      "${EXTRA_ARGS[@]}"
+  if [[ "$EXTRA_ARG_COUNT" -gt 0 ]]; then
+    run_python_in_env "${WORKSPACE_DIR}/train_detr_v2.py" \
+        --config "$TRAINING_CONFIG" \
+        "${EXTRA_ARGS[@]}"
+  else
+    run_python_in_env "${WORKSPACE_DIR}/train_detr_v2.py" \
+        --config "$TRAINING_CONFIG"
+  fi
 fi
 
 echo "Training completed."
