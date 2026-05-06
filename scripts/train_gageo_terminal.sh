@@ -48,9 +48,11 @@ has_uv_runtime() {
 
 resolve_env_manager() {
   case "$ENV_MANAGER" in
-    uv|conda) echo "$ENV_MANAGER" ;;
+    uv|conda|current) echo "$ENV_MANAGER" ;;
     auto)
-      if has_uv_runtime; then
+      if [[ -n "${VIRTUAL_ENV:-}" ]] || command -v python >/dev/null 2>&1; then
+        echo "current"
+      elif has_uv_runtime; then
         echo "uv"
       else
         echo "conda"
@@ -66,7 +68,9 @@ resolve_env_manager() {
 RUNTIME_MANAGER="$(resolve_env_manager)"
 
 run_python_in_env() {
-  if [[ "$RUNTIME_MANAGER" == "uv" ]]; then
+  if [[ "$RUNTIME_MANAGER" == "current" ]]; then
+    python "$@"
+  elif [[ "$RUNTIME_MANAGER" == "uv" ]]; then
     "$UV_BIN" run --project "$UV_PROJECT_DIR" python "$@"
   else
     "$CONDA_BIN" run -n "$CONDA_ENV" --no-capture-output python "$@"
@@ -76,7 +80,9 @@ run_python_in_env() {
 run_tool_in_env() {
   local tool="$1"
   shift
-  if [[ "$RUNTIME_MANAGER" == "uv" ]]; then
+  if [[ "$RUNTIME_MANAGER" == "current" ]]; then
+    "$tool" "$@"
+  elif [[ "$RUNTIME_MANAGER" == "uv" ]]; then
     "$UV_BIN" run --project "$UV_PROJECT_DIR" "$tool" "$@"
   else
     "$CONDA_BIN" run -n "$CONDA_ENV" --no-capture-output "$tool" "$@"
