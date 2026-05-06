@@ -67,9 +67,30 @@ resolve_env_manager() {
 
 RUNTIME_MANAGER="$(resolve_env_manager)"
 
+CURRENT_PYTHON_BIN="${CURRENT_PYTHON_BIN:-}"
+CURRENT_TORCHRUN_BIN="${CURRENT_TORCHRUN_BIN:-}"
+if [[ -z "$CURRENT_PYTHON_BIN" ]]; then
+  if [[ -n "${VIRTUAL_ENV:-}" && -x "${VIRTUAL_ENV}/bin/python" ]]; then
+    CURRENT_PYTHON_BIN="${VIRTUAL_ENV}/bin/python"
+  elif [[ -x "${WORKSPACE_DIR}/.venv/bin/python" ]]; then
+    CURRENT_PYTHON_BIN="${WORKSPACE_DIR}/.venv/bin/python"
+  else
+    CURRENT_PYTHON_BIN="$(command -v python3 || command -v python)"
+  fi
+fi
+if [[ -z "$CURRENT_TORCHRUN_BIN" ]]; then
+  if [[ -n "${VIRTUAL_ENV:-}" && -x "${VIRTUAL_ENV}/bin/torchrun" ]]; then
+    CURRENT_TORCHRUN_BIN="${VIRTUAL_ENV}/bin/torchrun"
+  elif [[ -x "${WORKSPACE_DIR}/.venv/bin/torchrun" ]]; then
+    CURRENT_TORCHRUN_BIN="${WORKSPACE_DIR}/.venv/bin/torchrun"
+  else
+    CURRENT_TORCHRUN_BIN="$(command -v torchrun || true)"
+  fi
+fi
+
 run_python_in_env() {
   if [[ "$RUNTIME_MANAGER" == "current" ]]; then
-    python "$@"
+    "$CURRENT_PYTHON_BIN" "$@"
   elif [[ "$RUNTIME_MANAGER" == "uv" ]]; then
     "$UV_BIN" run --project "$UV_PROJECT_DIR" python "$@"
   else
@@ -81,7 +102,11 @@ run_tool_in_env() {
   local tool="$1"
   shift
   if [[ "$RUNTIME_MANAGER" == "current" ]]; then
-    "$tool" "$@"
+    if [[ "$tool" == "torchrun" && -n "$CURRENT_TORCHRUN_BIN" ]]; then
+      "$CURRENT_TORCHRUN_BIN" "$@"
+    else
+      "$tool" "$@"
+    fi
   elif [[ "$RUNTIME_MANAGER" == "uv" ]]; then
     "$UV_BIN" run --project "$UV_PROJECT_DIR" "$tool" "$@"
   else

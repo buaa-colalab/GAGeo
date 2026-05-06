@@ -5,8 +5,6 @@ This is a standalone helper instead of `python - <<'PY'` so remote job
 launchers do not need to preserve stdin for shell heredocs.
 """
 
-from __future__ import annotations
-
 import os
 import sys
 from pathlib import Path
@@ -14,7 +12,7 @@ from pathlib import Path
 import yaml
 
 
-def main() -> int:
+def main():
     if len(sys.argv) != 2:
         print("Usage: resolve_gageo_output_dir.py <config_path>", file=sys.stderr)
         return 1
@@ -31,10 +29,10 @@ def main() -> int:
         "JSON_ROOT": os.environ.get("JSON_ROOT", "/mnt/data/wrp/eccv_data/data/json"),
     }
     defaults["WORKSPACE_DIR"] = os.environ.get(
-        "WORKSPACE_DIR", f"{defaults['ROOT_DIR']}/{defaults['WORKSPACE_NAME']}"
+        "WORKSPACE_DIR", "{}/{}".format(defaults["ROOT_DIR"], defaults["WORKSPACE_NAME"])
     )
     defaults["OUTPUT_ROOT"] = os.environ.get(
-        "OUTPUT_ROOT", f"{defaults['WORKSPACE_DIR']}/output_v3"
+        "OUTPUT_ROOT", "{}/output_v3".format(defaults["WORKSPACE_DIR"])
     )
 
     value = str((cfg.get("checkpoint") or {}).get("output_dir") or "").strip()

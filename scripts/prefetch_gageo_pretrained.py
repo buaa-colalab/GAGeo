@@ -4,15 +4,13 @@
 Kept as a real script so distributed job wrappers do not rely on heredoc stdin.
 """
 
-from __future__ import annotations
-
 import sys
 from pathlib import Path
 
 import yaml
 
 
-def main() -> int:
+def main():
     if len(sys.argv) != 2:
         print("Usage: prefetch_gageo_pretrained.py <config_path>", file=sys.stderr)
         return 1
@@ -61,7 +59,7 @@ def main() -> int:
 
         model_base_name = "dinov2_vitg14"
         model_full_name = "dinov2_vitg14"
-        url = _DINOV2_BASE_URL + f"/{model_base_name}/{model_full_name}_pretrain.pth"
+        url = _DINOV2_BASE_URL + "/{}/{}_pretrain.pth".format(model_base_name, model_full_name)
         torch.hub.load_state_dict_from_url(url, map_location="cpu")
 
     return 0
