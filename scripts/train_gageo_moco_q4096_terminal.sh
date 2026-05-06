@@ -1,6 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
+ulimit -l unlimited || echo "[warn] ulimit -l unlimited failed; continue with current memlock limit"
+
 WORKSPACE_DIR="/mnt/dolphinfs/ssd_pool/docker/user/hadoop-nlp-sh02/hadoop-aipnlp/EVA/yangheqing/workspace/location_v4"
 WORKSPACE_ROOT="/mnt/dolphinfs/ssd_pool/docker/user/hadoop-nlp-sh02/hadoop-aipnlp/EVA/yangheqing/workspace"
 VENV_DIR="${WORKSPACE_DIR}/.venv"

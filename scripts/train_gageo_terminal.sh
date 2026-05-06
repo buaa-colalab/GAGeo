@@ -8,6 +8,8 @@
 
 set -euo pipefail
 
+ulimit -l unlimited || echo "[warn] ulimit -l unlimited failed; continue with current memlock limit"
+
 WORKSPACE_DIR="${WORKSPACE_DIR:-/mnt/data/wrp/location_v4}"
 CONDA_BIN="${CONDA_BIN:-/mnt/data/wrp/miniconda3/bin/conda}"
 CONDA_ENV="${CONDA_ENV:-gageo}"
