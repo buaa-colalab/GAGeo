@@ -21,6 +21,7 @@ dependencies = [
     "opencv-python>=4.13.0.92",
     "albumentations>=2.0.8",
     "shapely>=2.1.2",
+    "wandb>=0.26.1",
 ]
 
 [[tool.uv.index]]

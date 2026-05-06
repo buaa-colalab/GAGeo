@@ -15,14 +15,9 @@ UV_BIN="${UV_BIN:-uv}"
 UV_PROJECT_DIR="${UV_PROJECT_DIR:-${WORKSPACE_DIR}}"
 ENV_MANAGER="${ENV_MANAGER:-auto}"
 CACHE_ROOT="${CACHE_ROOT:-/mnt/data/wrp/.cache}"
-START_TENSORBOARD="${START_TENSORBOARD:-1}"
-TENSORBOARD_HOST="${TENSORBOARD_HOST:-0.0.0.0}"
-TENSORBOARD_PORT="${TENSORBOARD_PORT:-6006}"
 MASTER_PORT="${MASTER_PORT:-29500}"
-USER_TENSORBOARD_ROOT="${TENSORBOARD_ROOT:-}"
-USER_TENSORBOARD_LOGDIR="${TENSORBOARD_LOGDIR:-}"
-TB_PID=""
-TB_PORT=""
+WANDB_PROJECT="${WANDB_PROJECT:-location_v4}"
+WANDB_API_KEY_FILE="${WANDB_API_KEY_FILE:-}"
 
 EXPERIMENT_NAME="${1:?Usage: scripts/train_gageo_terminal.sh <experiment_name> <config_path> [extra train args...]}"
 TRAINING_CONFIG="${2:?Usage: scripts/train_gageo_terminal.sh <experiment_name> <config_path> [extra train args...]}"
@@ -148,9 +143,18 @@ else
     EXTRA_ARGS=(--output_dir "$RUN_OUTPUT_DIR" "${EXTRA_ARGS[@]}")
   fi
 fi
-TENSORBOARD_ROOT="${USER_TENSORBOARD_ROOT:-${RUN_OUTPUT_DIR}/tensorboard}"
-TENSORBOARD_LOGDIR="${USER_TENSORBOARD_LOGDIR:-${TENSORBOARD_ROOT}}"
-TENSORBOARD_PID_FILE="${RUN_OUTPUT_DIR}/tensorboard.pid"
+LOG_DIR="${WORKSPACE_DIR}/logs"
+RUN_LOG_FILE="${LOG_DIR}/${EXPERIMENT_NAME}.log"
+WANDB_DIR="${WANDB_DIR:-${RUN_OUTPUT_DIR}/wandb}"
+export WANDB_PROJECT
+export WANDB_NAME="${WANDB_NAME:-${EXPERIMENT_NAME}}"
+export WANDB_DIR
+if [[ -z "${WANDB_API_KEY:-}" && -n "$WANDB_API_KEY_FILE" && -f "$WANDB_API_KEY_FILE" ]]; then
+  export WANDB_API_KEY="$(tr -d '\r\n' < "$WANDB_API_KEY_FILE")"
+fi
+mkdir -p "$LOG_DIR" "$WANDB_DIR"
+: > "$RUN_LOG_FILE"
+exec > >(tee -a "$RUN_LOG_FILE") 2>&1
 
 count_visible_gpus() {
   if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
@@ -219,22 +223,6 @@ elif encoder_name in {"dinov2_g14", "dinov2-g14", "dinov2_vitg14", "dinov2_vitg1
 PY
 }
 
-pick_tensorboard_port() {
-  local port="$1"
-  while true; do
-    if command -v ss >/dev/null 2>&1; then
-      if ! ss -ltn "( sport = :$port )" | grep -q ":$port"; then
-        echo "$port"
-        return
-      fi
-    else
-      echo "$port"
-      return
-    fi
-    port=$((port + 1))
-  done
-}
-
 pick_master_port() {
   local port="$1"
   while true; do
@@ -249,47 +237,6 @@ pick_master_port() {
     fi
     port=$((port + 1))
   done
-}
-
-cleanup_tensorboard_server() {
-  if [[ -f "$TENSORBOARD_PID_FILE" ]]; then
-    rm -f "$TENSORBOARD_PID_FILE"
-  fi
-
-  if [[ -z "$TB_PID" ]]; then
-    return
-  fi
-
-  if kill -0 "$TB_PID" >/dev/null 2>&1; then
-    echo "Stopping TensorBoard (pid=${TB_PID}${TB_PORT:+, port=${TB_PORT}})"
-    kill "$TB_PID" >/dev/null 2>&1 || true
-    wait "$TB_PID" 2>/dev/null || true
-  fi
-}
-
-trap cleanup_tensorboard_server EXIT INT TERM
-
-start_tensorboard_server() {
-  if [[ "$START_TENSORBOARD" == "0" || "$START_TENSORBOARD" == "false" ]]; then
-    return
-  fi
-
-  local tb_port
-  tb_port="$(pick_tensorboard_port "$TENSORBOARD_PORT")"
-  mkdir -p "$(dirname "$TENSORBOARD_LOGDIR")" logs
-
-  run_tool_in_env tensorboard \
-      --logdir "$TENSORBOARD_LOGDIR" \
-      --host "$TENSORBOARD_HOST" \
-      --port "$tb_port" \
-      > "logs/tensorboard_${EXPERIMENT_NAME}_${tb_port}.log" 2>&1 &
-
-  local tb_pid=$!
-  TB_PID="$tb_pid"
-  TB_PORT="$tb_port"
-  printf '%s\n' "$TB_PID" > "$TENSORBOARD_PID_FILE"
-  echo "TensorBoard  : http://127.0.0.1:${tb_port}"
-  echo "TensorBoard  : pid=${tb_pid}, logdir=${TENSORBOARD_LOGDIR}"
 }
 
 VISIBLE_GPU_COUNT="$(count_visible_gpus)"
@@ -334,14 +281,20 @@ else
   echo "Conda env    : $CONDA_ENV"
 fi
 echo "Output dir   : $RUN_OUTPUT_DIR"
+echo "Run log      : $RUN_LOG_FILE"
+echo "W&B project  : $WANDB_PROJECT"
+echo "W&B name     : ${WANDB_NAME}"
+echo "W&B dir      : $WANDB_DIR"
+if [[ -n "${WANDB_API_KEY:-}" ]]; then
+  echo "W&B auth     : configured"
+else
+  echo "W&B auth     : not configured (training will auto-disable W&B logging)"
+fi
 echo "Extra args   : ${EXTRA_ARGS[*]:-<none>}"
 echo "CUDA devices : ${CUDA_VISIBLE_DEVICES:-all visible}"
 echo "GPUs         : $VISIBLE_GPU_COUNT visible, $NUM_PROCESSES process(es)"
 echo "Launch mode  : $DISTRIBUTED_BACKEND"
-echo "TB logdir    : $TENSORBOARD_LOGDIR"
 echo "=========================================="
-
-start_tensorboard_server
 
 if [[ "$DISTRIBUTED_BACKEND" == "accelerate" ]]; then
   ACCELERATE_CONFIG="${ACCELERATE_CONFIG:-${WORKSPACE_DIR}/configs/accelerate_deepspeed_zero2.yaml}"

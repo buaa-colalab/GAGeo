@@ -6,7 +6,7 @@ usergroup = hadoop-aipnlp
 queue = root.shxs_training_cluster.hadoop-aipnlp.h800_eval
 
 [roles]
-worker.script = bash -c 'export WORKTREE_ROOT="${WORKTREE_ROOT:-/mnt/dolphinfs/ssd_pool/docker/user/hadoop-nlp-sh02/hadoop-aipnlp/EVA/yangheqing/workspace/CVOS-Code}" && export CHECKPOINT_DIR="${CHECKPOINT_DIR:-${WORKTREE_ROOT}/../location_v4/checkpoints_offline}" && export JSON_ROOT="${JSON_ROOT:-${WORKTREE_ROOT}/../CMA-Loc/CMA-Loc}" && export DATA_ROOT="${DATA_ROOT:-${WORKTREE_ROOT}/../CMA-Loc/data}" && export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}" && export NUM_PROCESSES="${NUM_PROCESSES:-8}" && export MASTER_PORT="${MASTER_PORT:-29611}" && export OUTPUT_ROOT="${TROGEO_OUTPUT_DIR:-${WORKTREE_ROOT}/outputs}" && cd "${WORKTREE_ROOT}" && source "${WORKTREE_ROOT}/../location_v4/.venv/bin/activate" &&  ENV_MANAGER=uv bash scripts/train_trogeo_pi3_offline_terminal.sh'
+worker.script = bash -c 'export WORKTREE_ROOT=/mnt/dolphinfs/ssd_pool/docker/user/hadoop-nlp-sh02/hadoop-aipnlp/EVA/yangheqing/workspace/CVOS-Code && export CHECKPOINT_DIR=/mnt/dolphinfs/ssd_pool/docker/user/hadoop-nlp-sh02/hadoop-aipnlp/EVA/yangheqing/workspace/location_v4/checkpoints_offline && export JSON_ROOT=/mnt/dolphinfs/ssd_pool/docker/user/hadoop-nlp-sh02/hadoop-aipnlp/EVA/yangheqing/workspace/CMA-Loc/CMA-Loc && export DATA_ROOT=/mnt/dolphinfs/ssd_pool/docker/user/hadoop-nlp-sh02/hadoop-aipnlp/EVA/yangheqing/workspace/CMA-Loc/data && export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 && export NUM_PROCESSES=8 && export MASTER_PORT=29611 && export TROGEO_OUTPUT_DIR=/mnt/dolphinfs/ssd_pool/docker/user/hadoop-nlp-sh02/hadoop-aipnlp/EVA/yangheqing/workspace/CVOS-Code/outputs && export http_proxy=http://10.217.142.137:8080 && export https_proxy=http://10.217.142.137:8080 && export HTTP_PROXY=http://10.217.142.137:8080 && export HTTPS_PROXY=http://10.217.142.137:8080 && cd /mnt/dolphinfs/ssd_pool/docker/user/hadoop-nlp-sh02/hadoop-aipnlp/EVA/yangheqing/workspace/CVOS-Code && source /mnt/dolphinfs/ssd_pool/docker/user/hadoop-nlp-sh02/hadoop-aipnlp/EVA/yangheqing/workspace/location_v4/.venv/bin/activate && ENV_MANAGER=uv bash scripts/train_trogeo_pi3_offline_terminal.sh'
 workers = 1
 worker.memory = 1800000
 worker.vcore = 184
@@ -19,7 +19,6 @@ am.vcore = 4
 
 [docker]
 afo.docker.image.name = registry-offlinebiz.sankuai.com/custom_prod/com.sankuai.data.hadoop.gpu/aipnlp/training_cuda12.6_py310_glibc2.32_torch2.8.0_fla2.8.3_re_vllm0.11.0_sglang_0.4.10_stable_086804f7:v1.0.4
-
 [tensorboard]
 with.tensor.board = false
 
@@ -56,7 +55,7 @@ project.name = trogeo_pi3
 afo.role.worker.not.node_name = sh02-data-k8s-gpu-h800-node1981.mt,shxs-data-k8s-node0191.mt,sh02-data-k8s-gpu-h800-node0598.mt,sh02-data-k8s-gpu-h800-node0380.mt
 afo.app.support.engine.failover = true
 afo.role.worker.not.nccl_not_ready = true
-afo.role.worker.task.attempt.max.retry = 1
+afo.role.worker.task.attempt.max.retry = 8
 afo.use.nic.down.new.strategy = true
 afo.role.worker.env.NCCL_DEBUG = INFO
 afo.role.worker.env.NCCL_SOCKET_IFNAME = ^lo,docker0

@@ -30,6 +30,12 @@ from utils import (
     DETRCriterionV2,
 )
 
+try:
+    import wandb  # noqa: F401
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train Cross-View Localizer V3')
@@ -483,10 +489,26 @@ def main():
     output_dir = Path(cfg['checkpoint']['output_dir'])
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    use_wandb = cfg['logging'].get('use_wandb', cfg['logging'].get('use_tensorboard', True))
+    if use_wandb and not WANDB_AVAILABLE:
+        use_wandb = False
+        print("[warn] wandb is not installed; W&B logging is disabled.")
+    wandb_mode = os.environ.get("WANDB_MODE", "").strip().lower()
+    wandb_api_key = os.environ.get("WANDB_API_KEY", "").strip()
+    if use_wandb and not wandb_api_key and wandb_mode not in {"offline", "dryrun", "disabled"}:
+        use_wandb = False
+        print("[warn] WANDB_API_KEY is not configured. W&B logging is disabled.")
+    if use_wandb and wandb_api_key:
+        try:
+            import wandb
+            wandb.login(key=wandb_api_key, relogin=True)
+        except Exception as exc:
+            use_wandb = False
+            print(f"[warn] wandb login failed: {exc}. W&B logging is disabled.")
     accelerator = Accelerator(
         gradient_accumulation_steps=gradient_accumulation_steps,
         mixed_precision=mixed_precision,
-        log_with="tensorboard" if cfg['logging'].get('use_tensorboard', True) else None,
+        log_with="wandb" if use_wandb else None,
         project_dir=str(output_dir),
     )
 
@@ -507,18 +529,30 @@ def main():
         )
         accelerator.print(f"Dataset subset -> train_subset={train_subset}, val_subset={val_subset}")
 
-    if accelerator.is_main_process and cfg['logging'].get('use_tensorboard', True):
-        experiment_name = os.environ.get("EXPRIMENT_NAME", "default")
-        accelerator.init_trackers(
-            project_name=f"tensorboard/{experiment_name}",
-            config={
-                "batch_size": cfg['training']['batch_size'],
-                "num_epochs": cfg['training']['num_epochs'],
-                "lr_backbone": cfg['training']['lr_backbone'],
-                "lr_new_tokens": cfg['training'].get('lr_new_tokens', 5e-4),
-                "lr_heads": cfg['training']['lr_heads'],
-            },
-        )
+    if accelerator.is_main_process and use_wandb:
+        experiment_name = os.environ.get("WANDB_NAME", os.environ.get("EXPRIMENT_NAME", "default"))
+        wandb_project = cfg['logging'].get('wandb_project', os.environ.get("WANDB_PROJECT", "location_v4"))
+        wandb_dir = os.environ.get("WANDB_DIR", str(output_dir / "wandb"))
+        try:
+            accelerator.init_trackers(
+                project_name=wandb_project,
+                config={
+                    "batch_size": cfg['training']['batch_size'],
+                    "num_epochs": cfg['training']['num_epochs'],
+                    "lr_backbone": cfg['training']['lr_backbone'],
+                    "lr_new_tokens": cfg['training'].get('lr_new_tokens', 5e-4),
+                    "lr_heads": cfg['training']['lr_heads'],
+                },
+                init_kwargs={
+                    "wandb": {
+                        "name": experiment_name,
+                        "dir": wandb_dir,
+                        **({"mode": wandb_mode} if wandb_mode in {"offline", "dryrun", "disabled"} else {}),
+                    }
+                },
+            )
+        except Exception as exc:
+            print(f"[warn] wandb tracker init failed: {exc}. Continue without W&B.")
 
     # Create datasets
     train_dataset = CrossViewDataset(

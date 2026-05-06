@@ -17,6 +17,7 @@ import argparse
 import contextlib
 import math
 from pathlib import Path
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -26,7 +27,6 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
-from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from transformers import get_scheduler
 
@@ -35,6 +35,11 @@ from models import build_cross_view_localizer_v2
 from utils import DETRCriterionV2, get_param_groups
 from utils.prompt_utils import prepare_random_prompt, prepare_single_prompt
 from utils.visualize_ddp import visualize_validation_samples_ddp
+
+try:
+    import wandb
+except ImportError:
+    wandb = None
 
 
 def parse_args():
@@ -198,6 +203,47 @@ def reduce_mean_scalar(value: float, device: torch.device, world_size: int) -> f
     return tensor.item()
 
 
+def maybe_init_wandb(cfg: dict, output_dir: Path, experiment_name: str, is_main_process: bool):
+    """Create a W&B run on rank0 only."""
+    enabled = cfg["logging"].get("use_wandb", cfg["logging"].get("use_tensorboard", True))
+    if not enabled or not is_main_process:
+        return None
+    if wandb is None:
+        print("[warn] wandb is not installed; W&B logging is disabled.")
+        return None
+
+    wandb_dir = Path(os.environ.get("WANDB_DIR", str(output_dir / "wandb")))
+    wandb_dir.mkdir(parents=True, exist_ok=True)
+    wandb_project = cfg["logging"].get("wandb_project", os.environ.get("WANDB_PROJECT", "location_v4"))
+    wandb_name = os.environ.get("WANDB_NAME", experiment_name)
+    wandb_mode = os.environ.get("WANDB_MODE", "").strip().lower()
+    api_key = os.environ.get("WANDB_API_KEY", "").strip()
+
+    if api_key:
+        try:
+            wandb.login(key=api_key, relogin=True)
+        except Exception as exc:
+            print(f"[warn] wandb login failed: {exc}. W&B logging is disabled.")
+            return None
+    elif wandb_mode not in {"offline", "dryrun", "disabled"}:
+        print("[warn] WANDB_API_KEY is not configured. W&B logging is disabled.")
+        return None
+
+    try:
+        init_kwargs = dict(project=wandb_project, name=wandb_name, dir=str(wandb_dir), config=cfg)
+        if wandb_mode in {"offline", "dryrun", "disabled"}:
+            init_kwargs["mode"] = wandb_mode
+        return wandb.init(**init_kwargs)
+    except Exception as exc:
+        print(f"[warn] wandb init failed: {exc}. W&B logging is disabled.")
+        return None
+
+
+def wandb_log(run, metrics: dict[str, float], step: int | None = None) -> None:
+    if run is not None:
+        run.log(metrics, step=step)
+
+
 def save_checkpoint(path: Path, model: nn.Module, optimizer, scheduler, scaler, epoch: int, best_loss: float, global_step: int, val_losses: dict | None = None):
     model_to_save = model.module if isinstance(model, DDP) else model
     state = {
@@ -226,7 +272,7 @@ def train_one_epoch(
     epoch: int,
     cfg: dict,
     global_step: int,
-    writer: SummaryWriter | None,
+    writer,
     is_main_process: bool,
     world_size: int,
     is_distributed: bool,
@@ -355,8 +401,7 @@ def train_one_epoch(
                 if len(optimizer.param_groups) > 2:
                     log_dict["train_step/lr_heads"] = optimizer.param_groups[2]["lr"]
                 log_dict["train_step/epoch"] = epoch
-                for key, value in log_dict.items():
-                    writer.add_scalar(key, value, global_step)
+                wandb_log(writer, log_dict, step=global_step)
                 running_losses = {}
                 running_count = 0
 
@@ -373,8 +418,7 @@ def train_one_epoch(
         avg = value / denom
         avg_losses[key] = reduce_mean_scalar(avg, device, world_size)
     if writer is not None:
-        for key, value in avg_losses.items():
-            writer.add_scalar(f"train/{key}", value, epoch)
+        wandb_log(writer, {f"train/{key}": value for key, value in avg_losses.items()}, step=epoch)
     return avg_losses, global_step
 
 
@@ -386,7 +430,7 @@ def validate(
     device: torch.device,
     cfg: dict,
     epoch: int,
-    writer: SummaryWriter | None,
+    writer,
     is_main_process: bool,
     world_size: int,
 ):
@@ -484,8 +528,7 @@ def validate(
         avg_losses["mask_iou_avg"] = (metrics_tensor[4] / metrics_tensor[5]).item()
 
     if writer is not None:
-        for key, value in avg_losses.items():
-            writer.add_scalar(f"val/{key}", value, epoch)
+        wandb_log(writer, {f"val/{key}": value for key, value in avg_losses.items()}, step=epoch)
     return avg_losses
 
 
@@ -566,16 +609,8 @@ def main():
         )
         print(f"Dataset subset -> train_subset={train_subset}, val_subset={val_subset}")
 
-    tb_enabled = cfg["logging"].get("use_tensorboard", True)
-    writer = None
-    if is_main_process and tb_enabled:
-        experiment_name = os.environ.get("EXPRIMENT_NAME", "default")
-        tb_logdir = os.environ.get("TENSORBOARD_LOGDIR")
-        if not tb_logdir:
-            tb_logdir = str(output_dir / "tensorboard" / experiment_name)
-        Path(tb_logdir).mkdir(parents=True, exist_ok=True)
-        writer = SummaryWriter(log_dir=tb_logdir)
-        print(f"TensorBoard writer: {tb_logdir}")
+    experiment_name = os.environ.get("WANDB_NAME", os.environ.get("EXPRIMENT_NAME", "default"))
+    writer = maybe_init_wandb(cfg, output_dir, experiment_name, is_main_process)
 
     train_dataset = CrossViewDataset(
         json_path=cfg["data"]["train_json"],
@@ -897,7 +932,7 @@ def main():
             dist.barrier()
 
     if writer is not None:
-        writer.close()
+        writer.finish()
     if is_main_process:
         print(f"\nTraining completed! Best loss: {best_loss:.4f}")
     cleanup_distributed()

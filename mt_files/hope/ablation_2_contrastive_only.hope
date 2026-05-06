@@ -21,7 +21,6 @@ am.vcore = 4
 afo.docker.image.name = registry-offlinebiz.sankuai.com/custom_prod/com.sankuai.data.hadoop.gpu/aipnlp/training_cuda12.6_py310_glibc2.32_torch2.8.0_fla2.8.3_re_vllm0.11.0_sglang_0.4.10_stable_086804f7:v1.0.4
 [tensorboard]
 with.tensor.board = false
-
 [data]
 afo.data.prefetch = false
 engine.log.monitor.start_test = false

@@ -132,7 +132,9 @@ checkpoint:
 logging:
   log_freq: 50
   val_freq: 1
-  use_tensorboard: true
+  use_wandb: true
+  wandb_project: "location_v4"
+  use_tensorboard: false
   
   visualize: true
   vis_samples: 10
