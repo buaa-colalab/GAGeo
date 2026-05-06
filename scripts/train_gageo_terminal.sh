@@ -88,6 +88,24 @@ if [[ -z "$CURRENT_TORCHRUN_BIN" ]]; then
   fi
 fi
 
+validate_current_runtime() {
+  if [[ "$RUNTIME_MANAGER" != "current" ]]; then
+    return
+  fi
+  if [[ ! -x "$CURRENT_PYTHON_BIN" ]]; then
+    echo "Missing executable Python for current runtime: $CURRENT_PYTHON_BIN" >&2
+    exit 1
+  fi
+  "$CURRENT_PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 8) else 1)' || {
+    echo "Python >= 3.8 is required, got: $($CURRENT_PYTHON_BIN --version 2>&1)" >&2
+    exit 1
+  }
+  if [[ "${NUM_PROCESSES:-1}" != "1" && ! -x "$CURRENT_TORCHRUN_BIN" ]]; then
+    echo "Missing executable torchrun for current runtime: $CURRENT_TORCHRUN_BIN" >&2
+    exit 1
+  fi
+}
+
 run_python_in_env() {
   if [[ "$RUNTIME_MANAGER" == "current" ]]; then
     "$CURRENT_PYTHON_BIN" "$@"
@@ -163,8 +181,9 @@ exec > >(tee -a "$RUN_LOG_FILE") 2>&1
 
 count_visible_gpus() {
   if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
-    IFS=',' read -r -a gpu_list <<< "${CUDA_VISIBLE_DEVICES}"
-    echo "${#gpu_list[@]}"
+    local visible_devices="${CUDA_VISIBLE_DEVICES//[[:space:]]/}"
+    local commas="${visible_devices//[^,]/}"
+    echo $(( ${#commas} + 1 ))
     return
   fi
   if command -v nvidia-smi >/dev/null 2>&1; then
@@ -197,6 +216,7 @@ pick_master_port() {
 
 VISIBLE_GPU_COUNT="$(count_visible_gpus)"
 NUM_PROCESSES="${NUM_PROCESSES:-$VISIBLE_GPU_COUNT}"
+validate_current_runtime
 USE_ACCELERATE_FLAG="${USE_ACCELERATE:-auto}"
 DISTRIBUTED_BACKEND="${DISTRIBUTED_BACKEND:-}"
 if [[ -z "$DISTRIBUTED_BACKEND" ]]; then
@@ -231,6 +251,13 @@ echo "Workspace    : $WORKSPACE_DIR"
 echo "Experiment   : $EXPERIMENT_NAME"
 echo "Config       : $TRAINING_CONFIG"
 echo "Runtime      : $RUNTIME_MANAGER"
+if [[ "$RUNTIME_MANAGER" == "current" ]]; then
+  echo "Python       : $CURRENT_PYTHON_BIN"
+  echo "Python ver   : $("$CURRENT_PYTHON_BIN" --version 2>&1)"
+  if [[ -n "$CURRENT_TORCHRUN_BIN" ]]; then
+    echo "Torchrun     : $CURRENT_TORCHRUN_BIN"
+  fi
+fi
 if [[ "$RUNTIME_MANAGER" == "uv" ]]; then
   echo "UV project   : $UV_PROJECT_DIR"
 else
@@ -251,6 +278,9 @@ echo "CUDA devices : ${CUDA_VISIBLE_DEVICES:-all visible}"
 echo "GPUs         : $VISIBLE_GPU_COUNT visible, $NUM_PROCESSES process(es)"
 echo "Launch mode  : $DISTRIBUTED_BACKEND"
 echo "=========================================="
+
+echo "Running preflight checks ..."
+run_python_in_env "${WORKSPACE_DIR}/scripts/preflight_gageo_config.py" "$TRAINING_CONFIG"
 
 if [[ "$DISTRIBUTED_BACKEND" == "accelerate" ]]; then
   ACCELERATE_CONFIG="${ACCELERATE_CONFIG:-${WORKSPACE_DIR}/configs/accelerate_deepspeed_zero2.yaml}"
