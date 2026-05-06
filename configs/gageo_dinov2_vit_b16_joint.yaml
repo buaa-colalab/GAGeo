@@ -8,7 +8,7 @@ data:
   data_root: "${DATA_ROOT}"
   img_size: 518
   crop_size: 518
-  num_workers: 24
+  num_workers: 3
   train_subset: all
   val_subset: all
   train_direction: 'mono_to_sat'
