@@ -14,7 +14,9 @@ CONDA_ENV="${CONDA_ENV:-gageo}"
 UV_BIN="${UV_BIN:-uv}"
 UV_PROJECT_DIR="${UV_PROJECT_DIR:-${WORKSPACE_DIR}}"
 ENV_MANAGER="${ENV_MANAGER:-auto}"
-CACHE_ROOT="${CACHE_ROOT:-/mnt/data/wrp/.cache}"
+# Keep runtime caches inside the workspace by default so remote schedulers do
+# not depend on a writable /mnt/data mount.
+CACHE_ROOT="${CACHE_ROOT:-${WORKSPACE_DIR}/.cache}"
 MASTER_PORT="${MASTER_PORT:-29500}"
 WANDB_PROJECT="${WANDB_PROJECT:-location_v4}"
 WANDB_API_KEY_FILE="${WANDB_API_KEY_FILE:-}"
@@ -26,7 +28,7 @@ EXTRA_ARGS=("$@")
 DEFAULT_OUTPUT_ROOT="${DEFAULT_OUTPUT_ROOT:-${WORKSPACE_DIR}/output_v3}"
 RUN_OUTPUT_DIR="${RUN_OUTPUT_DIR:-}"
 
-export ROOT_DIR="${ROOT_DIR:-/mnt/data/wrp}"
+export ROOT_DIR="${ROOT_DIR:-${WORKSPACE_DIR%/location_v4}}"
 export WORKSPACE_NAME="${WORKSPACE_NAME:-location_v4}"
 export WORKSPACE_DIR
 export EXPRIMENT_NAME="$EXPERIMENT_NAME"
