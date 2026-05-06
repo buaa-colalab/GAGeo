@@ -108,35 +108,7 @@ get_output_dir_override() {
 
 get_config_output_dir() {
   local config_path="$1"
-  run_python_in_env - <<'PY' "$config_path"
-import os
-import sys
-from pathlib import Path
-
-import yaml
-
-cfg_path = Path(sys.argv[1])
-with cfg_path.open("r", encoding="utf-8") as f:
-    cfg = yaml.safe_load(f) or {}
-
-defaults = {
-    "ROOT_DIR": os.environ.get("ROOT_DIR", "/mnt/data/wrp"),
-    "WORKSPACE_NAME": os.environ.get("WORKSPACE_NAME", "location_v4"),
-    "CHECKPOINT_DIR": os.environ.get("CHECKPOINT_DIR", "/mnt/data/wrp/checkpoints_offline"),
-    "DATA_ROOT": os.environ.get("DATA_ROOT", "/mnt/data/wrp/eccv_data/data/urban"),
-    "JSON_ROOT": os.environ.get("JSON_ROOT", "/mnt/data/wrp/eccv_data/data/json"),
-}
-defaults["WORKSPACE_DIR"] = os.environ.get(
-    "WORKSPACE_DIR", f"{defaults['ROOT_DIR']}/{defaults['WORKSPACE_NAME']}"
-)
-defaults["OUTPUT_ROOT"] = os.environ.get("OUTPUT_ROOT", f"{defaults['WORKSPACE_DIR']}/output_v3")
-
-value = str((cfg.get("checkpoint") or {}).get("output_dir") or "").strip()
-value = os.path.expandvars(value)
-for key, default in defaults.items():
-    value = value.replace("${%s}" % key, default)
-print(value)
-PY
+  run_python_in_env "${WORKSPACE_DIR}/scripts/resolve_gageo_output_dir.py" "$config_path"
 }
 
 OUTPUT_DIR_OVERRIDE="$(get_output_dir_override || true)"
@@ -179,56 +151,7 @@ count_visible_gpus() {
 
 prefetch_pretrained_weights() {
   local config_path="$1"
-  run_python_in_env - <<'PY' "$config_path"
-import sys
-from pathlib import Path
-
-import yaml
-
-cfg_path = Path(sys.argv[1])
-with cfg_path.open("r", encoding="utf-8") as f:
-    cfg = yaml.safe_load(f)
-
-mc = cfg.get("model", {})
-if not mc.get("encoder_pretrained", True):
-    raise SystemExit(0)
-
-encoder_name = str(mc.get("encoder_name", "")).strip().lower()
-
-backbone_type = str(mc.get("backbone_type", "")).strip().lower()
-joint_vit_variant = str(mc.get("joint_vit_variant", encoder_name)).strip().lower()
-encoder_weights = str(mc.get("encoder_weights", "")).strip()
-joint_vit_weights = str(mc.get("joint_vit_weights", "") or "").strip()
-
-if backbone_type in {"dinov2_joint_vit", "joint_vit", "dinov2_vit", "gageo_dinov2_vit"}:
-    if joint_vit_weights:
-        raise SystemExit(0)
-    import torchvision.models as tv_models
-    if joint_vit_variant in {"vit_h14", "vit-h14", "vit_h_14", "h14"}:
-        weights = getattr(
-            tv_models.ViT_H_14_Weights,
-            encoder_weights or "IMAGENET1K_SWAG_E2E_V1",
-            tv_models.ViT_H_14_Weights.IMAGENET1K_SWAG_E2E_V1,
-        )
-        weights.get_state_dict(progress=True)
-    else:
-        weights = getattr(
-            tv_models.ViT_B_16_Weights,
-            encoder_weights or "IMAGENET1K_V1",
-            tv_models.ViT_B_16_Weights.IMAGENET1K_V1,
-        )
-        weights.get_state_dict(progress=True)
-elif encoder_name in {"vit_b16", "vit-b16", "vit_b_16", "imagenet_vit_b16"}:
-    import torchvision.models as tv_models
-    tv_models.ViT_B_16_Weights.IMAGENET1K_V1.get_state_dict(progress=True)
-elif encoder_name in {"dinov2_g14", "dinov2-g14", "dinov2_vitg14", "dinov2_vitg14_reg"}:
-    from models.dinov2.hub.utils import _DINOV2_BASE_URL
-    import torch
-    model_base_name = "dinov2_vitg14"
-    model_full_name = "dinov2_vitg14"
-    url = _DINOV2_BASE_URL + f"/{model_base_name}/{model_full_name}_pretrain.pth"
-    torch.hub.load_state_dict_from_url(url, map_location="cpu")
-PY
+  run_python_in_env "${WORKSPACE_DIR}/scripts/prefetch_gageo_pretrained.py" "$config_path"
 }
 
 pick_master_port() {
