@@ -57,7 +57,7 @@ model:
   use_global_attn_mask: false
 
 training:
-  batch_size: 64
+  batch_size: 48
   gradient_accumulation_steps: 8
   num_epochs: 30
   lr_backbone: 5.0e-6
