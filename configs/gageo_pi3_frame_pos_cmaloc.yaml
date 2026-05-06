@@ -7,7 +7,7 @@ data:
   data_root: "${DATA_ROOT}"
   img_size: 518
   crop_size: 518
-  num_workers: 24
+  num_workers: 16
   train_subset: all
   val_subset: all
   train_direction: 'mono_to_sat'
@@ -54,7 +54,8 @@ model:
   use_frame_pos_embed: true
 
 training:
-  batch_size: 48
+  # Per-GPU micro-batch. Keep this aligned with the main GAGeo Pi3 setting.
+  batch_size: 8
   gradient_accumulation_steps: 4
   num_epochs: 30
 
