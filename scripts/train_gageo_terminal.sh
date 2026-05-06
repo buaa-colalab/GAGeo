@@ -69,7 +69,6 @@ resolve_env_manager() {
 RUNTIME_MANAGER="$(resolve_env_manager)"
 
 CURRENT_PYTHON_BIN="${CURRENT_PYTHON_BIN:-}"
-CURRENT_TORCHRUN_BIN="${CURRENT_TORCHRUN_BIN:-}"
 if [[ -z "$CURRENT_PYTHON_BIN" ]]; then
   if [[ -n "${VIRTUAL_ENV:-}" && -x "${VIRTUAL_ENV}/bin/python" ]]; then
     CURRENT_PYTHON_BIN="${VIRTUAL_ENV}/bin/python"
@@ -77,15 +76,6 @@ if [[ -z "$CURRENT_PYTHON_BIN" ]]; then
     CURRENT_PYTHON_BIN="${WORKSPACE_DIR}/.venv/bin/python"
   else
     CURRENT_PYTHON_BIN="$(command -v python3 || command -v python)"
-  fi
-fi
-if [[ -z "$CURRENT_TORCHRUN_BIN" ]]; then
-  if [[ -n "${VIRTUAL_ENV:-}" && -x "${VIRTUAL_ENV}/bin/torchrun" ]]; then
-    CURRENT_TORCHRUN_BIN="${VIRTUAL_ENV}/bin/torchrun"
-  elif [[ -x "${WORKSPACE_DIR}/.venv/bin/torchrun" ]]; then
-    CURRENT_TORCHRUN_BIN="${WORKSPACE_DIR}/.venv/bin/torchrun"
-  else
-    CURRENT_TORCHRUN_BIN="$(command -v torchrun || true)"
   fi
 fi
 
@@ -101,10 +91,6 @@ validate_current_runtime() {
     echo "Python >= 3.8 is required, got: $($CURRENT_PYTHON_BIN --version 2>&1)" >&2
     exit 1
   }
-  if [[ "${NUM_PROCESSES:-1}" != "1" && ! -x "$CURRENT_TORCHRUN_BIN" ]]; then
-    echo "Missing executable torchrun for current runtime: $CURRENT_TORCHRUN_BIN" >&2
-    exit 1
-  fi
 }
 
 run_python_in_env() {
@@ -121,8 +107,10 @@ run_tool_in_env() {
   local tool="$1"
   shift
   if [[ "$RUNTIME_MANAGER" == "current" ]]; then
-    if [[ "$tool" == "torchrun" && -n "$CURRENT_TORCHRUN_BIN" ]]; then
-      "$CURRENT_TORCHRUN_BIN" "$@"
+    if [[ "$tool" == "torchrun" ]]; then
+      # Avoid executing .venv/bin/torchrun directly: very long venv paths can
+      # exceed the kernel shebang limit and fail with "bad interpreter".
+      "$CURRENT_PYTHON_BIN" -m torch.distributed.run "$@"
     else
       "$tool" "$@"
     fi
@@ -269,9 +257,7 @@ echo "Runtime      : $RUNTIME_MANAGER"
 if [[ "$RUNTIME_MANAGER" == "current" ]]; then
   echo "Python       : $CURRENT_PYTHON_BIN"
   echo "Python ver   : $("$CURRENT_PYTHON_BIN" --version 2>&1)"
-  if [[ -n "$CURRENT_TORCHRUN_BIN" ]]; then
-    echo "Torchrun     : $CURRENT_TORCHRUN_BIN"
-  fi
+  echo "DDP launcher : $CURRENT_PYTHON_BIN -m torch.distributed.run"
 fi
 if [[ "$RUNTIME_MANAGER" == "uv" ]]; then
   echo "UV project   : $UV_PROJECT_DIR"
