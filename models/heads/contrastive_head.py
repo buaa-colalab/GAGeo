@@ -8,6 +8,7 @@ Uses momentum key encoder + queue following MoCo (https://arxiv.org/abs/1911.057
 """
 
 import copy
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -68,8 +69,13 @@ class CrossViewContrastiveHead(nn.Module):
     @torch.no_grad()
     def _dequeue_and_enqueue(self, keys: torch.Tensor):
         """Update queue with new key embeddings. keys: [B, proj_dim]"""
-        # Gather keys from all GPUs if distributed
-        keys = _concat_all_gather(keys)
+        # Keep the queue update local by default under DDP. Calling all_gather
+        # inside every forward makes the training loop fragile: if any rank is
+        # delayed by data loading or skips the contrastive path, all other ranks
+        # block in this extra collective. Local queues are sufficient for the
+        # MoCo loss and avoid an avoidable NCCL failure point.
+        if os.environ.get("GAGEO_CONTRASTIVE_ALL_GATHER", "0").lower() in {"1", "true", "yes", "on"}:
+            keys = _concat_all_gather(keys)
         
         batch_size = keys.shape[0]
         ptr = int(self.queue_ptr)

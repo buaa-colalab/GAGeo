@@ -418,7 +418,7 @@ def train_one_epoch(
         avg = value / denom
         avg_losses[key] = reduce_mean_scalar(avg, device, world_size)
     if writer is not None:
-        wandb_log(writer, {f"train/{key}": value for key, value in avg_losses.items()}, step=epoch)
+        wandb_log(writer, {f"train/{key}": value for key, value in avg_losses.items()}, step=global_step)
     return avg_losses, global_step
 
 
@@ -433,6 +433,7 @@ def validate(
     writer,
     is_main_process: bool,
     world_size: int,
+    log_step: int | None = None,
 ):
     model.eval()
 
@@ -528,7 +529,7 @@ def validate(
         avg_losses["mask_iou_avg"] = (metrics_tensor[4] / metrics_tensor[5]).item()
 
     if writer is not None:
-        wandb_log(writer, {f"val/{key}": value for key, value in avg_losses.items()}, step=epoch)
+        wandb_log(writer, {f"val/{key}": value for key, value in avg_losses.items()}, step=log_step if log_step is not None else epoch)
     return avg_losses
 
 
@@ -806,7 +807,17 @@ def main():
             )
 
     if is_distributed:
-        model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
+        # The contrastive head owns a MoCo queue buffer that is intentionally
+        # updated locally on each rank. Do not broadcast rank0 buffers every
+        # forward, otherwise local queues would be overwritten and DDP would add
+        # unnecessary synchronization around non-parameter state.
+        model = DDP(
+            model,
+            device_ids=[local_rank],
+            output_device=local_rank,
+            find_unused_parameters=True,
+            broadcast_buffers=False,
+        )
 
     num_epochs = cfg["training"]["num_epochs"]
     warmup_epochs = cfg["training"]["warmup_epochs"]
@@ -902,6 +913,7 @@ def main():
                 writer=writer,
                 is_main_process=is_main_process,
                 world_size=world_size,
+                log_step=global_step,
             )
             if is_main_process:
                 print("Val   - " + ", ".join([f"{k}: {v:.4f}" for k, v in val_losses.items()]))
