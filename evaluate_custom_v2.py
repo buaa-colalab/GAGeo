@@ -91,13 +91,23 @@ def load_cfg_with_env(config_path: str) -> Dict[str, Any]:
     with open(config_path, "r", encoding="utf-8") as f:
         cfg = json.load(f) if config_path.endswith(".json") else __import__("yaml").safe_load(f)
 
+    checkpoint_dir = Path(os.environ.get("CHECKPOINT_DIR", "/mnt/data/wrp/checkpoints_offline")).expanduser()
+
     def _expand(obj):
         if isinstance(obj, dict):
             return {k: _expand(v) for k, v in obj.items()}
         if isinstance(obj, list):
             return [_expand(v) for v in obj]
         if isinstance(obj, str):
-            return os.path.expandvars(obj)
+            value = os.path.expandvars(obj)
+            # Checkpoints copied from remote machines may leave absolute paths
+            # baked into config.yaml.  For offline rebuttal evaluation, resolve
+            # those filenames against the local CHECKPOINT_DIR instead.
+            if "/checkpoints_offline/" in value:
+                return str(checkpoint_dir / value.rsplit("/checkpoints_offline/", 1)[1])
+            if "/GaGeo/ckpt/" in value:
+                return str(checkpoint_dir / value.rsplit("/GaGeo/ckpt/", 1)[1])
+            return value
         return obj
 
     return _expand(cfg)
@@ -636,6 +646,7 @@ def build_model_from_cfg(cfg: Dict[str, Any], device: torch.device):
         adapter_depth=mc.get("adapter_depth", 36),
         adapter_num_heads=mc.get("adapter_num_heads", 16),
         use_frame_pos_embed=mc.get("use_frame_pos_embed", False),
+        use_spatial_bbox_head=mc.get("use_spatial_bbox_head", False),
     )
 
     model.to(device)
@@ -862,6 +873,7 @@ def save_results_json(all_results: Dict[str, Dict[str, OrderedDict]], path: str)
 def parse_args():
     ws_dir = get_workspace_dir()
     output_dir = ws_dir / "output_v3"
+    checkpoint_dir = Path(os.environ.get("CHECKPOINT_DIR", "/mnt/data/wrp/GaGeo/ckpt")).expanduser()
     p = argparse.ArgumentParser(description="Evaluate Cross-View Localizer V3 (grouped metrics)")
     p.add_argument("--config", type=str, default=str(output_dir / "config.yaml"))
     p.add_argument("--checkpoint", type=str, default=str(output_dir / "best"))
@@ -875,10 +887,11 @@ def parse_args():
     p.add_argument(
         "--sam_checkpoint",
         type=str,
-        default="/mnt/data/wrp/GaGeo/ckpt/sam2.1_hiera_large.pt",
+        default=str(checkpoint_dir / "sam2.1_hiera_large.pt"),
         help="segment-anything/SAM2 checkpoint path",
     )
     p.add_argument("--sam_model_type", type=str, default="vit_h", choices=["vit_h", "vit_l", "vit_b"])
+    p.add_argument("--skip_sam", action="store_true", help="Skip SAM post-processing and report model-mask metrics only.")
     p.add_argument("--view_subset", type=str, default="all",
                    help="Evaluation subset: all | drone_to_satellite(d2s) | ground_to_satellite(g2s)")
     p.add_argument("--save_json", type=str, default="")
@@ -941,21 +954,33 @@ def main():
         print("Missing sample:", missing[:8])
         print("Unexpected sample:", unexpected[:8])
 
-    # load SAM
-    print("\n[2/3] Loading SAM ...")
-    _cvos_dir = str(ws_dir.parents[1] / "baseline" / "CVOS-Code")
-    import sys
-    if os.path.isdir(_cvos_dir):
-        sys.path.insert(0, _cvos_dir)
-    from segment_anything import sam_model_registry, SamPredictor
+    # load SAM only when explicitly needed.  The rebuttal table uses the model
+    # mask mIoU, so skipping SAM avoids an unnecessary dependency and memory hit.
+    sam_predictor = None
+    use_sam = not args.skip_sam
+    if use_sam:
+        print("\n[2/3] Loading SAM ...")
+        import sys
 
-    sam = sam_model_registry[args.sam_model_type](checkpoint=args.sam_checkpoint)
-    sam.to(device)
-    sam.eval()
-    for p in sam.parameters():
-        p.requires_grad = False
-    sam_predictor = SamPredictor(sam)
+        for candidate in (
+            ws_dir.parent / "CVOS-Code",
+            ws_dir.parent / "baseline" / "CVOS-Code",
+            ws_dir.parents[1] / "baseline" / "CVOS-Code",
+        ):
+            if candidate.is_dir():
+                sys.path.insert(0, str(candidate))
+        from segment_anything import sam_model_registry, SamPredictor
 
+        sam = sam_model_registry[args.sam_model_type](checkpoint=args.sam_checkpoint)
+        sam.to(device)
+        sam.eval()
+        for p in sam.parameters():
+            p.requires_grad = False
+        sam_predictor = SamPredictor(sam)
+    else:
+        print("\n[2/3] Skipping SAM; evaluating model masks only.")
+
+    json_root = Path(os.environ.get("JSON_ROOT", str(ws_dir / "data"))).expanduser()
     split_to_json = {
         "val": "val_all.json",
         "test": "test_all.json",
@@ -970,7 +995,7 @@ def main():
             print(f"Skip unknown split: {split}")
             continue
 
-        json_path = ws_dir / "data" / split_to_json[split]
+        json_path = json_root / split_to_json[split]
         if not json_path.exists():
             print(f"Skip missing file: {json_path}")
             continue
@@ -1006,12 +1031,12 @@ def main():
                 loader=loader,
                 img_size=img_size,
                 device=device,
-                use_sam=True,
+                use_sam=use_sam,
                 prompt_type=prompt_type,
             )
             dt = time.time() - t0
 
-            print_grouped(results, split_name=split, prompt_type=prompt_type, has_model_mask=True, has_sam=True)
+            print_grouped(results, split_name=split, prompt_type=prompt_type, has_model_mask=True, has_sam=use_sam)
             print(f"Split {split} | prompt={prompt_type} done in {dt:.1f}s")
             all_results[split][prompt_type] = results
 

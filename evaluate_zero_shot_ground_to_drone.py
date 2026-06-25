@@ -94,13 +94,23 @@ def load_cfg_with_env(config_path: str) -> Dict[str, Any]:
     with open(config_path, "r", encoding="utf-8") as f:
         cfg = json.load(f) if config_path.endswith(".json") else __import__("yaml").safe_load(f)
 
+    checkpoint_dir = Path(os.environ.get("CHECKPOINT_DIR", "/mnt/data/wrp/checkpoints_offline")).expanduser()
+
     def _expand(obj):
         if isinstance(obj, dict):
             return {k: _expand(v) for k, v in obj.items()}
         if isinstance(obj, list):
             return [_expand(v) for v in obj]
         if isinstance(obj, str):
-            return os.path.expandvars(obj)
+            value = os.path.expandvars(obj)
+            # Configs saved on a training machine can contain absolute
+            # checkpoint paths.  Re-root checkpoint filenames to the current
+            # offline checkpoint directory for portable evaluation.
+            if "/checkpoints_offline/" in value:
+                return str(checkpoint_dir / value.rsplit("/checkpoints_offline/", 1)[1])
+            if "/GaGeo/ckpt/" in value:
+                return str(checkpoint_dir / value.rsplit("/GaGeo/ckpt/", 1)[1])
+            return value
         return obj
 
     return _expand(cfg)
@@ -229,6 +239,7 @@ def build_model_from_cfg(cfg: Dict[str, Any], device: torch.device):
         adapter_depth=mc.get("adapter_depth", 36),
         adapter_num_heads=mc.get("adapter_num_heads", 16),
         use_frame_pos_embed=mc.get("use_frame_pos_embed", False),
+        use_spatial_bbox_head=mc.get("use_spatial_bbox_head", False),
     )
 
     model.to(device)
@@ -275,11 +286,27 @@ class GroundDroneTripletDataset(Dataset):
             raise FileNotFoundError(f"Image not found: {path}")
         return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
+    def _resolve_path(self, rel_path: str) -> Path:
+        path = self.root_dir / rel_path
+        if path.exists():
+            return path
+        fallback = str(rel_path)
+        replacements = {
+            "test/drone/": "test/gallery_drone/",
+            "test/street/": "test/query_street/",
+        }
+        for old, new in replacements.items():
+            if fallback.startswith(old):
+                candidate = self.root_dir / fallback.replace(old, new, 1)
+                if candidate.exists():
+                    return candidate
+        return path
+
     def __getitem__(self, idx: int):
         item = self.samples[idx]
 
-        ground_path = self.root_dir / item["ground_image"]
-        drone_path = self.root_dir / item["drone_image"]
+        ground_path = self._resolve_path(item["ground_image"])
+        drone_path = self._resolve_path(item["drone_image"])
 
         ground = self._load_rgb(ground_path)
         drone = self._load_rgb(drone_path)
