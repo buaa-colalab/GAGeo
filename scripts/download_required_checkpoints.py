@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Collect all pretrained checkpoints needed by rebuttal training scripts.
+"""Collect pretrained checkpoints needed by the public GAGeo training config.
 
 The training configs in this repo expect these filenames under CHECKPOINT_DIR:
   - pi3_model.safetensors
@@ -110,7 +110,7 @@ def maybe_download_pi3_from_hf(dst, repo_id, filename, repo_type="model"):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output_dir", default="/mnt/data/wrp/checkpoints_offline")
+    parser.add_argument("--output_dir", default=str(Path.cwd() / "checkpoints_offline"))
     parser.add_argument(
         "--hf_repo",
         default="",

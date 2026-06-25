@@ -3,8 +3,6 @@ MoCo-style Cross-View Contrastive Learning Head
 
 Satellite features as anchor (query), mono features as key.
 Uses momentum key encoder + queue following MoCo (https://arxiv.org/abs/1911.05722).
-
-把 satellite 当作 anchor，训练 ground-satellite / drone-satellite 后可泛化到 ground-drone。
 """
 
 import copy

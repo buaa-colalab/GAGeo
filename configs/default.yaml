@@ -1,112 +1,138 @@
-# Cross-View Localization Configuration
+# GAGeo configuration
+# Unified backbone architecture with token injection + attention masks
 
 # Data
 data:
-  #train_json: "${ROOT_DIR}/${WORKSPACE_NAME}/data/single.json"
-  train_json: "${ROOT_DIR}/${WORKSPACE_NAME}/data/train_all.json"
-  #val_json: "${ROOT_DIR}/${WORKSPACE_NAME}/data/single.json"
-  val_json: "${ROOT_DIR}/${WORKSPACE_NAME}/data/val_all.json"
-  data_root: "${ROOT_DIR}/data"
+  train_json: "${JSON_ROOT}/train_all.json"
+  val_json: "${JSON_ROOT}/val_all.json"
+  data_root: "${DATA_ROOT}"
   img_size: 518
   crop_size: 518
-  num_workers: 24  # Reduced from 4 to prevent thread exhaustion with 8 GPUs
-  train_direction: 'mono_to_sat'  # 'mono_to_sat', 'sat_to_mono', 'both' for bidirectional training
-  val_direction: 'mono_to_sat'  # 'mono_to_sat', 'sat_to_mono', 'both' for bidirectional training
+  num_workers: 24
+  # Dataset split:
+  # all | drone_to_satellite (d2s) | ground_to_satellite (g2s)
+  train_subset: all
+  val_subset: all
+  # Legacy fields kept for backward compatibility with older scripts.
+  train_direction: 'mono_to_sat'
+  val_direction: 'mono_to_sat'
 
 # Model
 model:
   # Pi3 backbone settings
   decoder_size: 'large'  # 'small', 'base', 'large'
-  
-  # Two-Stage Cross-Attention 参数
-  num_intent_queries: 32  # Stage 1: 可学习的Intent Queries数量
-  num_object_queries: 10  # Stage 2: Object detection queries数量
-  num_location_queries: 16  # Stage 2: Location queries数量
-  
-  # Transformer 参数
-  num_heads: 8  # Attention heads数量 (prompt_fusion和query_decoder共用)
-  prompt_fusion_layers: 3  # Stage 1: Intent Formation的decoder层数
-  num_decoder_layers: 6  # Stage 2: Query Decoder的decoder层数
-  dropout: 0.1  # Dropout rate
-  
-  # Pi3 预训练权重
-  pi3_weights: "${ROOT_DIR}/${WORKSPACE_NAME}/ckpt/pi3/model.safetensors"
-  freeze_dinov2: true  # 冻结DINOv2 encoder部分
-  freeze_decoder: false  # Pi3 decoder可训练
-  freeze_prompt_encoder: true  # 冻结SAM Prompt Encoder (projection层保持可训练)
-  load_camera_head_weights: true  # 从Pi3 checkpoint加载camera head权重
-  
-  # SAM2 预训练权重 (Prompt Encoder)
-  sam_weights: "${ROOT_DIR}/../sam2/checkpoints/sam2.1_hiera_large.pt"
-  sam_embed_dim: 256  # SAM native dimension, 内部256-dim + projection到2048
-  
-  # 对比学习 (MoCo-style)
+
+  # Token injection settings
+  # Total learnable queries = num_bbox_mask_queries + num_heatmap_queries.
+  # Keep num_learnable_tokens for backward compatibility with old scripts.
+  num_bbox_mask_queries: 1
+  num_heatmap_queries: 1
+  num_learnable_tokens: 2
+
+  # Training switches
+  use_deep_supervision: true
+  use_contrastive_loss: true
+
+  # Deep supervision (0-indexed pair-layers: one local+global = one layer)
+  supervision_layers: [4, 11, 17]  # Early, Mid, Late
+  supervision_weights: [0.1, 0.3, 0.6]  # Increasing weights
+
+  # Pi3 pretrained weights
+  pi3_weights: "${CHECKPOINT_DIR}/pi3_model.safetensors"
+  freeze_encoder: true  # Freeze visual encoder
+  freeze_decoder: false  # Pi3 decoder trainable (with low LR)
+  freeze_prompt_encoder: true  # Freeze SAM prompt encoder (keep projections trainable)
+  freeze_mask_conv: true  # Freeze SAM mask downscaling conv layers
+  load_camera_head_weights: true  # Load Pi3 camera head pretrained weights
+
+  # SAM2 pretrained weights
+  sam_weights: "${CHECKPOINT_DIR}/sam2.1_hiera_large.pt"
+  sam_embed_dim: 256  # SAM internal dimension
+
+  # Contrastive (MoCo-style)
   contrastive: true
   contrastive_proj_dim: 256
   contrastive_queue_size: 16384
   contrastive_momentum: 0.999
   contrastive_temperature: 0.07
 
+  # Dropout
+  dropout: 0.1
+  # Mask injection strategy:
+  # - global_kv: inject dense mask embedding only into global-attn K (default)
+  # - pre_backbone: inject dense mask embedding to front tokens before decoder
+  mask_inject_mode: global_kv
+  # Global attention mask switch
+  use_global_attn_mask: true
+
 # Training
 training:
-  batch_size: 2
+  batch_size: 3
   gradient_accumulation_steps: 4
-  num_epochs: 20
-  
-  # 学习率
-  lr_backbone: 1.0e-5
-  lr_heads: 1.0e-4
+  num_epochs: 30
+
+  # 3-group learning rate strategy
+  lr_backbone: 1.0e-5     # Low LR: Pi3 encoder + decoder (pretrained)
+  lr_new_tokens: 5.0e-4   # Mid LR: Learnable queries, intermediate projections, prompt projections
+  lr_heads: 1.0e-4        # High LR: Task heads + intermediate supervision heads
   weight_decay: 1.0e-4
-  
-  # Loss权重
+
+  # Loss weights (final predictions)
   weight_bbox: 5.0
   weight_giou: 2.0
-  weight_heatmap: 0.05
-  weight_rotation: 0.05  # geodesic distance on SO(3)
-  weight_contrastive: 0.05  # MoCo cross-view contrastive loss (降低以减少epoch边界跳变)
-  weight_class: 2.0  # Focal loss for object vs no-object classification
-  
-  # Heatmap Loss 参数
-  heatmap_sigma: 0.05  # Gaussian sigma (0.05 = ~77px on 518, 比0.02更稳定)
-  heatmap_label_smooth: 0.01  # Label smoothing 防止KL散度爆炸
-  
+  weight_mask_bce: 2.0    # SAM-style mask BCE loss
+  weight_mask_dice: 5.0   # SAM-style mask Dice loss
+  weight_heatmap: 0.1
+  weight_rotation: 0.1
+  weight_contrastive: 0.1
+  weight_class: 2.0
+
+  # Pose-related supervision switches
+  use_rot_pos_supervision: true
+  use_heatmap_loss: true
+
   # Rotation Loss
-  smooth_rotation: true  # 使用1-cos(angle)替代arccos, 避免梯度爆炸
-  
-  # Hungarian Matcher 代价权重
+  smooth_rotation: true
+
+  # Hungarian Matcher
   matcher_cost_class: 1.0
   matcher_cost_bbox: 5.0
   matcher_cost_giou: 2.0
-  
+
   # Optimizer
   optimizer: "adamw"
-  
+
   # Scheduler
   scheduler: "cosine"
   warmup_epochs: 5
   min_lr: 1.0e-6
-  
-  # 梯度裁剪
+
+  # Gradient clipping
   grad_clip: 1.0
-  
-  # 混合精度训练 (推荐bf16用于RTX 4090)
+
+  # Mixed precision (bf16 for RTX 5090)
   use_amp: true
-  mixed_precision: bf16  # "bf16" or "fp16"
-  gpu: "0,1,2,3,4,5,6,7"  # 使用所有8张GPU
+  mixed_precision: bf16
+  gpu: "0,1,2,3,4,5,6,7"
+
+  # Speed optimizations
+  compile_encoder: false         # Multi-GPU/DeepSpeed may hit inductor(triton) cache issues
+  gradient_checkpointing: false  # Enable to save VRAM and allow larger batch_size
 
 # Checkpointing
 checkpoint:
-  output_dir: "${ROOT_DIR}/${WORKSPACE_NAME}/output"
+  output_dir: "${OUTPUT_ROOT}"
   save_freq: 5
   resume: null
 
 # Logging
 logging:
-  log_freq: 50  # 每N个optimizer step记录一次TensorBoard (step-level曲线)
-  val_freq: 1  # 每N个epoch验证一次
-  use_tensorboard: true
-  
-  # 可视化设置
-  visualize: true  # 是否启用可视化
-  vis_samples: 10  # 可视化样本数量
-  vis_prompt_types: ['point', 'bbox', 'mask']  # 可视化的prompt类型列表
+  log_freq: 50
+  val_freq: 1
+  use_wandb: true
+  wandb_project: "gageo"
+  use_tensorboard: false
+
+  visualize: true
+  vis_samples: 10
+  vis_prompt_types: ['point', 'bbox', 'mask']

@@ -17,6 +17,7 @@ import subprocess
 import time
 from collections import defaultdict, deque
 import datetime
+import logging
 import pickle
 from typing import Optional, List
 
@@ -25,6 +26,8 @@ import torch.nn as nn
 import torch.distributed as dist
 from torch import Tensor
 import torchvision
+
+logger = logging.getLogger(__name__)
 
 
 class SmoothedValue(object):
@@ -275,6 +278,59 @@ def collate_fn(batch):
     return tuple(batch)
 
 
+def get_param_groups(
+    model: nn.Module,
+    lr_backbone: float = 1e-5,
+    lr_heads: float = 1e-4,
+    weight_decay: float = 0.01,
+    lr_new_tokens: float | None = None,
+) -> list[dict]:
+    """Build optimizer parameter groups for pretrained and newly initialized modules."""
+    new_token_patterns = (
+        "backbone.learnable_queries",
+        "backbone.register_token",
+        "backbone.intermediate_projs.",
+        "backbone.prompt_proj.",
+        "prompt_encoder.sparse_proj",
+        "prompt_encoder.dense_proj",
+    )
+
+    backbone_params = []
+    new_token_params = []
+    head_params = []
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+
+        is_new_token = any(name.startswith(pat) or f".{pat}" in name for pat in new_token_patterns)
+        if lr_new_tokens is not None and is_new_token:
+            new_token_params.append(param)
+        elif name.startswith("backbone."):
+            backbone_params.append(param)
+        else:
+            head_params.append(param)
+
+    param_groups = []
+    if backbone_params:
+        param_groups.append({"params": backbone_params, "lr": lr_backbone, "weight_decay": weight_decay})
+    if new_token_params and lr_new_tokens is not None:
+        param_groups.append({"params": new_token_params, "lr": lr_new_tokens, "weight_decay": weight_decay})
+    if head_params:
+        param_groups.append({"params": head_params, "lr": lr_heads, "weight_decay": weight_decay})
+
+    num_backbone = sum(p.numel() for p in backbone_params)
+    num_new_tokens = sum(p.numel() for p in new_token_params)
+    num_heads = sum(p.numel() for p in head_params)
+    log_parts = [f"backbone ({num_backbone / 1e6:.2f}M params, lr={lr_backbone})"]
+    if lr_new_tokens is not None:
+        log_parts.append(f"new_tokens ({num_new_tokens / 1e6:.2f}M params, lr={lr_new_tokens})")
+    log_parts.append(f"heads ({num_heads / 1e6:.2f}M params, lr={lr_heads})")
+    logger.info("Param groups: %s, groups=%d", ", ".join(log_parts), len(param_groups))
+
+    return param_groups
+
+
 def _max_by_axis(the_list):
     # type: (List[List[int]]) -> List[int]
     maxes = the_list[0]
@@ -483,4 +539,3 @@ def inverse_sigmoid(x, eps=1e-5):
     x1 = x.clamp(min=eps)
     x2 = (1 - x).clamp(min=eps)
     return torch.log(x1/x2)
-

@@ -22,17 +22,17 @@ def main():
         cfg = yaml.safe_load(f) or {}
 
     defaults = {
-        "ROOT_DIR": os.environ.get("ROOT_DIR", "/mnt/data/wrp"),
-        "WORKSPACE_NAME": os.environ.get("WORKSPACE_NAME", "location_v4"),
-        "CHECKPOINT_DIR": os.environ.get("CHECKPOINT_DIR", "/mnt/data/wrp/checkpoints_offline"),
-        "DATA_ROOT": os.environ.get("DATA_ROOT", "/mnt/data/wrp/eccv_data/data/urban"),
-        "JSON_ROOT": os.environ.get("JSON_ROOT", "/mnt/data/wrp/eccv_data/data/json"),
+        "ROOT_DIR": os.environ.get("ROOT_DIR", str(Path.cwd().parent)),
+        "WORKSPACE_NAME": os.environ.get("WORKSPACE_NAME", Path.cwd().name),
+        "CHECKPOINT_DIR": os.environ.get("CHECKPOINT_DIR", str(Path.cwd() / "checkpoints_offline")),
     }
     defaults["WORKSPACE_DIR"] = os.environ.get(
         "WORKSPACE_DIR", "{}/{}".format(defaults["ROOT_DIR"], defaults["WORKSPACE_NAME"])
     )
+    defaults["DATA_ROOT"] = os.environ.get("DATA_ROOT", "{}/data/urban".format(defaults["WORKSPACE_DIR"]))
+    defaults["JSON_ROOT"] = os.environ.get("JSON_ROOT", "{}/data/json".format(defaults["WORKSPACE_DIR"]))
     defaults["OUTPUT_ROOT"] = os.environ.get(
-        "OUTPUT_ROOT", "{}/output_v3".format(defaults["WORKSPACE_DIR"])
+        "OUTPUT_ROOT", "{}/outputs".format(defaults["WORKSPACE_DIR"])
     )
 
     value = str((cfg.get("checkpoint") or {}).get("output_dir") or "").strip()

@@ -3,6 +3,7 @@
 
 import os
 import sys
+from pathlib import Path
 
 import yaml
 
@@ -34,14 +35,14 @@ def main():
         cfg = yaml.safe_load(f) or {}
 
     defaults = {
-        "ROOT_DIR": os.environ.get("ROOT_DIR", "/mnt/data/wrp"),
-        "WORKSPACE_NAME": os.environ.get("WORKSPACE_NAME", "location_v4"),
-        "WORKSPACE_DIR": os.environ.get("WORKSPACE_DIR", "/mnt/data/wrp/location_v4"),
-        "CHECKPOINT_DIR": os.environ.get("CHECKPOINT_DIR", "/mnt/data/wrp/checkpoints_offline"),
-        "DATA_ROOT": os.environ.get("DATA_ROOT", "/mnt/data/wrp/eccv_data/data/urban"),
-        "JSON_ROOT": os.environ.get("JSON_ROOT", "/mnt/data/wrp/eccv_data/data/json"),
-        "OUTPUT_ROOT": os.environ.get("OUTPUT_ROOT", "/mnt/data/wrp/location_v4/output_v3"),
+        "ROOT_DIR": os.environ.get("ROOT_DIR", str(Path.cwd().parent)),
+        "WORKSPACE_NAME": os.environ.get("WORKSPACE_NAME", Path.cwd().name),
+        "WORKSPACE_DIR": os.environ.get("WORKSPACE_DIR", str(Path.cwd())),
+        "CHECKPOINT_DIR": os.environ.get("CHECKPOINT_DIR", str(Path.cwd() / "checkpoints_offline")),
     }
+    defaults["DATA_ROOT"] = os.environ.get("DATA_ROOT", "{}/data/urban".format(defaults["WORKSPACE_DIR"]))
+    defaults["JSON_ROOT"] = os.environ.get("JSON_ROOT", "{}/data/json".format(defaults["WORKSPACE_DIR"]))
+    defaults["OUTPUT_ROOT"] = os.environ.get("OUTPUT_ROOT", "{}/outputs".format(defaults["WORKSPACE_DIR"]))
 
     data = cfg.get("data", {})
     model = cfg.get("model", {})
@@ -58,7 +59,7 @@ def main():
     require_file(val_json, "val_json", errors)
     require_dir(data_root, "data_root", errors)
 
-    for key in ("pi3_weights", "sam_weights", "joint_vit_weights"):
+    for key in ("pi3_weights", "sam_weights"):
         value = expand_value(model.get(key), defaults)
         if value:
             require_file(value, key, errors)

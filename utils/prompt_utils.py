@@ -1,6 +1,4 @@
-"""
-Prompt utilities for training with random prompt combination
-"""
+"""Prompt utilities for random or fixed prompt selection during training."""
 
 import random
 import torch
@@ -8,7 +6,7 @@ from typing import Dict, List, Optional, Tuple
 
 
 def _get_point_prompt(batch: Dict, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
-    """获取 point prompt"""
+    """Return a point prompt as coordinates and labels."""
     B = batch['front_view'].shape[0]
     prompt_point = batch['mono_point'].to(device)
     point_coords = prompt_point.unsqueeze(1)  # [B, 1, 2]
@@ -17,7 +15,7 @@ def _get_point_prompt(batch: Dict, device: torch.device) -> Tuple[torch.Tensor, 
 
 
 def _get_bbox_prompt(batch: Dict, device: torch.device) -> torch.Tensor:
-    """获取 bbox prompt，转换为像素空间 [x, y, w, h] 格式。"""
+    """Return a bbox prompt in pixel-space [x, y, w, h] format."""
     B = batch['front_view'].shape[0]
     prompt_bbox = batch['mono_bbox'].to(device)  # [B, 4] normalized [cx, cy, w, h]
     H = batch['front_view'].shape[-2]
@@ -40,7 +38,7 @@ def _get_bbox_prompt(batch: Dict, device: torch.device) -> torch.Tensor:
 
 
 def _assert_bbox_prompt_xywh_pixel(boxes: torch.Tensor, batch: Dict) -> None:
-    """断言 bbox prompt 为像素空间 [x, y, w, h]。"""
+    """Validate that bbox prompts are pixel-space [x, y, w, h]."""
     if boxes is None:
         return
     if boxes.dim() != 3 or boxes.shape[-1] != 4:
@@ -64,7 +62,7 @@ def _assert_bbox_prompt_xywh_pixel(boxes: torch.Tensor, batch: Dict) -> None:
 
 
 def _get_mask_prompt(batch: Dict, device: torch.device) -> torch.Tensor:
-    """获取 mask prompt"""
+    """Return a mask prompt."""
     return batch['mono_mask'].to(device)  # [B, 1, H, W]
 
 
@@ -76,21 +74,21 @@ def prepare_random_prompt(
     max_prompts: int = 1,
 ) -> Tuple[Optional[Tuple], Optional[torch.Tensor], Optional[torch.Tensor]]:
     """
-    随机选择一种 prompt 类型进行训练（互斥）
+    Randomly select exactly one prompt type for training.
     
     Args:
-        batch: 数据 batch
-        device: 设备
-        prompt_types: 可选的 prompt 类型列表
-        min_prompts: 最少使用的 prompt 数量（V3固定为1）
-        max_prompts: 最多使用的 prompt 数量（V3固定为1）
+        batch: input batch.
+        device: target device.
+        prompt_types: candidate prompt type list.
+        min_prompts: minimum number of prompts; forced to 1.
+        max_prompts: maximum number of prompts; forced to 1.
     
     Returns:
-        points: (coords, labels) 或 None
-        boxes: bbox tensor 或 None
-        masks: mask tensor 或 None
+        points: (coords, labels) or None.
+        boxes: bbox tensor or None.
+        masks: mask tensor or None.
     """
-    # V3: prompt 类型最多 1 个（point / bbox / mask 三选一）
+    # Use one prompt type at a time: point, bbox, or mask.
     max_prompts = 1
     min_prompts = 1
     num_prompts = random.randint(min_prompts, min(max_prompts, len(prompt_types)))
@@ -120,12 +118,12 @@ def prepare_single_prompt(
     prompt_type: str = 'point',
 ) -> Tuple[Optional[Tuple], Optional[torch.Tensor], Optional[torch.Tensor]]:
     """
-    准备单一类型的 prompt（用于稳定验证）
+    Prepare one fixed prompt type for validation.
     
     Args:
-        batch: 数据 batch
-        device: 设备
-        prompt_type: 'point', 'bbox', 或 'mask'
+        batch: input batch.
+        device: target device.
+        prompt_type: point, bbox, or mask.
     
     Returns:
         points, boxes, masks
@@ -151,11 +149,11 @@ def prepare_all_prompts(
     device: torch.device,
 ) -> Tuple[Tuple, torch.Tensor, torch.Tensor]:
     """
-    准备所有 prompt（用于完整测试）
+    Prepare all prompt types.
     
     Args:
-        batch: 数据 batch
-        device: 设备
+        batch: input batch.
+        device: target device.
     
     Returns:
         points: (coords, labels)

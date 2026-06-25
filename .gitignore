@@ -1,54 +1,44 @@
-# Large data files
-data/results.json
-
 # Python
 __pycache__/
 *.py[cod]
-*$py.class
 *.so
 .Python
+.venv/
 build/
-develop-eggs/
 dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
 *.egg-info/
-.installed.cfg
-*.egg
 
-# PyTorch
-*.pth
-*.pt
-ckpt/
-checkpoints/
-checkpoints_*/
-output/
-# Outputs
-output/
+# Runtime caches
+.cache/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright/
+
+# Data and generated artifacts
+data/urban
+data/json/*.json
+data/json/__pycache__/
 outputs/
+output/
 output_*/
 logs/
-
-
-
-data/val_all.json
-data/train_all.json
-data/test_all.json
-data/unseen_test_G.json
-data/unseen_test_D.json
-visualizations/
-data_preprocess/
-datasets/*
-.hopeignore
-ckpt
-*.json
 vis/
 vis_*/
-visualizations
+visualizations/
+work_dirs/
+
+# Checkpoints and model weights
+*.pt
+*.pth
+*.safetensors
+ckpt/
+checkpoint*/
+checkpoints*/
+checkpoints_offline
+GAGeo_ckpt/
+
+# Local editor and environment files
+.DS_Store
+*.swp
+.env
