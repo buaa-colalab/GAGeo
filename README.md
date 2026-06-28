@@ -22,17 +22,20 @@
 
 <div>
     <h4 align="center">
-        <a href="#installation">
-        <img src="https://img.shields.io/badge/Install-Guide-green">
+        <a href="https://buaa-colalab.github.io/GAGeo" target="_blank">
+        <img src="https://img.shields.io/badge/Project-Page-green">
         </a>
-        <a href="#pretrained-checkpoints">
-        <img src="https://img.shields.io/badge/Checkpoint-Available-yellow">
+        <a href="https://arxiv.org/abs/2606.xxxxx" target="_blank">
+        <img src="https://img.shields.io/badge/arXiv-2606.xxxxx-b31b1b.svg">
         </a>
-        <a href="#evaluation">
-        <img src="https://img.shields.io/badge/Evaluation-CMA--Loc-blue">
+        <a href="#citation">
+        <img src="https://img.shields.io/badge/Cite-BibTeX-blue">
         </a>
-        <a href="#training">
-        <img src="https://img.shields.io/badge/Training-Supported-red">
+        <a href="https://huggingface.co/datasets/buaa-colalab/CMA-Loc" target="_blank">
+        <img src="https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Dataset-yellow">
+        </a>
+        <a href="https://huggingface.co/buaa-colalab/GAGeo" target="_blank">
+        <img src="https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Model-orange">
         </a>
     </h4>
 </div>
@@ -41,19 +44,18 @@
 
 </div>
 
-## News
+## 📢 News
 
 * **[2026-06-25]** The public CMA-Loc training and evaluation code has been cleaned for release.
 * **[2026-06-25]** The released checkpoint has been reproduced on the CMA-Loc seen and unseen test splits.
 
-## Highlights
+## 💡 Highlights
 
 * **Geometry-aware single-stage localization.** GAGeo adapts a 3D foundation model backbone to cross-view object geo-localization and predicts boxes, masks, camera position, and pose in one forward pass.
 * **Multi-prompt target referring.** The model supports point, bounding-box, and mask prompts for both ground-to-satellite and drone-to-satellite localization.
 * **Unified CMA-Loc benchmark.** CMA-Loc provides ground-satellite and drone-satellite instance pairs with object masks, prompt annotations, and geometric supervision.
-* **Clean public code path.** This release keeps the CMA-Loc training and evaluation workflow, removes unsupported ablation branches, and uses a pure PyTorch RoPE implementation without a custom CUDA extension.
 
-## Usage
+## 🛠️ Usage
 
 ### Installation
 
@@ -86,16 +88,32 @@ RoPE is implemented in PyTorch and does not require building a custom CUDA exten
 
 ```text
 GAGeo/
-+-- configs/                  Training and evaluation configs
-+-- data/                     Local CMA-Loc annotations and images
-+-- datasets/                 CMA-Loc dataset loader
-+-- models/                   GAGeo model, backbone, prompt encoder, and heads
-+-- scripts/                  Training, evaluation, and checkpoint helper scripts
-+-- utils/                    Losses, metrics, prompts, and runtime helpers
-+-- train.py                  Accelerate/DeepSpeed training entrypoint
-+-- train_ddp.py              Native PyTorch DDP training entrypoint
-+-- evaluate_cmaloc.py        CMA-Loc evaluation entrypoint
-`-- GAGeo_ckpt/gageo/         Released GAGeo checkpoint location
+├── configs/                     # Training and evaluation configs
+│   ├── default.yaml             # Public CMA-Loc training/evaluation config
+│   └── accelerate_deepspeed_zero2.yaml
+├── data/
+│   ├── README.md
+│   ├── json/                    # CMA-Loc split annotations
+│   └── urban/                   # Local CMA-Loc images
+├── datasets/
+│   ├── __init__.py
+│   └── cmaloc.py                # CMA-Loc dataset loader
+├── models/
+│   ├── backbone/                # Pi3/DINOv2 backbone wrapper
+│   ├── decoder/                 # Mask and task decoders
+│   ├── encoder/                 # Prompt encoder
+│   ├── heads/                   # Detection, segmentation, and pose heads
+│   ├── layers/                  # Transformer and RoPE layers
+│   └── cross_view_localizer.py  # Main GAGeo model
+├── scripts/
+│   ├── train.sh
+│   ├── evaluate_cmaloc.sh
+│   └── download_required_checkpoints.py
+├── utils/                       # Losses, metrics, prompts, and runtime helpers
+├── train.py                     # Accelerate/DeepSpeed training entrypoint
+├── train_ddp.py                 # Native PyTorch DDP training entrypoint
+├── evaluate_cmaloc.py           # CMA-Loc evaluation entrypoint
+└── GAGeo_ckpt/gageo/            # Released GAGeo checkpoint location
 ```
 
 ---
@@ -106,16 +124,16 @@ Place the CMA-Loc data under the project data directory:
 
 ```text
 data/
-+-- json/
-|   +-- train_all.json
-|   +-- val_all.json
-|   +-- test_all.json
-|   `-- unseen_test.json
-`-- urban/
-    `-- <city>/
-        +-- mono/
-        +-- sate/
-        `-- crop_sate/
+├── json/
+│   ├── train_all.json
+│   ├── val_all.json
+│   ├── test_all.json
+│   └── unseen_test.json
+└── urban/
+    └── <city>/
+        ├── mono/
+        ├── sate/
+        └── crop_sate/
 ```
 
 The scripts use this layout by default:
@@ -214,7 +232,7 @@ Use `--view_subset drone_to_satellite` or `--view_subset ground_to_satellite` to
 
 ---
 
-## Reproduced CMA-Loc Results
+## 📊 Reproduced CMA-Loc Results
 
 Using `configs/default.yaml` and the released checkpoint at `GAGeo_ckpt/gageo/mp_rank_00_model_states.pt`, the retained CMA-Loc experiment reproduces the paper tables within rounding tolerance for point, box, and mask prompts on both seen and unseen splits.
 
@@ -227,7 +245,7 @@ outputs/reproduce_paper/cmaloc_unseen_test.json
 
 Note that `data/json/test_all.json` corresponds to the seen split, while `data/json/unseen_test.json` corresponds to the unseen split.
 
-## Citation
+## 📝 Citation
 
 If you find this work useful, please consider citing:
 
@@ -240,17 +258,16 @@ If you find this work useful, please consider citing:
 }
 ```
 
-## License
+## 📄 License
 
 Please refer to the project license file when it is released.
 
-## Acknowledgement
+## 🙏 Acknowledgement
 
 This project builds upon several excellent open-source projects and models:
 
 * [Pi3](https://github.com/yyfz/Pi3)
 * [DINOv2](https://github.com/facebookresearch/dinov2)
 * [SAM2](https://github.com/facebookresearch/sam2)
-* [Hugging Face Hub](https://huggingface.co)
 
 We thank the authors for releasing their code and models to the community.
