@@ -22,19 +22,19 @@
 
 <div>
     <h4 align="center">
-        <a href="https://buaa-colalab.github.io/GAGeo" target="_blank">
+        <a href="https://cipual.github.io/GAGeo-project-page/" target="_blank">
         <img src="https://img.shields.io/badge/Project-Page-green">
         </a>
-        <a href="https://arxiv.org/abs/2606.xxxxx" target="_blank">
-        <img src="https://img.shields.io/badge/arXiv-2606.xxxxx-b31b1b.svg">
+        <a href="https://arxiv.org/abs/2606.30576" target="_blank">
+        <img src="https://img.shields.io/badge/arXiv-2606.30576-b31b1b.svg">
         </a>
         <a href="#citation">
         <img src="https://img.shields.io/badge/Cite-BibTeX-blue">
         </a>
-        <a href="https://huggingface.co/datasets/buaa-colalab/CMA-Loc" target="_blank">
+        <a href="https://huggingface.co/datasets/cipual/CMA-Loc" target="_blank">
         <img src="https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Dataset-yellow">
         </a>
-        <a href="https://huggingface.co/buaa-colalab/GAGeo" target="_blank">
+        <a href="https://huggingface.co/cipual/GAGeo" target="_blank">
         <img src="https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Model-orange">
         </a>
     </h4>
@@ -46,8 +46,8 @@
 
 ## 📢 News
 
-* **[2026-06-25]** The public CMA-Loc training and evaluation code has been cleaned for release.
-* **[2026-06-25]** The released checkpoint has been reproduced on the CMA-Loc seen and unseen test splits.
+* **[2026-06-25]** The public training and evaluation code has been cleaned for release.
+* **[2026-06-18]** GAGeo was accepted by ECCV 2026. 🎉
 
 ## 💡 Highlights
 
